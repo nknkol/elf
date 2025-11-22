@@ -22,5 +22,6 @@ void	*z_mmap(void *addr, size_t length, int prot,
 int	z_munmap(void *addr, size_t length);
 int	z_mprotect(void *addr, size_t length, int prot);
 int	*z_perrno(void);
+int	z_prctl(int option, unsigned long arg2, unsigned long arg3);
 
 #endif /* Z_SYSCALLS_H */

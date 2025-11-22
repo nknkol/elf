@@ -80,7 +80,14 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 		if (z_read(fd, p + off, iter->p_filesz) !=
 				(ssize_t)iter->p_filesz)
 			goto err;
-		z_mprotect(p, sz, PFLAGS(iter->p_flags));
+		int prot = PFLAGS(iter->p_flags);
+		if (prot & PROT_EXEC) {
+			z_prctl(0x6a6974, 0, 0);
+		}
+		z_mprotect(p, sz, prot);
+		if (prot & PROT_EXEC) {
+			z_prctl(0x6a6974, 0, 1);
+		}
 	}
 
 	return (unsigned long)base;

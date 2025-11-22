@@ -44,6 +44,7 @@ DEF_SYSCALL3(int, lseek, int, fd, off_t, off, int, whence)
 DEF_SYSCALL1(int, exit, int, status)
 DEF_SYSCALL2(int, munmap, void *, addr, size_t, length)
 DEF_SYSCALL3(int, mprotect, void *, addr, size_t, length, int, prot)
+DEF_SYSCALL3(int, prctl, int, option, unsigned long, arg2, unsigned long, arg3)
 
 int z_open(const char * filename, int flags)
 {
