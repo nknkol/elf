@@ -2,6 +2,7 @@
 #include "z_syscalls.h"
 #include "z_utils.h"
 #include "z_elf.h"
+#include "hook.h"
 
 #define PAGE_SIZE	4096
 #define ALIGN		(PAGE_SIZE - 1)
@@ -27,7 +28,7 @@ static int check_ehdr(Elf_Ehdr *ehdr)
 		(ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN)) ? 0 : 1;
 }
 
-static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
+static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *payload_addr, size_t payload_sz)
 {
 	unsigned long minva, maxva;
 	Elf_Phdr *iter;
@@ -50,19 +51,16 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 	minva = TRUNC_PG(minva);
 	maxva = ROUND_PG(maxva);
 
-	/* For dynamic ELF let the kernel chose the address. */	
 	hint = dyn ? NULL : (void *)minva;
 	flags = dyn ? 0 : MAP_FIXED;
 	flags |= (MAP_PRIVATE | MAP_ANONYMOUS);
 
-	/* Check that we can hold the whole image. */
 	base = z_mmap(hint, maxva - minva, PROT_NONE, flags, -1, 0);
 	if (base == (void *)-1)
 		return -1;
 	z_munmap(base, maxva - minva);
 
 	flags = MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE;
-	/* Now map each segment separately in precalculated address. */
 	for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
 		unsigned long off, start;
 		if (iter->p_type != PT_LOAD)
@@ -80,7 +78,15 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 		if (z_read(fd, p + off, iter->p_filesz) !=
 				(ssize_t)iter->p_filesz)
 			goto err;
-		int prot = PFLAGS(iter->p_flags);
+		
+        int prot = PFLAGS(iter->p_flags);
+		
+        if ((prot & PROT_EXEC) && payload_addr) {
+            unsigned long seg_start = (unsigned long)(p + off);
+            size_t seg_size = iter->p_filesz;
+            install_hook((void*)seg_start, seg_size, payload_addr, payload_sz);
+        }
+
 		if (prot & PROT_EXEC) {
 			z_prctl(0x6a6974, 0, 0);
 		}
@@ -109,6 +115,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	const char *file;
 	ssize_t sz;
 	int argc, fd, i;
+    
+    /* Hook 变量 */
+    void *payload_addr = NULL;
+    size_t payload_sz = 0;
 
 	(void)fini;
 
@@ -124,8 +134,13 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		z_errx(1, "no input file");
 	file = argv[1];
 
+    z_printf("[Loader] Loading payload.bin...\n");
+    payload_addr = load_raw_payload("./payload.bin", &payload_sz);
+    if (!payload_addr) {
+        z_printf("[Loader] Warning: payload.bin not found or empty.\n");
+    }
+
 	for (i = 0;; i++, ehdr++) {
-		/* Open file, read and than check ELF header.*/
 		if ((fd = z_open(file, O_RDONLY)) < 0)
 			z_errx(1, "can't open %s", file);
 		if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
@@ -133,20 +148,18 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		if (!check_ehdr(ehdr))
 			z_errx(1, "bogus ELF header %s", file);
 
-		/* Read the program header. */
 		sz = ehdr->e_phnum * sizeof(Elf_Phdr);
 		phdr = z_alloca(sz);
 		if (z_lseek(fd, ehdr->e_phoff, SEEK_SET) < 0)
 			z_errx(1, "can't lseek to program header %s", file);
 		if (z_read(fd, phdr, sz) != sz)
 			z_errx(1, "can't read program header %s", file);
-		/* Time to load ELF. */
-		if ((base[i] = loadelf_anon(fd, ehdr, phdr)) == LOAD_ERR)
+        
+        /* 传递 payload 信息进 loadelf_anon */
+		if ((base[i] = loadelf_anon(fd, ehdr, phdr, payload_addr, payload_sz)) == LOAD_ERR)
 			z_errx(1, "can't load ELF %s", file);
 
-		/* Set the entry point, if the file is dynamic than add bias. */
 		entry[i] = ehdr->e_entry + (ehdr->e_type == ET_DYN ? base[i] : 0);
-		/* The second round, we've loaded ELF interp. */
 		if (file == elf_interp) {
 			z_close(fd);
 			break;
@@ -167,13 +180,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		}
 
 		z_close(fd);
-		/* Looks like the ELF is static -- leave the loop. */
 		if (elf_interp == NULL)
 			break;
 	}
 
-	/* Reassign some vectors that are important for
-	 * the dynamic linker and for lib C. */
 #define AVSET(t, v, expr) case (t): (v)->a_un.a_val = (expr); break
 	while (av->a_type != AT_NULL) {
 		switch (av->a_type) {
@@ -190,15 +200,11 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 #undef AVSET
 	++av;
 
-	/* Shift argv, env and av. */
 	z_memcpy(&argv[0], &argv[1],
 		 (unsigned long)av - (unsigned long)&argv[1]);
-	/* SP points to argc. */
 	(*sp)--;
 
 	z_trampo((void (*)(void))(elf_interp ?
 			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);
-	/* Should not reach. */
 	z_exit(0);
 }
-

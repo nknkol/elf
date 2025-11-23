@@ -1,6 +1,6 @@
 # make ARCH=i386 SMALL=1 DEBUG=1
 
-ARCH ?= amd64
+ARCH ?= aarch64
 
 ARCHS32 := i386
 ARCHS64 := amd64 aarch64
@@ -9,7 +9,10 @@ ARCHS := $(ARCHS32) $(ARCHS64)
 CFLAGS += -pipe -Wall -Wextra -fPIC -fno-ident -fno-stack-protector -U _FORTIFY_SOURCE
 LDFLAGS += -nostartfiles -nodefaultlibs -nostdlib 
 LDFLAGS += -pie -e z_start -Wl,-Bsymbolic,--no-undefined,--build-id=none
-TARGET := loader
+TARGET := elfloader
+
+PAYLOAD_DIR := payload
+PAYLOAD_BIN := $(PAYLOAD_DIR)/payload.bin
 
 ifeq "$(filter $(ARCH),$(ARCHS))" ""
   $(error ARCH='$(ARCH)' is not supported)
@@ -44,10 +47,14 @@ endif
 
 .PHONY: clean all
 
-all: $(TARGET)
+all: $(TARGET) $(PAYLOAD_BIN)
 
-loader: $(OBJS)
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(PAYLOAD_BIN):
+	$(MAKE) -C $(PAYLOAD_DIR) ARCH=$(ARCH) CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)"
 
 clean:
 	rm -rf *.o $(TARGET) */*.o
-
+	$(MAKE) -C $(PAYLOAD_DIR) clean
