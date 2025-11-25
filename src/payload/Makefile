@@ -1,14 +1,11 @@
-TARGET = payload.bin
+TARGET = payload.elf
 ELF = payload.elf
 
-SRC = entry.S payload.c mini_libc.c
+# Update Source List: Added syscall_disp.c and raw_syscall.S
+SRC = entry.S raw_syscall.S syscall_disp.c mini_libc.c
 OBJ = $(SRC:.c=.o)
 OBJ := $(OBJ:.S=.o)
-
-CC = aarch64-linux-gnu-gcc
-LD = aarch64-linux-gnu-ld
-OBJCOPY = aarch64-linux-gnu-objcopy
-CFLAGS = -Wall -O2 -fPIC -nostdlib -fno-stack-protector -fno-builtin -Isrc
+CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin -Isrc
 
 all: $(TARGET)
 
@@ -19,7 +16,9 @@ $(TARGET): $(ELF)
 
 $(ELF): $(OBJ)
 	@echo "Linking payload..."
-	$(LD) -e _start -Ttext 0x0 -o $(ELF) entry.o payload.o mini_libc.o
+	# Note: order matters for entry point, but we use -e _start so entry.o doesn't STRICTLY need to be first, 
+	# but it's good practice.
+	$(LD) -shared -Bsymbolic -e _start -o $@ $(OBJ)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

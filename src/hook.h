@@ -6,5 +6,6 @@
 
 void *load_raw_payload(const char *path, size_t *size_out);
 int install_hook(void *target_base, size_t target_size, void *payload_entry, size_t payload_size);
+void set_hook_range(int min, int max);
 
 #endif
