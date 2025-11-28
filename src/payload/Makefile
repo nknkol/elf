@@ -2,7 +2,7 @@ TARGET = payload.elf
 ELF = payload.elf
 
 # Update Source List: Added syscall_disp.c and raw_syscall.S
-SRC = entry.S raw_syscall.S syscall_disp.c mini_libc.c
+SRC = entry.S raw_syscall.S syscall_disp.c mini_libc.c reentry_guard.c
 OBJ = $(SRC:.c=.o)
 OBJ := $(OBJ:.S=.o)
 CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin -Isrc

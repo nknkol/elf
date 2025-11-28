@@ -93,12 +93,24 @@ slow_path:
     stp     q28, q29, [sp, #SIMD_AREA + 448]
     stp     q30, q31, [sp, #SIMD_AREA + 480]
 
+    /* Reentry guard: bail out if this thread is already inside the hook */
+    bl      reentry_try_enter
+    cbz     x0, reentry_bypass
+    mov     x19, x0
+
+    /* Restore syscall number after C call clobbered caller-saved x8 */
+    ldr     x8, [sp, #64]
+
     /* Call dispatcher: x0=syscall no, x1=pt_regs */
     mov     x0, x8
     mov     x1, sp
     bl      syscall_dispatcher
 
     /* Write back return value into saved context */
+    mov     x20, x0
+    mov     x0, x19
+    bl      reentry_leave
+    mov     x0, x20
     str     x0, [sp, #0]
 
     /* Restore SIMD/FP */
@@ -137,6 +149,44 @@ slow_path:
     ldp     x0, x1,   [sp, #0]
     add     sp, sp, #CTX_SIZE
     ret
+
+reentry_bypass:
+    /* Already handling a syscall in this thread: restore state and fall back */
+    ldp     q30, q31, [sp, #SIMD_AREA + 480]
+    ldp     q28, q29, [sp, #SIMD_AREA + 448]
+    ldp     q26, q27, [sp, #SIMD_AREA + 416]
+    ldp     q24, q25, [sp, #SIMD_AREA + 384]
+    ldp     q22, q23, [sp, #SIMD_AREA + 352]
+    ldp     q20, q21, [sp, #SIMD_AREA + 320]
+    ldp     q18, q19, [sp, #SIMD_AREA + 288]
+    ldp     q16, q17, [sp, #SIMD_AREA + 256]
+    ldp     q14, q15, [sp, #SIMD_AREA + 224]
+    ldp     q12, q13, [sp, #SIMD_AREA + 192]
+    ldp     q10, q11, [sp, #SIMD_AREA + 160]
+    ldp     q8, q9,   [sp, #SIMD_AREA + 128]
+    ldp     q6, q7,   [sp, #SIMD_AREA + 96]
+    ldp     q4, q5,   [sp, #SIMD_AREA + 64]
+    ldp     q2, q3,   [sp, #SIMD_AREA + 32]
+    ldp     q0, q1,   [sp, #SIMD_AREA + 0]
+
+    ldr     x30, [sp, #240]
+    ldp     x28, x29, [sp, #224]
+    ldp     x26, x27, [sp, #208]
+    ldp     x24, x25, [sp, #192]
+    ldp     x22, x23, [sp, #176]
+    ldp     x20, x21, [sp, #160]
+    ldp     x18, x19, [sp, #144]
+    ldp     x16, x17, [sp, #128]
+    ldp     x14, x15, [sp, #112]
+    ldp     x12, x13, [sp, #96]
+    ldp     x10, x11, [sp, #80]
+    ldp     x8, x9,   [sp, #64]
+    ldp     x6, x7,   [sp, #48]
+    ldp     x4, x5,   [sp, #32]
+    ldp     x2, x3,   [sp, #16]
+    ldp     x0, x1,   [sp, #0]
+    add     sp, sp, #CTX_SIZE
+    b       fast_passthrough
 
 fast_passthrough:
     svc     #0
