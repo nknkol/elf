@@ -1,14 +1,23 @@
 .text
     .align 4
     .global _start
+    .extern g_payload_config
 
 /* Syscall numbers of interest (AArch64) */
 .equ    SYS_getcwd,      17
+.equ    SYS_mknodat,     33
+.equ    SYS_mkdirat,     34
+.equ    SYS_unlinkat,    35
+.equ    SYS_linkat,      37
+.equ    SYS_renameat,    38
 .equ    SYS_faccessat,   48
+.equ    SYS_chdir,       49
 .equ    SYS_openat,      56
 .equ    SYS_close,       57
 .equ    SYS_write,       64
+.equ    SYS_symlinkat,   36
 .equ    SYS_newfstatat,  79
+.equ    SYS_readlinkat,  78
 .equ    SYS_exit,        93
 .equ    SYS_exit_group,  94
 .equ    SYS_rt_sigreturn,139
@@ -22,9 +31,9 @@
 _start:
     b       real_entry
 
-    /* Payload Header */
+    /* Payload Header: used by loader to find config block */
     .word   0x484F4F4B          /* Magic: "HOOK" */
-    .word   0x0                 /* Tail Offset unused */
+    .word   g_payload_config - _start /* Offset to config struct */
     .word   0x2                 /* Version: 2 (multi-point / stub-based) */
 
 real_entry:
@@ -33,26 +42,41 @@ real_entry:
     b.eq    fast_path_sigreturn
 
     /* Quick filter: only instrument syscalls we care about */
-    mov     x9, x8
-    cmp     x9, #SYS_getcwd
+    cmp     x8, #SYS_getcwd
     b.eq    slow_path
-    cmp     x9, #SYS_faccessat
+    cmp     x8, #SYS_mknodat
     b.eq    slow_path
-    cmp     x9, #SYS_openat
+    cmp     x8, #SYS_faccessat
     b.eq    slow_path
-    cmp     x9, #SYS_close
+    cmp     x8, #SYS_chdir
     b.eq    slow_path
-    cmp     x9, #SYS_write
+    cmp     x8, #SYS_mkdirat
     b.eq    slow_path
-    cmp     x9, #SYS_newfstatat
+    cmp     x8, #SYS_unlinkat
     b.eq    slow_path
-    cmp     x9, #SYS_exit
+    cmp     x8, #SYS_linkat
     b.eq    slow_path
-    cmp     x9, #SYS_exit_group
+    cmp     x8, #SYS_renameat
     b.eq    slow_path
-    cmp     x9, #SYS_execve
+    cmp     x8, #SYS_openat
     b.eq    slow_path
-    cmp     x9, #SYS_mprotect
+    cmp     x8, #SYS_close
+    b.eq    slow_path
+    cmp     x8, #SYS_write
+    b.eq    slow_path
+    cmp     x8, #SYS_symlinkat
+    b.eq    slow_path
+    cmp     x8, #SYS_readlinkat
+    b.eq    slow_path
+    cmp     x8, #SYS_newfstatat
+    b.eq    slow_path
+    cmp     x8, #SYS_exit
+    b.eq    slow_path
+    cmp     x8, #SYS_exit_group
+    b.eq    slow_path
+    cmp     x8, #SYS_execve
+    b.eq    slow_path
+    cmp     x8, #SYS_mprotect
     b.eq    slow_path
     b       fast_passthrough
 

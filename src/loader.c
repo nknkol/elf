@@ -1,8 +1,11 @@
+#include <stdint.h>
+
 #include "z_asm.h"
 #include "z_syscalls.h"
 #include "z_utils.h"
 #include "z_elf.h"
 #include "hook.h"
+#include "payload/config.h"
 
 #define PAGE_SIZE	4096
 #define ALIGN		(PAGE_SIZE - 1)
@@ -44,6 +47,14 @@ static char *z_strchr(const char *s, int c)
 static void z_fini(void)
 {
 	/* No-op placeholder for atexit style hook */
+}
+
+static size_t z_strlen(const char *s)
+{
+	size_t n = 0;
+	while (s && s[n])
+		n++;
+	return n;
 }
 
 static int check_ehdr(Elf_Ehdr *ehdr)
@@ -265,6 +276,88 @@ static void parse_hook_range(char **env)
 	}
 }
 
+typedef struct {
+	uint32_t magic;
+	uint32_t config_off;
+	uint32_t version;
+} payload_header_t;
+
+static payload_config_t *locate_payload_config(void *payload_entry)
+{
+	if (!payload_entry)
+		return NULL;
+
+	uint8_t *base = (uint8_t *)payload_entry;
+	payload_header_t *hdr = (payload_header_t *)(base + 4); /* skip branch */
+	if (hdr->magic != CONFIG_MAGIC || hdr->config_off == 0)
+		return NULL;
+	return (payload_config_t *)(base + hdr->config_off);
+}
+
+static void copy_substr(char *dst, size_t dst_sz, const char *src, size_t len)
+{
+	if (!dst || dst_sz == 0)
+		return;
+	size_t i = 0;
+	while (i + 1 < dst_sz && i < len && src[i]) {
+		dst[i] = src[i];
+		i++;
+	}
+	dst[i] = '\0';
+}
+
+static void copy_cstr(char *dst, size_t dst_sz, const char *src)
+{
+	if (!src)
+		return;
+	copy_substr(dst, dst_sz, src, z_strlen(src));
+}
+
+static void parse_bind_list(payload_config_t *cfg, const char *val)
+{
+	if (!cfg || !val)
+		return;
+
+	const char *p = val;
+	while (*p && cfg->bind_count < CONFIG_MAX_BINDS) {
+		const char *comma = z_strchr(p, ',');
+		const char *colon = z_strchr(p, ':');
+		const char *end = comma ? comma : p + z_strlen(p);
+
+		if (colon && colon < end) {
+			copy_substr(cfg->binds[cfg->bind_count].src,
+				    CONFIG_MAX_PATH, p, (size_t)(colon - p));
+			copy_substr(cfg->binds[cfg->bind_count].dst,
+				    CONFIG_MAX_PATH, colon + 1, (size_t)(end - colon - 1));
+			cfg->bind_count++;
+		}
+
+		if (!comma)
+			break;
+		p = comma + 1;
+	}
+}
+
+static void parse_payload_config(payload_config_t *cfg, char **env)
+{
+	if (!cfg)
+		return;
+
+	z_memset(cfg, 0, sizeof(*cfg));
+
+	while (env && *env) {
+		if (z_strncmp(*env, "HOOK_LOG=", 9) == 0) {
+			const char *val = *env + 9;
+			cfg->log_enabled = (val[0] != '\0' && val[0] != '0') ? 1 : 0;
+		} else if (z_strncmp(*env, "PROOT_ROOT=", 11) == 0) {
+			copy_cstr(cfg->root, CONFIG_MAX_PATH, *env + 11);
+		} else if (z_strncmp(*env, "PROOT_BIND=", 11) == 0) {
+			parse_bind_list(cfg, *env + 11);
+		}
+		env++;
+	}
+}
+
 void z_entry(unsigned long *sp, void (*fini)(void))
 {
 	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
@@ -278,6 +371,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 	void *payload_base = NULL;
 	size_t payload_entry_addr = 0;
+	payload_config_t *payload_cfg = NULL;
 
 	(void)fini;
 
@@ -304,6 +398,12 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	} else {
 		z_printf("[Loader] Payload loaded. Base: %p, Entry: %p\n",
 			 payload_base, (void *)payload_entry_addr);
+		payload_cfg = locate_payload_config((void *)payload_entry_addr);
+		if (payload_cfg) {
+			parse_payload_config(payload_cfg, env);
+		} else {
+			z_printf("[Loader] Warning: payload config block not found.\n");
+		}
 	}
 
 	for (i = 0;; i++, ehdr++) {
