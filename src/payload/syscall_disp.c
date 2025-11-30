@@ -24,6 +24,9 @@
 #define SYS_execve      221
 #define SYS_mprotect    226
 
+#define AT_FDCWD        (-100)
+#define ENOENT          2
+
 #define MAX_EXEC_ARGS   128
 #define MAX_EXEC_ENVS   128
 
@@ -42,6 +45,7 @@ typedef struct {
 
 long raw_syscall(long sys_no, long a1, long a2, long a3, long a4, long a5, long a6);
 unsigned long sys_strlen(const char *s);
+extern payload_config_t g_payload_config;
 
 static void small_copy(char *dst, const char *src)
 {
@@ -65,6 +69,66 @@ static void log_hex_safe(unsigned long val) {
     sys_write(1, buf, 18);
 }
 
+static void log_cstr(const char *prefix, const char *s)
+{
+    if (!config_log_enabled())
+        return;
+    if (prefix)
+        sys_write(1, prefix, sys_strlen(prefix));
+    if (s) {
+        sys_write(1, s, sys_strlen(s));
+    } else {
+        static const char null_msg[] = "(null)";
+        sys_write(1, null_msg, sizeof(null_msg) - 1);
+    }
+    sys_write(1, "\n", 1);
+}
+
+static int path_exists(const char *path)
+{
+    if (!path || !path[0])
+        return 0;
+    long r = raw_syscall(SYS_faccessat, AT_FDCWD, (long)path, 0, 0, 0, 0);
+    return r == 0;
+}
+
+/* forward decls */
+static size_t safe_cpy(char *dst, size_t dst_sz, const char *src);
+
+static int join_dir_file(const char *dir, const char *file, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0 || !file)
+        return 0;
+    size_t pos = 0;
+    if (dir) {
+        size_t i = 0;
+        while (dir[i] && pos + 1 < out_sz) {
+            out[pos++] = dir[i++];
+        }
+    }
+    if (pos > 0 && out[pos - 1] != '/') {
+        if (pos + 1 < out_sz)
+            out[pos++] = '/';
+    }
+    size_t i = 0;
+    while (file[i] && pos + 1 < out_sz) {
+        out[pos++] = file[i++];
+    }
+    out[pos] = '\0';
+    return (pos + 1 < out_sz) ? 1 : 0;
+}
+
+static int find_loader_path(char *out, size_t out_sz)
+{
+    char guest_path[CONFIG_MAX_PATH];
+    guest_path[0] = '/';
+    safe_cpy(guest_path + 1, sizeof(guest_path) - 1, "elfloader");
+    rewrite_path(guest_path, out, out_sz);
+    if (path_exists(out))
+        return 1;
+    return 0;
+}
+
 static inline long do_syscall(long sys_no, long *a) {
     return raw_syscall(sys_no, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
@@ -82,6 +146,84 @@ static size_t safe_cpy(char *dst, size_t dst_sz, const char *src)
     return i;
 }
 
+static void rewrite_path_list(const char *val, char *out, size_t out_sz)
+{
+    size_t pos = 0;
+    size_t i = 0;
+    while (val && val[i] && pos + 1 < out_sz) {
+        size_t start = i;
+        while (val[i] && val[i] != ':')
+            i++;
+        size_t len = i - start;
+        char segment[CONFIG_MAX_PATH];
+        size_t seg_len = 0;
+        if (len + 1 < sizeof(segment)) {
+            for (size_t k = 0; k < len; k++)
+                segment[k] = val[start + k];
+            segment[len] = '\0';
+            if (segment[0] == '/') {
+                rewrite_path(segment, segment, sizeof(segment));
+            }
+            while (segment[seg_len] && pos + 1 < out_sz) {
+                out[pos++] = segment[seg_len++];
+            }
+        }
+        if (val[i] == ':' && pos + 1 < out_sz) {
+            out[pos++] = ':';
+            i++;
+            continue;
+        }
+        if (val[i] == '\0')
+            break;
+    }
+    out[pos] = '\0';
+}
+
+static void rewrite_env_entry(const char *in, char *out, size_t out_sz)
+{
+    if (!in || !out || out_sz == 0) {
+        if (out_sz)
+            out[0] = '\0';
+        return;
+    }
+    /* Default copy-through */
+    safe_cpy(out, out_sz, in);
+
+    const char *keys[] = {"PATH=", "LD_LIBRARY_PATH=", NULL};
+    for (int k = 0; keys[k]; k++) {
+        const char *key = keys[k];
+        size_t key_len = sys_strlen(key);
+        size_t in_len = sys_strlen(in);
+        if (in_len < key_len)
+            continue;
+        int match = 1;
+        for (size_t i = 0; i < key_len; i++) {
+            if (in[i] != key[i]) {
+                match = 0;
+                break;
+            }
+        }
+        if (!match)
+            continue;
+
+        char value[CONFIG_MAX_PATH];
+        safe_cpy(value, sizeof(value), in + key_len);
+        char rewrote[CONFIG_MAX_PATH];
+        rewrite_path_list(value, rewrote, sizeof(rewrote));
+
+        /* Build back key + rewritten */
+        size_t pos = 0;
+        size_t i = 0;
+        while (key[i] && pos + 1 < out_sz)
+            out[pos++] = key[i++];
+        i = 0;
+        while (rewrote[i] && pos + 1 < out_sz)
+            out[pos++] = rewrote[i++];
+        out[pos] = '\0';
+        return;
+    }
+}
+
 static int build_exec_vec(const char *const *in, char **out,
                           char buf[][CONFIG_MAX_PATH], size_t max_items,
                           int rewrite_paths)
@@ -93,14 +235,34 @@ static int build_exec_vec(const char *const *in, char **out,
         const char *s = in ? in[idx] : NULL;
         if (!s)
             break;
-        safe_cpy(buf[idx], sizeof(buf[idx]), s);
         if (rewrite_paths) {
-            rewrite_path(buf[idx], buf[idx], sizeof(buf[idx]));
+            rewrite_path(s, buf[idx], sizeof(buf[idx]));
+        } else {
+            safe_cpy(buf[idx], sizeof(buf[idx]), s);
         }
         out[idx] = buf[idx];
     }
     out[idx] = NULL;
     /* Overflow detection: if input still has entries, fail */
+    if (in && idx + 1 == max_items && in[idx])
+        return 0;
+    return 1;
+}
+
+static int build_exec_env(const char *const *in, char **out,
+                          char buf[][CONFIG_MAX_PATH], size_t max_items)
+{
+    if (!out)
+        return 0;
+    size_t idx = 0;
+    for (; idx + 1 < max_items; idx++) {
+        const char *s = in ? in[idx] : NULL;
+        if (!s)
+            break;
+        rewrite_env_entry(s, buf[idx], sizeof(buf[idx]));
+        out[idx] = buf[idx];
+    }
+    out[idx] = NULL;
     if (in && idx + 1 == max_items && in[idx])
         return 0;
     return 1;
@@ -112,6 +274,7 @@ long syscall_dispatcher(long sys_no, pt_regs *regs) {
     char new_path[CONFIG_MAX_PATH];
     char new_path2[CONFIG_MAX_PATH];
     char out_path[CONFIG_MAX_PATH];
+    char cfg_path[CONFIG_MAX_PATH];
     long args[6];
 
     /* Copy original args to a scratch array so we don't mutate saved regs */
@@ -263,9 +426,11 @@ long syscall_dispatcher(long sys_no, pt_regs *regs) {
 
         case SYS_execve:
             SAFE_LOG("[Payload] execve\n");
+            int chain_loader = 1;
             if ((const char *)args[0]) {
                 args[0] = (long)rewrite_path((const char *)args[0], new_path, sizeof(new_path));
             }
+            log_cstr("[Payload] execve argv0=", (const char *)args[0]);
             /* Copy/rewrite argv/envp into payload stack to avoid touching caller memory */
             char *argv_out[MAX_EXEC_ARGS];
             char *env_out[MAX_EXEC_ENVS];
@@ -274,17 +439,75 @@ long syscall_dispatcher(long sys_no, pt_regs *regs) {
 
             int argv_ok = build_exec_vec((const char *const *)args[1], argv_out,
                                          argv_buf, MAX_EXEC_ARGS, 1 /*rewrite paths*/);
-            int env_ok = build_exec_vec((const char *const *)args[2], env_out,
-                                        env_buf, MAX_EXEC_ENVS, 0 /*copy only*/);
+            int env_ok = build_exec_env((const char *const *)args[2], env_out,
+                                        env_buf, MAX_EXEC_ENVS);
 
-            if (argv_ok && env_ok) {
-                args[1] = (long)argv_out;
-                args[2] = (long)env_out;
-                ret = raw_syscall(sys_no, args[0], args[1], args[2], args[3], args[4], args[5]);
+            if (chain_loader) {
+                /* Force chain into loader: <resolved loader> <target> <orig args...> */
+                char loader_path[CONFIG_MAX_PATH];
+                if (!find_loader_path(loader_path, sizeof(loader_path))) {
+                    SAFE_LOG("[Payload] execve chain loader missing, abort\n");
+                    ret = -ENOENT;
+                    break;
+                }
+
+                size_t argc_count = 0;
+                while (argc_count < MAX_EXEC_ARGS && argv_out[argc_count])
+                    argc_count++;
+
+                char *loader_argv[MAX_EXEC_ARGS];
+                size_t lidx = 0;
+                loader_argv[lidx++] = loader_path;
+                /* Propagate config path via "-c <path>" */
+                if (g_payload_config.config_path[0] && lidx + 2 < MAX_EXEC_ARGS) {
+                    static const char opt_c[] = "-c";
+                    rewrite_path(g_payload_config.config_path, cfg_path, sizeof(cfg_path));
+                    loader_argv[lidx++] = (char *)opt_c;
+                    loader_argv[lidx++] = cfg_path;
+                }
+                if (argc_count > 0 && lidx < MAX_EXEC_ARGS) {
+                    loader_argv[lidx++] = argv_out[0]; /* target path (rewritten) */
+                    for (size_t i = 1; i < argc_count && lidx + 1 < MAX_EXEC_ARGS; i++)
+                        loader_argv[lidx++] = argv_out[i];
+                }
+                if (lidx < MAX_EXEC_ARGS)
+                    loader_argv[lidx] = NULL;
+
+                int loader_ok = (lidx < MAX_EXEC_ARGS);
+
+                if (argv_ok && env_ok && loader_ok) {
+                    log_cstr("[Payload] execve chain loader=", loader_path);
+                    if (argc_count > 0)
+                        log_cstr("[Payload] execve chain target=", argv_out[0]);
+                    /* Propagate marker to avoid accidental external use */
+                    size_t env_count = 0;
+                    while (env_count < MAX_EXEC_ENVS && env_out[env_count])
+                        env_count++;
+                    if (env_count + 1 < MAX_EXEC_ENVS) {
+                        static const char marker[] = "HOOK_CHAIN_LOADER=1";
+                        size_t idx = env_count;
+                        safe_cpy(env_buf[idx], sizeof(env_buf[idx]), marker);
+                        env_out[idx] = env_buf[idx];
+                        env_out[idx + 1] = NULL;
+                    }
+                    args[0] = (long)loader_path;
+                    args[1] = (long)loader_argv;
+                    args[2] = (long)env_out;
+                    ret = raw_syscall(sys_no, args[0], args[1], args[2], args[3], args[4], args[5]);
+                } else {
+                    SAFE_LOG("[Payload] execve argv/env overflow, falling back\n");
+                    /* Fallback to original pointers to avoid truncation */
+                    ret = raw_syscall(sys_no, args[0], a[1], a[2], a[3], a[4], a[5]);
+                }
             } else {
-                SAFE_LOG("[Payload] execve argv/env overflow, falling back\n");
-                /* Fallback to original pointers to avoid truncation */
-                ret = raw_syscall(sys_no, args[0], a[1], a[2], a[3], a[4], a[5]);
+                if (argv_ok && env_ok) {
+                    args[1] = (long)argv_out;
+                    args[2] = (long)env_out;
+                    ret = raw_syscall(sys_no, args[0], args[1], args[2], args[3], args[4], args[5]);
+                } else {
+                    SAFE_LOG("[Payload] execve argv/env overflow, falling back\n");
+                    ret = raw_syscall(sys_no, args[0], a[1], a[2], a[3], a[4], a[5]);
+                }
             }
             break;
 

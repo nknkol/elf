@@ -262,18 +262,7 @@ static void *load_elf_payload(const char *path, size_t *entry_point_out)
 
 static void parse_hook_range(char **env)
 {
-	while (*env) {
-		if (z_strncmp(*env, "HOOK_RANGE=", 11) == 0) {
-			char *val = *env + 11;
-			char *dash = z_strchr(val, '-');
-			if (dash) {
-				int min = z_atoi(val);
-				int max = z_atoi(dash + 1);
-				set_hook_range(min, max);
-			}
-		}
-		env++;
-	}
+	(void)env;
 }
 
 typedef struct {
@@ -338,24 +327,108 @@ static void parse_bind_list(payload_config_t *cfg, const char *val)
 	}
 }
 
+static void init_payload_config(payload_config_t *cfg)
+{
+	if (cfg)
+		z_memset(cfg, 0, sizeof(*cfg));
+}
+
+static void apply_config_entry(payload_config_t *cfg, const char *entry, char *payload_path_out)
+{
+	if (!cfg || !entry)
+		return;
+	if (z_strncmp(entry, "HOOK_LOG=", 9) == 0) {
+		const char *val = entry + 9;
+		cfg->log_enabled = (val[0] != '\0' && val[0] != '0') ? 1 : 0;
+	} else if (z_strncmp(entry, "PROOT_ROOT=", 11) == 0) {
+		copy_cstr(cfg->root, CONFIG_MAX_PATH, entry + 11);
+	} else if (z_strncmp(entry, "PROOT_BIND=", 11) == 0) {
+		parse_bind_list(cfg, entry + 11);
+	} else if (z_strncmp(entry, "PAYLOAD_PATH=", 13) == 0) {
+		const char *p = entry + 13;
+		if (payload_path_out)
+			copy_cstr(payload_path_out, CONFIG_MAX_PATH, p);
+		copy_cstr(cfg->payload_path, CONFIG_MAX_PATH, p);
+	}
+}
+
 static void parse_payload_config(payload_config_t *cfg, char **env)
 {
 	if (!cfg)
 		return;
 
-	z_memset(cfg, 0, sizeof(*cfg));
-
 	while (env && *env) {
-		if (z_strncmp(*env, "HOOK_LOG=", 9) == 0) {
-			const char *val = *env + 9;
-			cfg->log_enabled = (val[0] != '\0' && val[0] != '0') ? 1 : 0;
-		} else if (z_strncmp(*env, "PROOT_ROOT=", 11) == 0) {
-			copy_cstr(cfg->root, CONFIG_MAX_PATH, *env + 11);
-		} else if (z_strncmp(*env, "PROOT_BIND=", 11) == 0) {
-			parse_bind_list(cfg, *env + 11);
-		}
+		apply_config_entry(cfg, *env, NULL);
 		env++;
 	}
+}
+
+static void load_config_file(payload_config_t *cfg, const char *path, char *payload_path_out)
+{
+	if (!cfg || !path || !path[0])
+		return;
+	copy_cstr(cfg->config_path, CONFIG_MAX_PATH, path);
+	int fd = z_open(path, O_RDONLY);
+	if (fd < 0)
+		return;
+
+	char buf[2048];
+	ssize_t n = z_read(fd, buf, sizeof(buf));
+	z_close(fd);
+	if (n <= 0)
+		return;
+
+	size_t len = (size_t)n;
+	size_t pos = 0;
+	while (pos < len) {
+		size_t end = pos;
+		while (end < len && buf[end] != '\n')
+			end++;
+		size_t start = pos;
+		while (start < end && (buf[start] == ' ' || buf[start] == '\t'))
+			start++;
+		if (start < end && buf[start] != '#') {
+			size_t copy_len = end - start;
+			char line[CONFIG_MAX_PATH * 2];
+			if (copy_len >= sizeof(line))
+				copy_len = sizeof(line) - 1;
+			for (size_t i = 0; i < copy_len; i++)
+				line[i] = buf[start + i];
+			line[copy_len] = '\0';
+			while (copy_len > 0 && (line[copy_len - 1] == ' ' ||
+						line[copy_len - 1] == '\t' ||
+						line[copy_len - 1] == '\r')) {
+				line[--copy_len] = '\0';
+			}
+			if (line[0] != '\0')
+				apply_config_entry(cfg, line, payload_path_out);
+		}
+		pos = end + 1;
+	}
+}
+
+static int has_loader_bind(payload_config_t *cfg)
+{
+	if (!cfg)
+		return 0;
+	for (int i = 0; i < cfg->bind_count && i < CONFIG_MAX_BINDS; i++) {
+		if (z_strncmp(cfg->binds[i].src, "/elfloader", CONFIG_MAX_PATH) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+static void ensure_loader_bind(payload_config_t *cfg)
+{
+	if (!cfg)
+		return;
+	if (has_loader_bind(cfg))
+		return;
+	if (cfg->bind_count >= CONFIG_MAX_BINDS)
+		return;
+	copy_cstr(cfg->binds[cfg->bind_count].src, CONFIG_MAX_PATH, "/elfloader");
+	copy_cstr(cfg->binds[cfg->bind_count].dst, CONFIG_MAX_PATH, CONFIG_DEFAULT_LOADER_DST);
+	cfg->bind_count++;
 }
 
 void z_entry(unsigned long *sp, void (*fini)(void))
@@ -386,12 +459,25 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	av = (void *)p;
 
 	(void)env;
-	if (argc < 2)
+	const char *config_path = CONFIG_DEFAULT_CONFIG_PATH;
+	char payload_path_override[CONFIG_MAX_PATH];
+	z_memset(payload_path_override, 0, sizeof(payload_path_override));
+	payload_config_t bootstrap_cfg;
+	init_payload_config(&bootstrap_cfg);
+	int argi = 1;
+	if (argc > 2 && z_strncmp(argv[argi], "-c", 3) == 0) {
+		config_path = argv[argi + 1];
+		argi += 2;
+	}
+	load_config_file(&bootstrap_cfg, config_path, payload_path_override);
+	if (argc <= argi)
 		z_errx(1, "no input file");
-	file = argv[1];
+	file = argv[argi];
+	char **target_argv = &argv[argi];
 
 	z_printf("[Loader] Loading payload.elf...\n");
-	payload_base = load_elf_payload("./payload.elf", &payload_entry_addr);
+	const char *payload_path = payload_path_override[0] ? payload_path_override : CONFIG_DEFAULT_PAYLOAD_PATH;
+	payload_base = load_elf_payload(payload_path, &payload_entry_addr);
 
 	if (!payload_base) {
 		z_printf("[Loader] Warning: payload.elf not found or invalid.\n");
@@ -400,7 +486,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			 payload_base, (void *)payload_entry_addr);
 		payload_cfg = locate_payload_config((void *)payload_entry_addr);
 		if (payload_cfg) {
-			parse_payload_config(payload_cfg, env);
+			init_payload_config(payload_cfg);
+			z_memcpy(payload_cfg, &bootstrap_cfg, sizeof(*payload_cfg));
+			ensure_loader_bind(payload_cfg);
 		} else {
 			z_printf("[Loader] Warning: payload config block not found.\n");
 		}
@@ -456,7 +544,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		AVSET(AT_PHNUM, av, ehdrs[Z_PROG].e_phnum);
 		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
 		AVSET(AT_ENTRY, av, entry[Z_PROG]);
-		AVSET(AT_EXECFN, av, (unsigned long)argv[1]);
+		AVSET(AT_EXECFN, av, (unsigned long)target_argv[0]);
 		AVSET(AT_BASE, av, elf_interp ?
 				base[Z_INTERP] : av->a_un.a_val);
 		}
@@ -465,9 +553,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 #undef AVSET
 	++av;
 
-	z_memcpy(&argv[0], &argv[1],
-		 (unsigned long)av - (unsigned long)&argv[1]);
-	(*sp)--;
+	z_memcpy(&argv[0], &argv[argi],
+		 (unsigned long)av - (unsigned long)&argv[argi]);
+	(*sp) -= argi;
 
 	z_trampo((void (*)(void))(elf_interp ?
 			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);

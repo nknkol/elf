@@ -6,6 +6,7 @@ SRC = entry.S raw_syscall.S syscall_disp.c mini_libc.c reentry_guard.c config.c 
 OBJ = $(SRC:.c=.o)
 OBJ := $(OBJ:.S=.o)
 CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin -Isrc
+CFLAGS += $(EXTRA_CFLAGS)
 
 all: $(TARGET)
 

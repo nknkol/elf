@@ -57,6 +57,12 @@ static size_t join_paths(char *out, size_t out_sz,
     for (; pos + 1 < out_sz && left && pos < left_len; pos++)
         out[pos] = left[pos];
 
+    /* Nothing to append */
+    if (!right || right[0] == '\0') {
+        out[pos] = '\0';
+        return pos;
+    }
+
     int left_has_slash = (pos > 0 && out[pos - 1] == '/');
     int right_has_slash = (right && right[0] == '/');
 
@@ -131,7 +137,7 @@ const char *rewrite_path(const char *in, char *out, size_t out_sz)
     s_copy(out, out_sz, in, s_len(in));
 
     /* Bind overlay first */
-    if (!apply_bind(out, out_sz, out)) {
+    if (!apply_bind(out, out_sz, in)) {
         /* If no bind matched, apply root prefix */
         apply_root(out, out_sz);
     }
@@ -180,9 +186,9 @@ const char *rewrite_path_from_host(const char *in, char *out, size_t out_sz)
 
     s_copy(out, out_sz, in, s_len(in));
 
-    if (apply_bind_reverse(out, out_sz, out))
+    if (apply_bind_reverse(out, out_sz, in))
         return out;
 
-    apply_root_reverse(out, out_sz, out);
+    apply_root_reverse(out, out_sz, in);
     return out;
 }

@@ -7,6 +7,7 @@ ARCHS64 := amd64 aarch64
 ARCHS := $(ARCHS32) $(ARCHS64)
 
 CFLAGS += -pipe -Wall -O0 -g -Wextra -fPIC -fno-ident -fno-stack-protector -U _FORTIFY_SOURCE
+PAYLOAD_CFLAGS :=
 LDFLAGS += -nostartfiles -nodefaultlibs -nostdlib 
 LDFLAGS += -pie -e z_start -Wl,-Bsymbolic,--no-undefined,--build-id=none
 TARGET := elfloader
@@ -24,6 +25,11 @@ ifeq "$(filter $(ARCH),$(ARCHS32))" "$(ARCH)"
   LDFLAGS += -m32
 else
   CFLAGS += -DELFCLASS=ELFCLASS64
+endif
+
+ifdef DEFAULT_CONFIG_PATH
+  CFLAGS += -DCONFIG_DEFAULT_CONFIG_PATH=\"$(DEFAULT_CONFIG_PATH)\"
+  PAYLOAD_CFLAGS += -DCONFIG_DEFAULT_CONFIG_PATH=\"$(DEFAULT_CONFIG_PATH)\"
 endif
 
 ifdef DEBUG
@@ -53,7 +59,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(PAYLOAD_BIN):
-	$(MAKE) -C $(PAYLOAD_DIR) ARCH=$(ARCH) CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)"
+	$(MAKE) -C $(PAYLOAD_DIR) ARCH=$(ARCH) CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)" EXTRA_CFLAGS="$(PAYLOAD_CFLAGS)"
 
 clean:
 	rm -rf *.o $(TARGET) */*.o
