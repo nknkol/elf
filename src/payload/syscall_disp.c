@@ -1,5 +1,6 @@
 #include "mini_libc.h"
 #include "config.h"
+#include "execve_utils.h"
 #include "path_rewrite.h"
 
 /* Syscall Numbers */
@@ -92,9 +93,6 @@ static int path_exists(const char *path)
     return r == 0;
 }
 
-/* forward decls */
-static size_t safe_cpy(char *dst, size_t dst_sz, const char *src);
-
 static int join_dir_file(const char *dir, const char *file, char *out, size_t out_sz)
 {
     if (!out || out_sz == 0 || !file)
@@ -133,97 +131,6 @@ static inline long do_syscall(long sys_no, long *a) {
     return raw_syscall(sys_no, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
-static size_t safe_cpy(char *dst, size_t dst_sz, const char *src)
-{
-    if (!dst || dst_sz == 0)
-        return 0;
-    size_t i = 0;
-    while (i + 1 < dst_sz && src && src[i]) {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = '\0';
-    return i;
-}
-
-static void rewrite_path_list(const char *val, char *out, size_t out_sz)
-{
-    size_t pos = 0;
-    size_t i = 0;
-    while (val && val[i] && pos + 1 < out_sz) {
-        size_t start = i;
-        while (val[i] && val[i] != ':')
-            i++;
-        size_t len = i - start;
-        char segment[CONFIG_MAX_PATH];
-        size_t seg_len = 0;
-        if (len + 1 < sizeof(segment)) {
-            for (size_t k = 0; k < len; k++)
-                segment[k] = val[start + k];
-            segment[len] = '\0';
-            if (segment[0] == '/') {
-                rewrite_path(segment, segment, sizeof(segment));
-            }
-            while (segment[seg_len] && pos + 1 < out_sz) {
-                out[pos++] = segment[seg_len++];
-            }
-        }
-        if (val[i] == ':' && pos + 1 < out_sz) {
-            out[pos++] = ':';
-            i++;
-            continue;
-        }
-        if (val[i] == '\0')
-            break;
-    }
-    out[pos] = '\0';
-}
-
-static void rewrite_env_entry(const char *in, char *out, size_t out_sz)
-{
-    if (!in || !out || out_sz == 0) {
-        if (out_sz)
-            out[0] = '\0';
-        return;
-    }
-    /* Default copy-through */
-    safe_cpy(out, out_sz, in);
-
-    const char *keys[] = {"PATH=", "LD_LIBRARY_PATH=", NULL};
-    for (int k = 0; keys[k]; k++) {
-        const char *key = keys[k];
-        size_t key_len = sys_strlen(key);
-        size_t in_len = sys_strlen(in);
-        if (in_len < key_len)
-            continue;
-        int match = 1;
-        for (size_t i = 0; i < key_len; i++) {
-            if (in[i] != key[i]) {
-                match = 0;
-                break;
-            }
-        }
-        if (!match)
-            continue;
-
-        char value[CONFIG_MAX_PATH];
-        safe_cpy(value, sizeof(value), in + key_len);
-        char rewrote[CONFIG_MAX_PATH];
-        rewrite_path_list(value, rewrote, sizeof(rewrote));
-
-        /* Build back key + rewritten */
-        size_t pos = 0;
-        size_t i = 0;
-        while (key[i] && pos + 1 < out_sz)
-            out[pos++] = key[i++];
-        i = 0;
-        while (rewrote[i] && pos + 1 < out_sz)
-            out[pos++] = rewrote[i++];
-        out[pos] = '\0';
-        return;
-    }
-}
-
 static int build_exec_vec(const char *const *in, char **out,
                           char buf[][CONFIG_MAX_PATH], size_t max_items,
                           int rewrite_paths)
@@ -244,25 +151,6 @@ static int build_exec_vec(const char *const *in, char **out,
     }
     out[idx] = NULL;
     /* Overflow detection: if input still has entries, fail */
-    if (in && idx + 1 == max_items && in[idx])
-        return 0;
-    return 1;
-}
-
-static int build_exec_env(const char *const *in, char **out,
-                          char buf[][CONFIG_MAX_PATH], size_t max_items)
-{
-    if (!out)
-        return 0;
-    size_t idx = 0;
-    for (; idx + 1 < max_items; idx++) {
-        const char *s = in ? in[idx] : NULL;
-        if (!s)
-            break;
-        rewrite_env_entry(s, buf[idx], sizeof(buf[idx]));
-        out[idx] = buf[idx];
-    }
-    out[idx] = NULL;
     if (in && idx + 1 == max_items && in[idx])
         return 0;
     return 1;

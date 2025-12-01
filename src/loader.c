@@ -431,16 +431,106 @@ static void ensure_loader_bind(payload_config_t *cfg)
 	cfg->bind_count++;
 }
 
+static int has_prefix(const char *path, const char *prefix)
+{
+	size_t plen = z_strlen(prefix);
+	if (plen == 0)
+		return 0;
+	if (z_strncmp(path, prefix, plen) != 0)
+		return 0;
+	char tail = path[plen];
+	return tail == '\0' || tail == '/' ? 1 : 0;
+}
+
+static size_t join_paths(char *out, size_t out_sz,
+			 const char *left, size_t left_len,
+			 const char *right)
+{
+	size_t pos = 0;
+
+	if (!out || out_sz == 0)
+		return 0;
+
+	while (pos + 1 < out_sz && left && pos < left_len) {
+		out[pos] = left[pos];
+		pos++;
+	}
+
+	if (!right || right[0] == '\0') {
+		out[pos] = '\0';
+		return pos;
+	}
+
+	int left_slash = (pos > 0 && out[pos - 1] == '/');
+	int right_slash = (right && right[0] == '/');
+
+	if (!left_slash && !right_slash) {
+		if (pos + 1 < out_sz)
+			out[pos++] = '/';
+	} else if (left_slash && right_slash) {
+		right++;
+	}
+
+	size_t i = 0;
+	while (pos + 1 < out_sz && right && right[i]) {
+		out[pos++] = right[i++];
+	}
+	out[pos] = '\0';
+	return pos;
+}
+
+static int apply_bind_overlay(payload_config_t *cfg, char *out, size_t out_sz, const char *in_path)
+{
+	if (!cfg)
+		return 0;
+	for (int i = 0; i < cfg->bind_count && i < CONFIG_MAX_BINDS; i++) {
+		const char *src = cfg->binds[i].src;
+		const char *dst = cfg->binds[i].dst;
+		size_t src_len = z_strlen(src);
+		if (src_len == 0 || !has_prefix(in_path, src))
+			continue;
+		const char *suffix = in_path + src_len;
+		join_paths(out, out_sz, dst, z_strlen(dst), suffix);
+		return 1;
+	}
+	return 0;
+}
+
+static void apply_root_overlay(payload_config_t *cfg, char *out, size_t out_sz)
+{
+	if (!cfg || !out || out_sz == 0)
+		return;
+	if (cfg->root[0] == '\0' || out[0] != '/')
+		return;
+	if (has_prefix(out, cfg->root))
+		return;
+	char original[CONFIG_MAX_PATH];
+	copy_cstr(original, sizeof(original), out);
+	join_paths(out, out_sz, cfg->root, z_strlen(cfg->root), original);
+}
+
+static const char *rewrite_interp_path(payload_config_t *cfg, const char *in, char *out, size_t out_sz)
+{
+	if (!cfg || !in || !out || out_sz == 0)
+		return in;
+	copy_substr(out, out_sz, in, z_strlen(in));
+	if (!apply_bind_overlay(cfg, out, out_sz, in))
+		apply_root_overlay(cfg, out, out_sz);
+	return out;
+}
+
 void z_entry(unsigned long *sp, void (*fini)(void))
 {
 	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
 	Elf_Phdr *phdr, *iter;
 	Elf_auxv_t *av;
 	char **argv, **env, **p, *elf_interp = NULL;
+	char interp_path[CONFIG_MAX_PATH];
 	unsigned long base[2], entry[2];
 	const char *file;
 	ssize_t sz;
 	int argc, fd, i;
+	int load_interp_next = 0;
 
 	void *payload_base = NULL;
 	size_t payload_entry_addr = 0;
@@ -470,9 +560,15 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		argi += 2;
 	}
 	load_config_file(&bootstrap_cfg, config_path, payload_path_override);
+	if (bootstrap_cfg.root[0]) {
+		if (z_chdir(bootstrap_cfg.root) < 0)
+			z_errx(1, "chdir to root %s failed", bootstrap_cfg.root);
+	}
 	if (argc <= argi)
 		z_errx(1, "no input file");
 	file = argv[argi];
+	if (bootstrap_cfg.root[0] && file[0] == '/')
+		z_errx(1, "absolute path not allowed when PROOT_ROOT is set; use path relative to root");
 	char **target_argv = &argv[argi];
 
 	z_printf("[Loader] Loading payload.elf...\n");
@@ -495,6 +591,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	}
 
 	for (i = 0;; i++, ehdr++) {
+		int loading_interp = load_interp_next;
 		if ((fd = z_open(file, O_RDONLY)) < 0)
 			z_errx(1, "can't open %s", file);
 		if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
@@ -513,12 +610,12 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "can't load ELF %s", file);
 
 		entry[i] = ehdr->e_entry + (ehdr->e_type == ET_DYN ? base[i] : 0);
-		if (file == elf_interp) {
+		if (loading_interp) {
 			z_close(fd);
 			break;
 		}
 
-		for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
+		for (iter = phdr; !loading_interp && iter < &phdr[ehdr->e_phnum]; iter++) {
 			if (iter->p_type != PT_INTERP)
 				continue;
 			elf_interp = z_alloca(iter->p_filesz);
@@ -529,11 +626,15 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 				z_errx(1, "can't read interp segment");
 			if (elf_interp[iter->p_filesz - 1] != '\0')
 				z_errx(1, "bogus interp path");
-			file = elf_interp;
+			/* Resolve interpreter inside configured root/binds to avoid host escape */
+			file = rewrite_interp_path(&bootstrap_cfg, elf_interp,
+						   interp_path, sizeof(interp_path));
+			load_interp_next = 1;
+			break;
 		}
 
 		z_close(fd);
-		if (elf_interp == NULL)
+		if (!load_interp_next)
 			break;
 	}
 

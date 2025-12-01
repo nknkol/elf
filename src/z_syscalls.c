@@ -42,6 +42,7 @@ DEF_SYSCALL3(ssize_t, write, int, fd, const void *, buf, size_t, count)
 DEF_SYSCALL1(int, close, int, fd)
 DEF_SYSCALL3(int, lseek, int, fd, off_t, off, int, whence)
 DEF_SYSCALL1(int, exit, int, status)
+DEF_SYSCALL1(int, chdir, const char *, path)
 DEF_SYSCALL2(int, munmap, void *, addr, size_t, length)
 DEF_SYSCALL3(int, mprotect, void *, addr, size_t, length, int, prot)
 DEF_SYSCALL3(int, prctl, int, option, unsigned long, arg2, unsigned long, arg3)
@@ -64,4 +65,3 @@ z_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 	return (void *)SYSCALL(mmap, addr, length, prot, flags, fd, offset);
 #endif
 }
-

@@ -17,6 +17,7 @@ int	z_close(int fd);
 int	z_lseek(int fd, off_t offset, int whence);
 ssize_t	z_read(int fd, void *buf, size_t count);
 ssize_t	z_write(int fd, const void *buf, size_t count);
+int     z_chdir(const char *path);
 void	*z_mmap(void *addr, size_t length, int prot,
 		int flags, int fd, off_t offset);
 int	z_munmap(void *addr, size_t length);
