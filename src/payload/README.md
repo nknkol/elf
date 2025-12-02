@@ -59,7 +59,7 @@
 
 | 状态 | 任务 | 说明 |
 | ---- | ---- | ---- |
-| ✘ | ld.so 库加载 hook | 在 ld.so 的库加载路径（如 `_dl_map_object`/`load_library`）插入包装，调用原逻辑后立刻对新映射的可执行段执行 `install_hook`，覆盖后续加载的 libc/libm 等共享库里的 `svc`，彻底阻断动态库逃逸。 |
+| ✔ | ld.so 库加载 hook | 通过拦截 mmap/mprotect 可执行映射后即时调用 `install_hook`，对新加载共享库的 text 段补钩，覆盖后续加载的 libc/libm 等共享库里的 `svc`，彻底阻断动态库逃逸。 |
 | ✘ | 初始化/配置扩展 | 引入“微型 init”或扩展配置，启动时统一做容器内初始化：`chdir` 到容器根/工作目录，构造/覆盖 PATH/LD_LIBRARY_PATH 等关键环境（按 root/bind 改写），清理高危变量，预绑定必需目录，行为类似 Dockerfile init/proot 配置脚本。 |
 
 ## 最小 proot 功能的实现步骤

@@ -59,6 +59,8 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_mprotect
     b.eq    slow_path
+    cmp     x8, #SYS_mmap
+    b.eq    slow_path
     b       fast_passthrough
 
 slow_path:

@@ -6,10 +6,10 @@ ARCH ?= aarch64
 ARCH_DIR := arch/$(ARCH)
 
 # Common sources (arch-neutral)
-SRC_COMMON := $(addprefix logic/, config.c path_rewrite.c execve_utils.c syscall_hooks.c)
+SRC_COMMON := $(addprefix logic/, config.c path_rewrite.c execve_utils.c syscall_hooks.c hook_runtime.c)
 
 # Arch-specific sources
-SRC_ARCH_aarch64 := $(addprefix $(ARCH_DIR)/, entry.S raw_syscall.S syscall_disp.c mini_libc.c reentry_guard.c)
+SRC_ARCH_aarch64 := $(addprefix $(ARCH_DIR)/, entry.S raw_syscall.S syscall_disp.c mini_libc.c reentry_guard.c stub.c)
 
 SRC_ARCH = $(SRC_ARCH_$(ARCH))
 

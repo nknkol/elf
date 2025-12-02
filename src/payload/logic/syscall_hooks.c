@@ -4,12 +4,17 @@
 #include "execve_utils.h"
 #include "path_rewrite.h"
 #include "syscall_nums.h"
+#include "hook_runtime.h"
 
 #define AT_FDCWD        (-100)
 #define ENOENT          2
 
 #define MAX_EXEC_ARGS   128
 #define MAX_EXEC_ENVS   128
+
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
 
 #define SAFE_LOG(msg) do { \
     if (config_log_enabled()) { \
@@ -21,6 +26,7 @@
 long raw_syscall(long sys_no, long a1, long a2, long a3, long a4, long a5, long a6);
 unsigned long sys_strlen(const char *s);
 extern payload_config_t g_payload_config;
+extern void _start(void);
 
 static void small_copy(char *dst, const char *src)
 {
@@ -130,20 +136,25 @@ long syscall_handle_common(long sys_no, long args[6]) {
             if (sys_no == SYS_readlinkat && args[2]) {
                 /* Use a bounce buffer so we can rewrite output path */
                 char bounce[CONFIG_MAX_PATH];
-                long count = args[3];
+                char *user_buf = (char *)args[2];
+                long user_len = args[3];
+                long count = user_len;
                 if (count > (long)sizeof(bounce))
                     count = sizeof(bounce);
                 args[2] = (long)bounce;
+                args[3] = count;
                 ret = do_syscall(sys_no, args);
-                if (ret > 0 && ret < (long)sizeof(bounce)) {
+                if (ret > 0 && ret < count) {
                     bounce[ret] = '\0';
                     const char *guest_path = rewrite_path_from_host(bounce, new_path, sizeof(new_path));
                     size_t guest_len = sys_strlen(guest_path);
-                    if (guest_len < (size_t)args[3]) {
-                        small_copy((char *)args[2], guest_path);
+                    if (guest_len < (size_t)user_len) {
+                        small_copy(user_buf, guest_path);
                         ret = guest_len;
                     }
                 }
+                args[2] = (long)user_buf;
+                args[3] = user_len;
             } else {
                 ret = do_syscall(sys_no, args);
             }
@@ -170,7 +181,7 @@ long syscall_handle_common(long sys_no, long args[6]) {
                 }
 
                 /* Build env list with rewritten PATH/LD_LIBRARY_PATH/etc. */
-                if (!build_exec_vec((const char *const *)args[2], env_out, env_buf, MAX_EXEC_ENVS, 0)) {
+                if (!build_exec_env((const char *const *)args[2], env_out, env_buf, MAX_EXEC_ENVS)) {
                     ret = -ENOENT;
                     break;
                 }
@@ -209,6 +220,22 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_exit_group:
             /* Fast path out */
             ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_mprotect:
+            SAFE_LOG("[Payload] mprotect\n");
+            ret = do_syscall(sys_no, args);
+            if (ret == 0 && (args[2] & PROT_EXEC)) {
+                install_hook((void *)args[0], (size_t)args[1], (void *)&_start, 0);
+            }
+            break;
+
+        case SYS_mmap:
+            SAFE_LOG("[Payload] mmap\n");
+            ret = do_syscall(sys_no, args);
+            if (ret >= 0 && (args[2] & PROT_EXEC)) {
+                install_hook((void *)ret, (size_t)args[1], (void *)&_start, 0);
+            }
             break;
 
         default:
