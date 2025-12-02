@@ -1,12 +1,9 @@
 #include "mini_libc.h"
+#include "syscall_nums.h"
 
-/* * Minimal Syscall Wrapper for ARM64 
- * * x8: Syscall Number
- * x0-x5: Arguments
- */
 long sys_write(int fd, const void *buf, unsigned long count)
 {
-    register long x8 asm("x8") = 64; // sys_write
+    register long x8 asm("x8") = SYS_write;
     register long x0 asm("x0") = fd;
     register long x1 asm("x1") = (long)buf;
     register long x2 asm("x2") = count;

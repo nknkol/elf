@@ -6,7 +6,13 @@ ARCHS32 := i386
 ARCHS64 := amd64 aarch64
 ARCHS := $(ARCHS32) $(ARCHS64)
 
+ARCH_DIR       := arch/$(ARCH)
+PAYLOAD_ARCH_DIR := payload/arch/$(ARCH)
+
 CFLAGS += -pipe -Wall -O0 -g -Wextra -fPIC -fno-ident -fno-stack-protector -U _FORTIFY_SOURCE
+# Include paths for loader and payload headers; keep in CPPFLAGS to survive CFLAGS overrides
+CPPFLAGS += -I$(CURDIR) -I$(CURDIR)/include -I$(CURDIR)/payload/include
+CPPFLAGS += -I. -Iinclude -Ipayload/include
 PAYLOAD_CFLAGS :=
 LDFLAGS += -nostartfiles -nodefaultlibs -nostdlib 
 LDFLAGS += -pie -e z_start -Wl,-Bsymbolic,--no-undefined,--build-id=none
@@ -42,12 +48,19 @@ else
   LDFLAGS += -s
 endif
 
-OBJS := $(patsubst %.c,%.o, $(wildcard *.c))
-OBJS += $(patsubst %.S,%.o, $(wildcard $(ARCH)/*.S))
+# Loader objects: core + utils + arch-specific helpers/stubs/hooks
+SRCS := $(wildcard *.c)
+SRCS += $(wildcard utils/*.c)
+SRCS += $(wildcard $(ARCH_DIR)/*.c)
+SRCS += $(wildcard $(PAYLOAD_ARCH_DIR)/hook.c) $(wildcard $(PAYLOAD_ARCH_DIR)/stub.c)
+
+ASRCS := $(wildcard $(ARCH_DIR)/*.S)
+
+OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o)
 
 ifdef SMALL
-  OBJS := $(filter-out z_printf.%,$(OBJS))
-  OBJS := $(filter-out z_err.%,$(OBJS))
+  OBJS := $(filter-out %/z_printf.o,$(OBJS))
+  OBJS := $(filter-out %/z_err.o,$(OBJS))
   CFLAGS += -DZ_SMALL
 endif
 
@@ -62,5 +75,5 @@ $(PAYLOAD_BIN):
 	$(MAKE) -C $(PAYLOAD_DIR) ARCH=$(ARCH) CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)" EXTRA_CFLAGS="$(PAYLOAD_CFLAGS)"
 
 clean:
-	rm -rf *.o $(TARGET) */*.o
+	rm -rf *.o $(TARGET) */*.o */*/*.o
 	$(MAKE) -C $(PAYLOAD_DIR) clean

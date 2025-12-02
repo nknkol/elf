@@ -1,10 +1,10 @@
 # userlandexec/test_hello/Makefile
 
-include ../../../utils/Makefrag
+include ../../../../utils/Makefrag
 
 TARGET      ?= tiny_target
 SRC         := tiny_target.S
-override BUILD_DIR := ../../build
+override BUILD_DIR := ../../../build
 override BIN_DIR   := $(BUILD_DIR)/bin
 TARGET_BIN  := $(BIN_DIR)/$(TARGET)
 

@@ -3,26 +3,7 @@
     .global _start
     .extern g_payload_config
 
-/* Syscall numbers of interest (AArch64) */
-.equ    SYS_getcwd,      17
-.equ    SYS_mknodat,     33
-.equ    SYS_mkdirat,     34
-.equ    SYS_unlinkat,    35
-.equ    SYS_linkat,      37
-.equ    SYS_renameat,    38
-.equ    SYS_faccessat,   48
-.equ    SYS_chdir,       49
-.equ    SYS_openat,      56
-.equ    SYS_close,       57
-.equ    SYS_write,       64
-.equ    SYS_symlinkat,   36
-.equ    SYS_newfstatat,  79
-.equ    SYS_readlinkat,  78
-.equ    SYS_exit,        93
-.equ    SYS_exit_group,  94
-.equ    SYS_rt_sigreturn,139
-.equ    SYS_execve,      221
-.equ    SYS_mprotect,    226
+#include "syscall_nums.h"
 
 /* Stack layout */
 .equ    CTX_SIZE,       768     /* GPRs (0..255) + SIMD (256..767) */

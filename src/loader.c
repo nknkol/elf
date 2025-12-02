@@ -4,8 +4,9 @@
 #include "z_syscalls.h"
 #include "z_utils.h"
 #include "z_elf.h"
+#include "arch.h"
 #include "hook.h"
-#include "payload/config.h"
+#include "config.h"
 
 #define PAGE_SIZE	4096
 #define ALIGN		(PAGE_SIZE - 1)
@@ -156,26 +157,6 @@ err:
 #define Z_PROG		0
 #define Z_INTERP	1
 
-static void z_flush_cache(void *addr, size_t len)
-{
-	uintptr_t start = (uintptr_t)addr;
-	uintptr_t end = start + len;
-	uintptr_t p;
-
-	for (p = start; p < end; p += 4)
-		__asm__ volatile ("dc cvau, %0" : : "r"(p) : "memory");
-	if (p < end + 4)
-		__asm__ volatile ("dc cvau, %0" : : "r"(end - 1) : "memory");
-	__asm__ volatile ("dsb ish");
-
-	for (p = start; p < end; p += 4)
-		__asm__ volatile ("ic ivau, %0" : : "r"(p) : "memory");
-	if (p < end + 4)
-		__asm__ volatile ("ic ivau, %0" : : "r"(end - 1) : "memory");
-	__asm__ volatile ("dsb ish");
-	__asm__ volatile ("isb");
-}
-
 static void *load_elf_payload(const char *path, size_t *entry_point_out)
 {
 	int fd = z_open(path, O_RDONLY);
@@ -249,7 +230,7 @@ static void *load_elf_payload(const char *path, size_t *entry_point_out)
 		z_mprotect(p, seg_sz, prot);
 
 		if (prot & PROT_EXEC)
-			z_flush_cache(p, seg_sz);
+			arch_flush_cache(p, seg_sz);
 	}
 
 	z_close(fd);

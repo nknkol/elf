@@ -1,9 +1,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../elf/src/payload/execve_utils.h"
-#include "../../elf/src/payload/path_rewrite.h"
-#include "../../elf/src/payload/config.h"
+#include "execve_utils.h"
+#include "path_rewrite.h"
+#include "config.h"
 
 extern payload_config_t g_payload_config;
 

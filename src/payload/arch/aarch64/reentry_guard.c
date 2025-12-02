@@ -1,8 +1,7 @@
-/* Lightweight TLS-like reentry guard.
+/* Lightweight TLS-like reentry guard (AArch64).
  *
- * We key slots by the architectural thread pointer (tpidr_el0) so each thread
- * can enter the hook at most once. This avoids recursive hook entry when the
- * payload itself issues syscalls via the host libc or other instrumented code.
+ * Uses tpidr_el0 as per-thread key to prevent recursive hook entry when the
+ * payload issues syscalls.
  */
 #include <stddef.h>
 #include <stdint.h>

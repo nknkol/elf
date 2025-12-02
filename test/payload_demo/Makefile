@@ -1,16 +1,24 @@
 # 相对 userlandexec/test/payload_demo，工具链配置在 build-hnp/utils
-include ../../../utils/Makefrag
+include ../../../../utils/Makefrag
+
+ARCH ?= aarch64
+ARCH_DIR := $(PAYLOAD_BASE)/arch/$(ARCH)
 
 LDFLAGS     += -static
-override BUILD_DIR := ../../build
+override BUILD_DIR := ../../../build
 override BIN_DIR   := $(BUILD_DIR)/bin
 
 TARGETS := payload_demo payload_demo_tests
 
-PAYLOAD_SRCS := ../../elf/src/payload/execve_utils.c \
-                ../../elf/src/payload/path_rewrite.c \
-                ../../elf/src/payload/config.c \
-                ../../elf/src/payload/mini_libc.c
+# Pull in payload logic (arch-neutral) + arch-specific mini libc for helpers.
+PAYLOAD_BASE := ../../../elf/src/payload
+PAYLOAD_COMMON_SRCS := $(addprefix $(PAYLOAD_BASE)/logic/, \
+                       config.c execve_utils.c path_rewrite.c syscall_hooks.c)
+PAYLOAD_ARCH_SRCS := $(addprefix $(ARCH_DIR)/, \
+                     mini_libc.c reentry_guard.c raw_syscall.S syscall_disp.c)
+PAYLOAD_SRCS := $(PAYLOAD_COMMON_SRCS) $(PAYLOAD_ARCH_SRCS)
+
+PAYLOAD_INCLUDES := -I$(PAYLOAD_BASE)/include -I$(ARCH_DIR)
 
 .PHONY: all clean
 
@@ -21,7 +29,7 @@ $(BIN_DIR)/payload_demo: payload_demo.c | $(BIN_DIR)
 	$(STRIP) $@
 
 $(BIN_DIR)/payload_demo_tests: payload_demo_tests.c $(PAYLOAD_SRCS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -I../../elf/src/payload -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) $(PAYLOAD_INCLUDES) -o $@ $^
 	$(STRIP) $@
 
 $(BIN_DIR):

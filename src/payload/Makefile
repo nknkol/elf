@@ -1,11 +1,30 @@
 TARGET = payload.elf
 ELF = payload.elf
 
-# Update Source List: Added syscall_disp.c and raw_syscall.S
-SRC = entry.S raw_syscall.S syscall_disp.c mini_libc.c reentry_guard.c config.c path_rewrite.c execve_utils.c
+ARCH ?= aarch64
+
+ARCH_DIR := arch/$(ARCH)
+
+# Common sources (arch-neutral)
+SRC_COMMON := $(addprefix logic/, config.c path_rewrite.c execve_utils.c syscall_hooks.c)
+
+# Arch-specific sources
+SRC_ARCH_aarch64 := $(addprefix $(ARCH_DIR)/, entry.S raw_syscall.S syscall_disp.c mini_libc.c reentry_guard.c)
+
+SRC_ARCH = $(SRC_ARCH_$(ARCH))
+
+ifeq ($(strip $(SRC_ARCH)),)
+  $(error ARCH '$(ARCH)' is not supported in payload)
+endif
+
+SRC = $(SRC_COMMON) $(SRC_ARCH)
 OBJ = $(SRC:.c=.o)
 OBJ := $(OBJ:.S=.o)
-CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin -Isrc
+
+INCLUDES := -I. -Isrc -Iinclude -I$(ARCH_DIR)
+
+CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin
+CPPFLAGS += $(INCLUDES)
 CFLAGS += $(EXTRA_CFLAGS)
 
 all: $(TARGET)
@@ -17,15 +36,15 @@ $(TARGET): $(ELF)
 
 $(ELF): $(OBJ)
 	@echo "Linking payload..."
-	# Note: order matters for entry point, but we use -e _start so entry.o doesn't STRICTLY need to be first, 
+	# Note: order matters for entry point, but we use -e _start so entry.o doesn't STRICTLY need to be first,
 	# but it's good practice.
 	$(LD) -shared -Bsymbolic -e _start -o $@ $(OBJ)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 %.o: %.S
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o $(ELF) $(TARGET)
+	rm -f $(OBJ) *.o $(ELF) $(TARGET)
