@@ -1,19 +1,21 @@
 #include <syscall.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "z_asm.h"
 #include "z_syscalls.h"
 
-static int errno;
+static int z_errno_storage;
 
 int *z_perrno(void)
 {
-	return &errno;
+	return &z_errno_storage;
 }
 
 static long check_error(long rc)
 {
 	if (rc < 0 && rc > -4096) {
-		errno = -rc;
+		z_errno = -rc;
 		rc = -1;
 	}
 	return rc;
@@ -46,6 +48,7 @@ DEF_SYSCALL1(int, chdir, const char *, path)
 DEF_SYSCALL2(int, munmap, void *, addr, size_t, length)
 DEF_SYSCALL3(int, mprotect, void *, addr, size_t, length, int, prot)
 DEF_SYSCALL3(int, prctl, int, option, unsigned long, arg2, unsigned long, arg3)
+DEF_SYSCALL2(char *, getcwd, char *, buf, size_t, size)
 
 int z_open(const char * filename, int flags)
 {
@@ -63,5 +66,17 @@ z_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 	return (void *)SYSCALL(mmap2, addr, length, prot, flags, fd, offset >> 12);
 #else
 	return (void *)SYSCALL(mmap, addr, length, prot, flags, fd, offset);
+#endif
+}
+
+ssize_t z_readlink(const char *path, char *buf, size_t bufsiz)
+{
+#if defined(SYS_readlinkat)
+	/* Prefer readlinkat: works for相对/绝对路径且更通用 */
+	return (ssize_t)SYSCALL(readlinkat, AT_FDCWD, path, buf, bufsiz);
+#elif defined(SYS_readlink)
+	return (ssize_t)SYSCALL(readlink, path, buf, bufsiz);
+#else
+	return -1;
 #endif
 }

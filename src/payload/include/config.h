@@ -15,6 +15,7 @@
 #ifndef CONFIG_DEFAULT_PAYLOAD_PATH
 #define CONFIG_DEFAULT_PAYLOAD_PATH "./payload.elf"
 #endif
+#define CONFIG_CHILD_LOADER_ARG "--child-loader"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];

@@ -13,7 +13,7 @@
 - Hook 范围（规划）：`open/openat/stat/fstatat/access/execve/chdir/getcwd/mkdir/mknod/unlink/rename/link/symlink/readlink/socket/bind/connect` 等路径/网络相关 syscall，按环境变量开关。
 - 路径虚拟化：把宿主传入路径复制到 payload 自己的内存，按根替换/bind 映射表重写后直接 `syscall`，不调用宿主 libc，避免重入。
 - 默认 loader 绑定：无需手动 PROOT_BIND，自动把 guest `/elfloader` 映射到 `CONFIG_DEFAULT_LOADER_DST`。
-- loader 自动定位：优先用 `HOOK_LOADER_PATH` 覆盖，其次 `/elfloader` 绑定，最后按 PATH 搜索 `elfloader`（可用 `HOOK_LOADER_NAME` 指定文件名），找不到直接 ENOENT，不会回退裸 exec。
+- loader 自动定位（当前实现）：只依赖 `/elfloader` 绑定路径；`HOOK_LOADER_PATH`/`HOOK_LOADER_NAME` 尚未实现，后续作为 TODO。
 - 重入与日志：TLS 中放递归保护标记，hook 内只用裸 `syscall(SYS_write,…)` 输出日志，避免再次触发 hook 或宿主 libc 锁。
 - Stub 策略：优先在目标附近 hint mmap 一页可执行，保证单条分支可达；如遇距离问题，再设计中间跳板（短跳到跳板，再长跳到远 stub）。
 - 状态：当前代码回到稳定的原始方案（静态 musl + TLS/私有栈，简单 hint mmap stub），tiny_target/payload_demo 跑通；复杂 proot 功能未实现。
@@ -34,6 +34,7 @@
 - 桩/入口不要额外破坏调用方认为“保持不变”的寄存器。曾因入口快速过滤先改写 x9、桩复用 x16/x17/x30 未保存，导致返回时上下文损坏触发 SIGSEGV。修复：快速过滤直接比较 x8；stub 先保存/恢复 x16/x17，恢复 x30 后用立即分支返回原 SVC+4。新增指令/寄存器时务必一并保存或更新调用约定。
 - 内联 `svc` 的调用方通常不会把 x9/x16/x17 写进 clobber，依赖 hook 保持 ABI；尽量在 hook 端保持寄存器无副作用，避免逼调用方改汇编。
 - 共享配置 memfd 踩坑：强行让子 loader 通过共享内存拿配置，在平台不支持 memfd 或 fd 被关闭时会 mmap 失败甚至段错误。应先区分主/子 loader（参数或标志位），共享内存传递要做 magic/version/size 校验，不可用时回退配置文件，不要在校验失败时继续解引用。
+- PATH/软链接/脚本执行踩坑：`execve` 不能只看 `argv[0]`，必须使用真实 pathname (`args[0]`) 去重写路径、展开软链接；否则 `PATH` 解析出的 `/bin/ls` 会因 argv[0]="ls" 被当成当前目录文件而报 ENOENT。软链接展开后若指向 ELF 走 loader；指向脚本则提前解析 shebang，把解释器作为 exec 目标并把脚本作为参数传入，避免交给内核直接解析导致解释器逃逸 root/bind。
 
 ## Hook 列表与状态
 
@@ -60,6 +61,7 @@
 
 | 状态 | 任务 | 说明 |
 | ---- | ---- | ---- |
+| ✘ | 路径处理统一/规范化 | 区分主/子 loader 的路径处理：主 loader 打开目标时保持原始路径和符号链接，不做绑定/根替换；子 loader 必须按 `PROOT_ROOT`/bind 重写，符号链接指向绝对路径时先标准化（去掉 `//`、`.`、`..`）再拼接根，保证不泄漏宿主路径且避免拼接错误。拆项：a) 统一 `join_paths`/规范化逻辑供 loader/payload 共用；b) 处理 execve 相对路径拼接（目前 syscall_hooks.c 手动 `getcwd`+`/`）；c) 路径列表重写规范化（PATH/LD_LIBRARY_PATH 在 execve_utils.c）；d) loader 打开目标时的 `rewrite_exec_path` 逻辑对符号链接/根拼接一致化。 |
 | ✘ | 共享配置传递安全化 | 区分主 loader/子 loader：主 loader 解析配置后用参数标记子 loader，安全传递配置（共享内存/参数），校验 magic/version/size，平台不支持或句柄失效时回退文件路径，避免子 loader mmap 失效段导致段错误。 |
 | ✔ | ld.so 库加载 hook | 通过拦截 mmap/mprotect 可执行映射后即时调用 `install_hook`，对新加载共享库的 text 段补钩，覆盖后续加载的 libc/libm 等共享库里的 `svc`，彻底阻断动态库逃逸。 |
 | ✘ | 初始化/配置扩展 | 引入“微型 init”或扩展配置，启动时统一做容器内初始化：`chdir` 到容器根/工作目录，构造/覆盖 PATH/LD_LIBRARY_PATH 等关键环境（按 root/bind 改写），清理高危变量，预绑定必需目录，行为类似 Dockerfile init/proot 配置脚本。 |
@@ -76,18 +78,18 @@
 
 ## 当前进度与实现要点
 
-- 链式 execve 强制开启：任何 execve 都会尝试通过 `/elfloader` 重新进入 loader，找不到 loader 直接返回 ENOENT，不再回退裸 exec；支持 `HOOK_LOADER_PATH` 指定完整路径，`HOOK_LOADER_NAME` 指定可执行名，PATH 内自动搜索。
+- 链式 execve 强制开启：任何 execve 都会尝试通过 `/elfloader` 重新进入 loader，找不到 loader 直接返回 ENOENT，不再回退裸 exec；当前未实现 `HOOK_LOADER_PATH`/`HOOK_LOADER_NAME`，仅依赖 `/elfloader` 绑定。
 - 默认绑定：即使未设置 PROOT_BIND 也会自动把 guest `/elfloader` 映射到 `CONFIG_DEFAULT_LOADER_DST`，确保鸿蒙场景下始终有 loader。
 - 解释器路径重写：加载 ELF 时会把 PT_INTERP 指向的解释器路径按配置的 root/bind 改写，优先使用容器内路径，避免直接访问宿主 `/lib/…` 造成逃逸。
-- 根目录强制：配置 `PROOT_ROOT` 后 loader 启动即 `chdir` 到该根，目标路径必须用相对路径，禁止宿主绝对路径透传，避免从宿主 cwd 逃逸。
+- 根目录强制：配置 `PROOT_ROOT` 后主 loader 启动即 `chdir` 到该根，拒绝绝对路径目标；子 loader 通过 `--child-loader` 标记保留调用方 cwd，但解析时会把相对/软链路径落在 root/bind 内。
 - 路径改写稳定：修复了 bind 目标长于源时的自覆盖拼接问题；`rewrite_path_from_host` 同步修正。
 - 日志与调试：`HOOK_LOG=1` 打印关键 syscall（含 execve 链路路径），便于确认是否正确链式/重写。
-- 仍未实现/待办：网络相关 hook（socket/bind/connect）、环境变量白名单、白障（whiteout）覆盖逻辑、链式自检和错误回退策略。
+- 仍未实现/待办：网络相关 hook（socket/bind/connect）、环境变量白名单、`HOOK_LOADER_PATH`/`HOOK_LOADER_NAME`/`ENV_` 扩展、白障（whiteout）覆盖逻辑、链式自检和错误回退策略。
 - 动态库逃逸防范（方案）：最彻底的做法是直接在 ld.so 内挂钩其库加载路径（如 `_dl_map_object`/`load_library` 等），在每个新映射的可执行段完成 mmap/mprotect 后立即调用 `install_hook` 扫描并补丁 text，这样 libc/libm 等后续加载的共享库也会被改写 `svc`，避免 printf 等经由未改写的 stub 逃逸。可在 loader 阶段对 ld.so 目标函数打跳转到包装函数，包装里先走原逻辑再补丁新段；比单纯 syscall 拦截更精准、更彻底。
 
 ## 配置文件
 
 - 默认配置路径由编译期宏 `CONFIG_DEFAULT_CONFIG_PATH` 定义（当前 `/data/service/hnp/horpkg-base.org/horpkg-base_1.0/etc/loader.conf`），运行时可用 `elfloader -c /path/to/conf <target>` 覆盖。
-- 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=1`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d` 等；`#` 开头为注释，空行和空白行会被忽略。
+- 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=1`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d`、`PAYLOAD_PATH=/path/to/payload.elf` 等；`#` 开头为注释，空行和空白行会被忽略。`PAYLOAD_PATH` 若未设置默认取 `CONFIG_DEFAULT_PAYLOAD_PATH`（当前 `./payload.elf`）。
 - 加载顺序：仅读取配置文件，随后自动补上 `/elfloader` 绑定，不再信任容器内环境变量，避免被覆写导致逃逸。
 - 编译期可通过 `make DEFAULT_CONFIG_PATH=/your/path` 覆盖默认配置路径；可用 `SAMPLE_CONFIG_PATH=/your/sample` 在构建时自动复制 `loader.conf.sample` 到指定位置（可与默认配置路径不同）。

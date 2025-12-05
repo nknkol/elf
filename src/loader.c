@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <errno.h>
 
 #include "z_asm.h"
 #include "z_syscalls.h"
@@ -16,6 +17,7 @@
 			 (((x) & PF_W) ? PROT_WRITE : 0) | \
 			 (((x) & PF_X) ? PROT_EXEC : 0))
 #define LOAD_ERR	((unsigned long)-1)
+#define SYMLINK_MAX_DEPTH 4
 
 static int z_strncmp(const char *s1, const char *s2, size_t n)
 {
@@ -388,6 +390,15 @@ static void load_config_file(payload_config_t *cfg, const char *path, char *payl
 	}
 }
 
+static int is_child_loader_arg(const char *arg)
+{
+	if (!arg)
+		return 0;
+	size_t key_len = z_strlen(CONFIG_CHILD_LOADER_ARG);
+	return z_strncmp(arg, CONFIG_CHILD_LOADER_ARG, key_len) == 0 &&
+		arg[key_len] == '\0';
+}
+
 static int has_loader_bind(payload_config_t *cfg)
 {
 	if (!cfg)
@@ -397,6 +408,81 @@ static int has_loader_bind(payload_config_t *cfg)
 			return 1;
 	}
 	return 0;
+}
+
+static int parse_shebang(const char *path, char *interp, size_t interp_sz,
+			 char *arg, size_t arg_sz)
+{
+	if (!path || !interp || interp_sz == 0)
+		return 0;
+	int fd = z_open(path, O_RDONLY);
+	if (fd < 0)
+		return 0;
+
+	char buf[256];
+	ssize_t n = z_read(fd, buf, sizeof(buf));
+	z_close(fd);
+	if (n < 2 || buf[0] != '#' || buf[1] != '!')
+		return 0;
+
+	size_t pos = 2;
+	while (pos < (size_t)n && (buf[pos] == ' ' || buf[pos] == '\t'))
+		pos++;
+
+	size_t out = 0;
+	while (pos < (size_t)n && buf[pos] != '\n' && buf[pos] != '\r' &&
+	       buf[pos] != ' ' && buf[pos] != '\t') {
+		if (out + 1 < interp_sz)
+			interp[out++] = buf[pos];
+		pos++;
+	}
+	interp[out] = '\0';
+	if (out == 0)
+		return 0;
+
+	while (pos < (size_t)n && (buf[pos] == ' ' || buf[pos] == '\t'))
+		pos++;
+
+	out = 0;
+	while (pos < (size_t)n && buf[pos] != '\n' && buf[pos] != '\r') {
+		if (out + 1 < arg_sz)
+			arg[out++] = buf[pos];
+		pos++;
+	}
+	if (arg && arg_sz)
+		arg[out < arg_sz ? out : arg_sz - 1] = '\0';
+
+	return 1;
+}
+
+static int is_elf_file(const char *path)
+{
+	if (!path)
+		return 0;
+	int fd = z_open(path, O_RDONLY);
+	if (fd < 0)
+		return 0;
+	unsigned char ident[4];
+	if (z_read(fd, ident, sizeof(ident)) != (ssize_t)sizeof(ident)) {
+		z_close(fd);
+		return 0;
+	}
+	z_close(fd);
+	return ident[0] == ELFMAG0 && ident[1] == ELFMAG1 &&
+	       ident[2] == ELFMAG2 && ident[3] == ELFMAG3;
+}
+
+static void log_bind_list(payload_config_t *cfg, const char *tag)
+{
+	if (!cfg)
+		return;
+	z_printf("[Loader] %s: root=\"%s\" binds=%d config=\"%s\" payload=\"%s\"\n",
+		 tag ? tag : "config", cfg->root, cfg->bind_count,
+		 cfg->config_path, cfg->payload_path);
+	for (int i = 0; i < cfg->bind_count && i < CONFIG_MAX_BINDS; i++) {
+		z_printf("[Loader]   bind[%d]: %s -> %s\n", i,
+			 cfg->binds[i].src, cfg->binds[i].dst);
+	}
 }
 
 static void ensure_loader_bind(payload_config_t *cfg)
@@ -460,6 +546,106 @@ static size_t join_paths(char *out, size_t out_sz,
 	return pos;
 }
 
+static size_t dirname_len(const char *path)
+{
+	size_t len = z_strlen(path);
+	for (size_t i = len; i > 0; i--) {
+		if (path[i - 1] == '/') {
+			return (i == 1) ? 1 : i - 1;
+		}
+	}
+	return 0;
+}
+
+static void build_rooted_path(payload_config_t *cfg, const char *path,
+			      char *out, size_t out_sz)
+{
+	if (!out || out_sz == 0)
+		return;
+	if (!path) {
+		out[0] = '\0';
+		return;
+	}
+	if (!cfg || cfg->root[0] == '\0') {
+		copy_cstr(out, out_sz, path);
+		return;
+	}
+	if (has_prefix(path, cfg->root)) {
+		copy_cstr(out, out_sz, path);
+		return;
+	}
+	join_paths(out, out_sz, cfg->root, z_strlen(cfg->root), path);
+}
+
+static const char *resolve_child_loader_path(payload_config_t *cfg,
+					     const char *path,
+					     int is_child_loader,
+					     char *out, size_t out_sz)
+{
+	if (!is_child_loader || !cfg || cfg->root[0] == '\0' ||
+	    !path || !out || out_sz == 0)
+		return path;
+
+	char current[CONFIG_MAX_PATH];
+	char target[CONFIG_MAX_PATH];
+	char cwd_buf[CONFIG_MAX_PATH];
+	const char *base = NULL;
+
+	if (path[0] == '/') {
+		build_rooted_path(cfg, path, current, sizeof(current));
+	} else {
+		if (z_getcwd(cwd_buf, sizeof(cwd_buf))) {
+			base = cwd_buf;
+			z_printf("[Loader]   cwd for resolve: \"%s\"\n", base);
+		}
+		if (base && has_prefix(base, cfg->root)) {
+			join_paths(current, sizeof(current), base, z_strlen(base), path);
+		} else if (cfg->root[0]) {
+			join_paths(current, sizeof(current), cfg->root, z_strlen(cfg->root), path);
+		} else if (base) {
+			join_paths(current, sizeof(current), base, z_strlen(base), path);
+		} else {
+			copy_cstr(current, sizeof(current), path);
+		}
+	}
+
+	z_printf("[Loader] child=%d resolve path \"%s\" -> start \"%s\"\n",
+		 is_child_loader, path ? path : "(null)", current);
+
+	for (int depth = 0; depth < SYMLINK_MAX_DEPTH; depth++) {
+		ssize_t n = z_readlink(current, target, sizeof(target) - 1);
+		if (n < 0) {
+			z_printf("[Loader]   readlink failed on \"%s\": rc=%zd errno=%d\n",
+				 current, n, z_errno);
+			if (z_errno == EINVAL)
+				break; /* not a symlink */
+			break;
+		}
+		if ((size_t)n >= sizeof(target))
+			n = sizeof(target) - 1;
+		target[n] = '\0';
+		if (target[0] == '\0')
+			break;
+
+		z_printf("[Loader]   link hop %d: \"%s\" -> \"%s\"%s\n",
+			 depth, current, target, target[0] == '/' ? " (abs)" : " (rel)");
+
+		if (target[0] == '/') {
+			join_paths(current, sizeof(current), cfg->root,
+				   z_strlen(cfg->root), target);
+		} else {
+			size_t dir_len = dirname_len(current);
+			join_paths(current, sizeof(current), current, dir_len, target);
+		}
+	}
+
+	z_printf("[Loader] child=%d final resolved \"%s\"\n",
+		 is_child_loader, current);
+
+	copy_cstr(out, out_sz, current);
+	return out;
+}
+
 static int apply_bind_overlay(payload_config_t *cfg, char *out, size_t out_sz, const char *in_path)
 {
 	if (!cfg)
@@ -507,11 +693,17 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	Elf_auxv_t *av;
 	char **argv, **env, **p, *elf_interp = NULL;
 	char interp_path[CONFIG_MAX_PATH];
+	char open_path[CONFIG_MAX_PATH];
+	char shebang_interp[CONFIG_MAX_PATH];
+	char shebang_interp_arg[CONFIG_MAX_PATH];
+	char shebang_script[CONFIG_MAX_PATH];
 	unsigned long base[2], entry[2];
 	const char *file;
 	ssize_t sz;
 	int argc, fd, i;
 	int load_interp_next = 0;
+	int child_loader = 0;
+	int shebang_mode = 0;
 
 	void *payload_base = NULL;
 	size_t payload_entry_addr = 0;
@@ -528,6 +720,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	while (*p++ != NULL)
 		;
 	av = (void *)p;
+	Elf_auxv_t *av_start = av;
 
 	(void)env;
 	const char *config_path = CONFIG_DEFAULT_CONFIG_PATH;
@@ -540,15 +733,24 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		config_path = argv[argi + 1];
 		argi += 2;
 	}
+	if (argc > argi && is_child_loader_arg(argv[argi])) {
+		child_loader = 1;
+		argi++;
+	}
 	load_config_file(&bootstrap_cfg, config_path, payload_path_override);
-	if (bootstrap_cfg.root[0]) {
+	log_bind_list(&bootstrap_cfg, "config loaded");
+	z_printf("[Loader] child_loader=%d argv_target=\"%s\" payload_path_override=\"%s\"\n",
+		 child_loader, argc > argi ? argv[argi] : "(none)",
+		 payload_path_override[0] ? payload_path_override : "(none)");
+	/* 主 loader 才主动 chdir 到 root；子 loader 保留调用方 cwd 以正确解析相对路径 */
+	if (bootstrap_cfg.root[0] && !child_loader) {
 		if (z_chdir(bootstrap_cfg.root) < 0)
 			z_errx(1, "chdir to root %s failed", bootstrap_cfg.root);
 	}
 	if (argc <= argi)
 		z_errx(1, "no input file");
 	file = argv[argi];
-	if (bootstrap_cfg.root[0] && file[0] == '/')
+	if (bootstrap_cfg.root[0] && file[0] == '/' && !child_loader)
 		z_errx(1, "absolute path not allowed when PROOT_ROOT is set; use path relative to root");
 	char **target_argv = &argv[argi];
 
@@ -566,6 +768,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			init_payload_config(payload_cfg);
 			z_memcpy(payload_cfg, &bootstrap_cfg, sizeof(*payload_cfg));
 			ensure_loader_bind(payload_cfg);
+			log_bind_list(payload_cfg, "payload config");
 		} else {
 			z_printf("[Loader] Warning: payload config block not found.\n");
 		}
@@ -573,8 +776,45 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 	for (i = 0;; i++, ehdr++) {
 		int loading_interp = load_interp_next;
-		if ((fd = z_open(file, O_RDONLY)) < 0)
-			z_errx(1, "can't open %s", file);
+		const char *path_for_open = resolve_child_loader_path(&bootstrap_cfg,
+				file, child_loader, open_path, sizeof(open_path));
+		z_printf("[Loader] child=%d open target \"%s\" (arg=\"%s\")\n",
+			 child_loader, path_for_open, file);
+		if (child_loader && !loading_interp && !shebang_mode) {
+			z_memset(shebang_interp, 0, sizeof(shebang_interp));
+			z_memset(shebang_interp_arg, 0, sizeof(shebang_interp_arg));
+			if (parse_shebang(path_for_open, shebang_interp, sizeof(shebang_interp),
+					  shebang_interp_arg, sizeof(shebang_interp_arg))) {
+				copy_cstr(shebang_script, sizeof(shebang_script), path_for_open);
+				char resolved_interp[CONFIG_MAX_PATH];
+				if (shebang_interp[0] == '/') {
+					resolve_child_loader_path(&bootstrap_cfg, shebang_interp,
+								  child_loader, resolved_interp, sizeof(resolved_interp));
+				} else {
+					size_t dir_len = dirname_len(path_for_open);
+					join_paths(resolved_interp, sizeof(resolved_interp),
+						   path_for_open, dir_len, shebang_interp);
+				}
+				copy_cstr(shebang_interp, sizeof(shebang_interp), resolved_interp);
+				z_printf("[Loader] shebang: script=\"%s\" interp=\"%s\" arg=\"%s\"\n",
+					 shebang_script, shebang_interp, shebang_interp_arg);
+				file = shebang_interp;
+				shebang_mode = 1;
+				/* Restart loop with interpreter path */
+				i--;
+				continue;
+			}
+		}
+		if (child_loader) {
+			int elf = is_elf_file(path_for_open);
+			z_printf("[Loader] child=%d ELF check \"%s\": %s\n",
+				 child_loader, path_for_open, elf ? "yes" : "no");
+			if (!elf) {
+				z_errx(1, "target is not ELF: %s", path_for_open);
+			}
+		}
+		if ((fd = z_open(path_for_open, O_RDONLY)) < 0)
+			z_errx(1, "can't open %s", path_for_open);
 		if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
 			z_errx(1, "can't read ELF header %s", file);
 		if (!check_ehdr(ehdr))
@@ -610,6 +850,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			/* Resolve interpreter inside configured root/binds to avoid host escape */
 			file = rewrite_interp_path(&bootstrap_cfg, elf_interp,
 						   interp_path, sizeof(interp_path));
+			z_printf("[Loader] interp \"%s\" -> \"%s\"\n", elf_interp, file);
 			load_interp_next = 1;
 			break;
 		}
@@ -626,7 +867,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		AVSET(AT_PHNUM, av, ehdrs[Z_PROG].e_phnum);
 		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
 		AVSET(AT_ENTRY, av, entry[Z_PROG]);
-		AVSET(AT_EXECFN, av, (unsigned long)target_argv[0]);
+		const char *execfn = target_argv[0];
+		if (shebang_mode && shebang_script[0])
+			execfn = shebang_script;
+		AVSET(AT_EXECFN, av, (unsigned long)execfn);
 		AVSET(AT_BASE, av, elf_interp ?
 				base[Z_INTERP] : av->a_un.a_val);
 		}
@@ -635,9 +879,50 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 #undef AVSET
 	++av;
 
-	z_memcpy(&argv[0], &argv[argi],
-		 (unsigned long)av - (unsigned long)&argv[argi]);
-	(*sp) -= argi;
+	if (shebang_mode) {
+		int envc = 0;
+		while (env && env[envc])
+			envc++;
+
+		int auxc = 0;
+		Elf_auxv_t *aux_src = av_start;
+		while (aux_src[auxc].a_type != AT_NULL)
+			auxc++;
+		auxc++; /* include AT_NULL */
+
+		/* Build argv list: interp [arg] script_path <script args> */
+		int orig_target_argc = argc - argi; /* includes script + its args */
+		int extra = 1; /* script path */
+		if (shebang_interp_arg[0])
+			extra++;
+		int new_argc = orig_target_argc + extra;
+
+		char **dst = argv;
+		int pos = 0;
+		dst[pos++] = shebang_interp;
+		if (shebang_interp_arg[0])
+			dst[pos++] = shebang_interp_arg;
+		dst[pos++] = shebang_script;
+		for (int k = 1; k < orig_target_argc; k++) {
+			dst[pos++] = argv[argi + k];
+		}
+		dst[new_argc] = NULL;
+
+		char **dst_env = &dst[new_argc + 1];
+		for (int e = 0; e < envc; e++)
+			dst_env[e] = env[e];
+		dst_env[envc] = NULL;
+
+		Elf_auxv_t *dst_aux = (Elf_auxv_t *)&dst_env[envc + 1];
+		for (int a = 0; a < auxc; a++)
+			dst_aux[a] = aux_src[a];
+
+		*sp = new_argc;
+	} else {
+		z_memcpy(&argv[0], &argv[argi],
+			 (unsigned long)av - (unsigned long)&argv[argi]);
+		(*sp) -= argi;
+	}
 
 	z_trampo((void (*)(void))(elf_interp ?
 			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);
