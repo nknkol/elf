@@ -3,7 +3,7 @@
 - 默认环境填充：缺省时设置 PATH/HOME/TERM/USER/LOGNAME，读取 `/etc/environment`。
 - 信号转发：PID1 捕获 SIGTERM/SIGINT/SIGQUIT/SIGHUP，转发给主子进程。
 - 僵尸回收：循环 waitpid(-1)，回收孤儿；主子进程退出后按退出码/信号退出 init。
-- 进程启动：fork 子进程，子进程恢复默认信号后 `execvp(argv[1], &argv[1])`。
+- 进程启动：fork 子进程，子进程恢复默认信号后 `execvp` 目标。`CMD` 直接拆成 argv 执行，不再 `/bin/sh -c`，未指定时默认 `/bin/sh`。
 - 静态构建：默认尝试 `-static` 以减少依赖。
 - 名义路径为相对 `tiny-init`，仅作 argv/AT_EXECFN 占位，不依赖容器内同名文件。
 

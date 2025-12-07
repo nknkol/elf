@@ -1,9 +1,0 @@
-# 默认配置示例
-# 启用日志（1 开启，0 关闭）
-HOOK_LOG=1
-# 根路径（容器根），留空表示不改写
-#PROOT_ROOT=
-# 绑定列表，逗号分隔，格式 源:目标
-#PROOT_BIND=
-# payload.elf 路径
-PAYLOAD_PATH=/data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.elf

@@ -14,7 +14,7 @@
 #define CONFIG_DEFAULT_INIT_PATH "tiny-init" /* 名义路径，仅用于 argv/AT_EXECFN，占位相对路径 */
 #endif
 #ifndef CONFIG_DEFAULT_CONFIG_PATH
-#define CONFIG_DEFAULT_CONFIG_PATH "/data/service/hnp/horpkg-base.org/horpkg-base_1.0/etc/loader.conf"
+#define CONFIG_DEFAULT_CONFIG_PATH "" /* 默认为空，不自动读取配置文件 */
 #endif
 #ifndef CONFIG_DEFAULT_PAYLOAD_PATH
 #define CONFIG_DEFAULT_PAYLOAD_PATH "./payload.elf"
@@ -32,6 +32,12 @@ typedef struct payload_config {
     int32_t env_count;
     int32_t use_init;
     int32_t detach;
+    int32_t hook_range_set;
+    int32_t hook_range_interp_set;
+    int32_t hook_min;
+    int32_t hook_max;
+    int32_t hook_min_interp;
+    int32_t hook_max_interp;
     char root[CONFIG_MAX_PATH];
     struct bind_entry binds[CONFIG_MAX_BINDS];
     char workdir[CONFIG_MAX_PATH];

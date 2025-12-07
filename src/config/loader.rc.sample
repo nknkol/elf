@@ -22,14 +22,17 @@ PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.elf
 # 关键词：ENV、RUN、WORKDIR、USER、CMD
 # ==========================================
 # 设置环境变量
-ENV HOME=/home
+#ENV HOME=/home
 # 执行命令 (阻塞)
-RUN mkdir -p /opt
+#RUN mkdir -p /opt
 # 切换工作目录            
-WORKDIR /opt                 
+WORKDIR /home                 
 # 后台服务 (非阻塞，Init 负责收尸)
-DAEMON /bin/sh     
+#DAEMON /bin/sh     
 # 切换到用户（RUN 使用发行版自带工具（标准做法）创建用户）（暂时不实现）
-USER appuser
+#USER appuser
 # 主进程
-CMD /bin/sh    
+CMD /bin/sh     
+# 钩子范围控制（可选，格式 min-max，默认全量）
+#HOOK_RANGE 0-2147483647
+#HOOK_RANGE_INTERP 0-2147483647

@@ -69,7 +69,7 @@
 ## 最小 proot 功能的实现步骤
 
 1) 固定入口/防重入：在 payload TLS 中加递归标记（每线程可见），hook 入口先检查/置位，出口清除，防止递归进入同类 hook（无论调用来自可执行文件还是宿主共享库、动态拼接的命令）。hook 内避免调用宿主 libc 封装（如 open/printf），改用裸 `syscall(SYS_xxx, …)` 和 `syscall(SYS_write, …)` 输出日志；如必须重入，可用标记短路直接 `svc`。动态生成的命令/execve 同样先重写路径后用裸 syscall 发起。
-2) 配置解析：改为只读配置文件（默认编译期路径，可用 `-c` 覆盖），不再信任容器内环境变量。
+2) 配置解析：仅在显式 `-c` 时读取配置文件（样板 `elf/src/config/loader.rc.sample`），不再信任容器内环境变量。
 3) 路径重写引擎：将宿主路径复制到 payload 自己的缓冲区，应用根替换/绑定表后返回新路径。
 4) 基础 hook 集：拦截 `open/openat/execve/readlink/chdir/getcwd`（如需删除/创建再加 `unlink/mkdir/rename`），流程：检查递归标记→重写路径→直接 `syscall` 调用内核，不走宿主 libc。
 5) （可选）白名单/屏蔽：记录上层删除标记（whiteout），查找时先看上层标记再决定落到下层。
@@ -96,7 +96,7 @@
 
 ## 配置文件
 
-- 默认配置路径由编译期宏 `CONFIG_DEFAULT_CONFIG_PATH` 定义（当前 `/data/service/hnp/horpkg-base.org/horpkg-base_1.0/etc/loader.conf`），运行时可用 `elfloader -c /path/to/conf <target>` 覆盖。
+- 默认不自动加载配置文件；可用 `elfloader -c /path/to/loader.rc <target>` 指定配置（样板：`elf/src/config/loader.rc.sample`）。
 - 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=1`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d`、`PAYLOAD_PATH=/path/to/payload.elf` 等；`#` 开头为注释，空行和空白行会被忽略。`PAYLOAD_PATH` 若未设置默认取 `CONFIG_DEFAULT_PAYLOAD_PATH`（当前 `./payload.elf`）。
 - 加载顺序：仅读取配置文件，随后自动补上 `/elfloader` 绑定，不再信任容器内环境变量，避免被覆写导致逃逸。
 - 编译期可通过 `make DEFAULT_CONFIG_PATH=/your/path` 覆盖默认配置路径；可用 `SAMPLE_CONFIG_PATH=/your/sample` 在构建时自动复制 `loader.conf.sample` 到指定位置（可与默认配置路径不同）。

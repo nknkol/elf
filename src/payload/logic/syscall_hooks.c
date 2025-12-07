@@ -68,6 +68,40 @@ static void small_copy(char *dst, const char *src)
     *dst = 0;
 }
 
+static void format_range(int min, int max, char *buf, size_t buf_sz)
+{
+    if (!buf || buf_sz == 0)
+        return;
+    size_t pos = 0;
+    int vals[2] = { min, max };
+    for (int idx = 0; idx < 2; idx++) {
+        int v = vals[idx];
+        char tmp[32];
+        int tpos = 0;
+        if (v == 0) {
+            tmp[tpos++] = '0';
+        } else {
+            int sign = 0;
+            if (v < 0) { sign = 1; v = -v; }
+            char rev[32];
+            int rpos = 0;
+            while (v > 0 && rpos < (int)sizeof(rev)) {
+                rev[rpos++] = '0' + (v % 10);
+                v /= 10;
+            }
+            if (sign && rpos < (int)sizeof(rev))
+                rev[rpos++] = '-';
+            while (rpos > 0 && tpos + 1 < (int)sizeof(tmp))
+                tmp[tpos++] = rev[--rpos];
+        }
+        for (int i = 0; i < tpos && pos + 1 < buf_sz; i++)
+            buf[pos++] = tmp[i];
+        if (idx == 0 && pos + 1 < buf_sz)
+            buf[pos++] = '-';
+    }
+    buf[pos < buf_sz ? pos : buf_sz - 1] = '\0';
+}
+
 static int path_exists(const char *path)
 {
     if (!path || !path[0])
@@ -477,6 +511,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
                 while (argv_out[argc])
                     argc++;
                 int extra = 2 + (cfg_path ? 2 : 0);
+                if (g_payload_config.hook_range_set)
+                    extra += 2;
+                if (g_payload_config.hook_range_interp_set)
+                    extra += 2;
                 if (argc + extra + 1 >= MAX_EXEC_ARGS) {
                     ret = -ENOENT;
                     break;
@@ -491,6 +529,22 @@ long syscall_handle_common(long sys_no, long args[6]) {
                     argv_out[pos++] = (char *)cfg_path;
                 }
                 argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
+                if (g_payload_config.hook_range_set) {
+                    argv_out[pos++] = "--hook-range";
+                    static char hook_buf[32];
+                    format_range(g_payload_config.hook_min,
+                                 g_payload_config.hook_max,
+                                 hook_buf, sizeof(hook_buf));
+                    argv_out[pos++] = hook_buf;
+                }
+                if (g_payload_config.hook_range_interp_set) {
+                    argv_out[pos++] = "--hook-range-interp";
+                    static char hook_buf2[32];
+                    format_range(g_payload_config.hook_min_interp,
+                                 g_payload_config.hook_max_interp,
+                                 hook_buf2, sizeof(hook_buf2));
+                    argv_out[pos++] = hook_buf2;
+                }
                 argv_out[argc + extra] = NULL;
 
                 args[0] = (long)loader_path;

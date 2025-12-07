@@ -19,6 +19,11 @@
 #define LOAD_ERR	((unsigned long)-1)
 #define SYMLINK_MAX_DEPTH 4
 
+static int g_hook_min_default = 0;
+static int g_hook_max_default = 0x7fffffff;
+static int g_hook_min_interp = 0;
+static int g_hook_max_interp = 0x7fffffff;
+
 static int z_strncmp(const char *s1, const char *s2, size_t n)
 {
 	for (size_t i = 0; i < n; i++) {
@@ -263,21 +268,42 @@ static int create_tiny_init_memfd(void)
 	size_t sz = (size_t)(_binary_tiny_init_tiny_init_end -
 			     _binary_tiny_init_tiny_init_start);
 	int fd = z_memfd_create("tiny-init", 0);
-	if (fd < 0)
+	if (fd < 0) {
+		z_printf("[Loader] tiny-init memfd_create failed errno=%d\n", z_errno);
 		return -1;
+	}
 	if (write_all(fd, _binary_tiny_init_tiny_init_start, sz) < 0)
 		goto err;
 	if (z_lseek(fd, 0, SEEK_SET) < 0)
 		goto err;
+	z_printf("[Loader] tiny-init memfd prepared (fd=%d, size=%lu)\n",
+		 fd, (unsigned long)sz);
 	return fd;
 err:
 	z_close(fd);
 	return -1;
 }
 
-static void parse_hook_range(char **env)
+/* Parse hook range string "A-B" */
+static int parse_range_str(const char *s, int *min_out, int *max_out)
 {
-	(void)env;
+	if (!s || !min_out || !max_out)
+		return 0;
+	int a = 0, b = 0x7fffffff;
+	const char *dash = z_strchr(s, '-');
+	if (dash) {
+		a = z_atoi(s);
+		b = z_atoi(dash + 1);
+	} else {
+		a = z_atoi(s);
+	}
+	if (a < 0)
+		a = 0;
+	if (b < a)
+		b = a;
+	*min_out = a;
+	*max_out = b;
+	return 1;
 }
 
 typedef struct {
@@ -348,6 +374,12 @@ static void init_payload_config(payload_config_t *cfg)
 {
 	if (cfg)
 		z_memset(cfg, 0, sizeof(*cfg));
+	if (cfg) {
+		cfg->hook_min = 0;
+		cfg->hook_max = 0x7fffffff;
+		cfg->hook_min_interp = 0;
+		cfg->hook_max_interp = 0x7fffffff;
+	}
 }
 
 static void apply_config_entry(payload_config_t *cfg, const char *entry, char *payload_path_out)
@@ -447,6 +479,131 @@ static void load_config_file(payload_config_t *cfg, const char *path, char *payl
 	}
 }
 
+static int ensure_guest_memfd(int *fd_io)
+{
+	if (!fd_io)
+		return -1;
+	if (*fd_io >= 0)
+		return *fd_io;
+	int fd = z_memfd_create("guest-config", 0);
+	if (fd < 0) {
+		z_printf("[Loader] guest config memfd_create failed, errno=%d\n", z_errno);
+		return -1;
+	}
+	z_printf("[Loader] guest config memfd created: fd=%d\n", fd);
+	*fd_io = fd;
+	return fd;
+}
+
+static void write_line_memfd(int fd, const char *line)
+{
+	if (fd < 0 || !line)
+		return;
+	size_t len = z_strlen(line);
+	write_all(fd, (const unsigned char *)line, len);
+	write_all(fd, (const unsigned char *)"\n", 1);
+	z_printf("[Loader] guest config line: \"%s\"\n", line);
+}
+
+static void parse_loader_rc(payload_config_t *cfg, const char *path, char *payload_path_out, int *guest_fd_out)
+{
+	if (!cfg || !path || !path[0])
+		return;
+
+	z_printf("[Loader] parse loader.rc path=\"%s\"\n", path);
+	copy_cstr(cfg->config_path, CONFIG_MAX_PATH, path);
+	int fd = z_open(path, O_RDONLY);
+	if (fd < 0) {
+		z_printf("[Loader] failed to open config: %s (errno=%d)\n", path, z_errno);
+		return;
+	}
+	char buf[8192];
+	ssize_t n = z_read(fd, buf, sizeof(buf));
+	z_close(fd);
+	if (n <= 0) {
+		z_printf("[Loader] read config failed: rc=%ld errno=%d\n",
+			 (long)n, z_errno);
+		return;
+	}
+	size_t len = (size_t)n;
+	size_t pos = 0;
+	while (pos < len) {
+		size_t end = pos;
+		while (end < len && buf[end] != '\n')
+			end++;
+		size_t start = pos;
+		while (start < end && (buf[start] == ' ' || buf[start] == '\t'))
+			start++;
+		size_t line_len = (end > start) ? end - start : 0;
+		char line[CONFIG_MAX_PATH * 2];
+		if (line_len >= sizeof(line))
+			line_len = sizeof(line) - 1;
+		for (size_t i = 0; i < line_len; i++)
+			line[i] = buf[start + i];
+		line[line_len] = '\0';
+
+		if (line_len == 0 || line[0] == '#') {
+			pos = end + 1;
+			continue;
+		}
+
+		if (line[0] == '[') {
+			/* 标题注释行，忽略 */
+			pos = end + 1;
+			continue;
+		}
+
+		if (z_strncmp(line, "ROOT ", 5) == 0) {
+			copy_cstr(cfg->root, CONFIG_MAX_PATH, line + 5);
+			z_printf("[Loader] Host ROOT=\"%s\"\n", cfg->root);
+		} else if (z_strncmp(line, "BIND ", 5) == 0) {
+			const char *val = line + 5;
+			const char *colon = z_strchr(val, ':');
+			if (colon) {
+				char left[CONFIG_MAX_PATH];
+				char right[CONFIG_MAX_PATH];
+				copy_substr(left, sizeof(left), val, (size_t)(colon - val));
+				copy_cstr(right, sizeof(right), colon + 1);
+				add_bind_entry(cfg, left, right);
+				z_printf("[Loader] Host BIND %s -> %s\n", left, right);
+			}
+		} else if (z_strncmp(line, "DEBUG ", 6) == 0) {
+			cfg->log_enabled = (line[6] == 'o' || line[6] == 'O') ? 1 : 0;
+			z_printf("[Loader] Host DEBUG=%d\n", cfg->log_enabled);
+		} else if (z_strncmp(line, "PAYLOAD ", 8) == 0) {
+			const char *p = line + 8;
+			if (payload_path_out)
+				copy_cstr(payload_path_out, CONFIG_MAX_PATH, p);
+			copy_cstr(cfg->payload_path, CONFIG_MAX_PATH, p);
+			z_printf("[Loader] Host PAYLOAD=\"%s\"\n", cfg->payload_path);
+		} else if (z_strncmp(line, "HOOK_RANGE ", 11) == 0) {
+			int a = 0, b = 0x7fffffff;
+			if (parse_range_str(line + 11, &a, &b)) {
+				cfg->hook_min = a;
+				cfg->hook_max = b;
+				cfg->hook_range_set = 1;
+				z_printf("[Hook] HOOK_RANGE set to [%d - %d]\n", a, b);
+			}
+		} else if (z_strncmp(line, "HOOK_RANGE_INTERP ", 19) == 0) {
+			int a = 0, b = 0x7fffffff;
+			if (parse_range_str(line + 19, &a, &b)) {
+				cfg->hook_min_interp = a;
+				cfg->hook_max_interp = b;
+				cfg->hook_range_interp_set = 1;
+				z_printf("[Hook] HOOK_RANGE_INTERP set to [%d - %d]\n", a, b);
+			}
+		} else {
+			int gfd = ensure_guest_memfd(guest_fd_out);
+			if (gfd >= 0)
+				write_line_memfd(gfd, line);
+		}
+
+		pos = end + 1;
+	}
+	if (guest_fd_out && *guest_fd_out >= 0)
+		z_lseek(*guest_fd_out, 0, SEEK_SET);
+}
+
 static int is_child_loader_arg(const char *arg)
 {
 	if (!arg)
@@ -469,13 +626,18 @@ static const char *find_config_path_arg(int argc, char **argv)
 			break;
 		}
 		if (z_strncmp(arg, "-c", 3) == 0 || z_strncmp(arg, "--config", 9) == 0) {
-			if (i + 1 < argc)
-				return argv[i + 1];
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			if (argv[i + 1][0] == '-')
+				z_errx(1, "invalid config path for %s", arg);
+			return argv[i + 1];
 		}
 		if (z_strncmp(arg, "-v", 3) == 0 || z_strncmp(arg, "--volume", 9) == 0 ||
 		    z_strncmp(arg, "-e", 3) == 0 || z_strncmp(arg, "--env", 6) == 0 ||
 		    z_strncmp(arg, "-w", 3) == 0 || z_strncmp(arg, "--workdir", 10) == 0 ||
-		    z_strncmp(arg, "--root", 7) == 0 || z_strncmp(arg, "--log", 6) == 0) {
+		    z_strncmp(arg, "--root", 7) == 0 || z_strncmp(arg, "--log", 6) == 0 ||
+		    z_strncmp(arg, "--hook-range", 13) == 0 ||
+		    z_strncmp(arg, "--hook-range-interp", 20) == 0) {
 			i++;
 			continue;
 		}
@@ -492,7 +654,7 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 			     int *child_loader_out, int *target_index_out)
 {
 	int child_loader = 0;
-	int idx = 0;
+	int idx = argc;
 
 	for (int i = 1; i < argc; i++) {
 		char *arg = argv[i];
@@ -515,6 +677,32 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		if (z_strncmp(arg, "-c", 3) == 0 || z_strncmp(arg, "--config", 9) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, "--hook-range", 13) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			int a = 0, b = 0x7fffffff;
+			if (!parse_range_str(argv[i + 1], &a, &b))
+				z_errx(1, "invalid value for %s", arg);
+			cfg->hook_min = a;
+			cfg->hook_max = b;
+			cfg->hook_range_set = 1;
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, "--hook-range-interp", 20) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			int a = 0, b = 0x7fffffff;
+			if (!parse_range_str(argv[i + 1], &a, &b))
+				z_errx(1, "invalid value for %s", arg);
+			cfg->hook_min_interp = a;
+			cfg->hook_max_interp = b;
+			cfg->hook_range_interp_set = 1;
 			i++;
 			continue;
 		}
@@ -585,7 +773,7 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 	if (child_loader_out)
 		*child_loader_out = child_loader;
 	if (target_index_out)
-		*target_index_out = idx ? idx : argc;
+		*target_index_out = idx;
 	return 0;
 }
 static int has_loader_bind(payload_config_t *cfg)
@@ -804,8 +992,8 @@ static const char *resolve_child_loader_path(payload_config_t *cfg,
 	for (int depth = 0; depth < SYMLINK_MAX_DEPTH; depth++) {
 		ssize_t n = z_readlink(current, target, sizeof(target) - 1);
 		if (n < 0) {
-			z_printf("[Loader]   readlink failed on \"%s\": rc=%zd errno=%d\n",
-				 current, n, z_errno);
+			z_printf("[Loader]   readlink failed on \"%s\": rc=%ld errno=%d\n",
+				 current, (long)n, z_errno);
 			if (z_errno == EINVAL)
 				break; /* not a symlink */
 			break;
@@ -905,8 +1093,6 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	argv = (char **)(sp + 1);
 	env = p = (char **)&argv[argc + 1];
 
-	parse_hook_range(env);
-
 	while (*p++ != NULL)
 		;
 	av = (void *)p;
@@ -920,13 +1106,20 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	init_payload_config(&bootstrap_cfg);
 	static char clean_env_store[CONFIG_MAX_ENVS][CONFIG_MAX_PATH];
 	static char *clean_env_ptrs[CONFIG_MAX_ENVS + 1];
+	int guest_cfg_fd = -1;
 	const char *cli_cfg = find_config_path_arg(argc, argv);
 	if (cli_cfg)
 		config_path = cli_cfg;
-	load_config_file(&bootstrap_cfg, config_path, payload_path_override);
+	parse_loader_rc(&bootstrap_cfg, config_path, payload_path_override, &guest_cfg_fd);
 	int target_index = 0;
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index);
-	int argi = target_index ? target_index : 1;
+	int argi = target_index;
+	int has_config = (config_path && config_path[0]) ? 1 : 0;
+	/* Apply hook ranges from config/CLI */
+	g_hook_min_default = bootstrap_cfg.hook_min;
+	g_hook_max_default = bootstrap_cfg.hook_max;
+	g_hook_min_interp = bootstrap_cfg.hook_min_interp;
+	g_hook_max_interp = bootstrap_cfg.hook_max_interp;
 	int clean_envc = 0;
 	for (int i = 0; i < bootstrap_cfg.env_count && i < CONFIG_MAX_ENVS; i++) {
 		copy_cstr(clean_env_store[clean_envc], CONFIG_MAX_PATH, bootstrap_cfg.envs[i]);
@@ -934,26 +1127,69 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		clean_envc++;
 	}
 	clean_env_ptrs[clean_envc] = NULL;
+	if (bootstrap_cfg.use_init && guest_cfg_fd >= 0 && clean_envc + 1 < CONFIG_MAX_ENVS) {
+		static char fd_env[32];
+		int v = guest_cfg_fd;
+		int pos = 0;
+		const char *prefix = "INIT_CONFIG_FD=";
+		while (prefix[pos]) {
+			fd_env[pos] = prefix[pos];
+			pos++;
+		}
+		char numbuf[16];
+		int npos = 0;
+		if (v == 0) {
+			numbuf[npos++] = '0';
+		} else {
+			int tmp = v;
+			char rev[16];
+			int rpos = 0;
+			while (tmp > 0 && rpos < (int)sizeof(rev)) {
+				rev[rpos++] = '0' + (tmp % 10);
+				tmp /= 10;
+			}
+			while (rpos > 0)
+				numbuf[npos++] = rev[--rpos];
+		}
+		for (int i = 0; i < npos && pos + 1 < (int)sizeof(fd_env); i++)
+			fd_env[pos++] = numbuf[i];
+		fd_env[pos] = '\0';
+		copy_cstr(clean_env_store[clean_envc], CONFIG_MAX_PATH, fd_env);
+		clean_env_ptrs[clean_envc] = clean_env_store[clean_envc];
+		clean_envc++;
+		clean_env_ptrs[clean_envc] = NULL;
+	}
 	log_bind_list(&bootstrap_cfg, "config loaded");
 	z_printf("[Loader] child_loader=%d argv_target=\"%s\" payload_path_override=\"%s\"\n",
-		 child_loader, argc > argi ? argv[argi] : "(none)",
+		 child_loader, (argi < argc && argv[argi]) ? argv[argi] : "(none)",
 		 payload_path_override[0] ? payload_path_override : "(none)");
 	/* 主 loader 才主动 chdir 到 root；子 loader 保留调用方 cwd 以正确解析相对路径 */
 	if (bootstrap_cfg.root[0] && !child_loader) {
 		if (z_chdir(bootstrap_cfg.root) < 0)
 			z_errx(1, "chdir to root %s failed", bootstrap_cfg.root);
 	}
-	if (argc <= argi)
+	if (!has_config && bootstrap_cfg.use_init)
+		z_errx(1, "--init requires a config (-c)");
+	if (!has_config && argi >= argc)
 		z_errx(1, "no input file");
-	file = bootstrap_cfg.use_init ? CONFIG_DEFAULT_INIT_PATH : argv[argi];
-	if (bootstrap_cfg.root[0] && file[0] == '/' && !child_loader)
+	if (has_config && !bootstrap_cfg.use_init && argi >= argc)
+		z_errx(1, "no input file");
+	if (bootstrap_cfg.use_init) {
+		file = CONFIG_DEFAULT_INIT_PATH;
+	} else {
+		file = argv[argi];
+	}
+	if (bootstrap_cfg.root[0] && file && file[0] == '/' && !child_loader)
 		z_errx(1, "absolute path not allowed when PROOT_ROOT is set; use path relative to root");
-	char **target_argv = &argv[argi];
+	static char *empty_argv[] = { NULL };
+	char **target_argv = (argi < argc) ? &argv[argi] : empty_argv;
 
 	if (bootstrap_cfg.use_init) {
 		init_memfd = create_tiny_init_memfd();
 		if (init_memfd < 0)
 			z_errx(1, "failed to prepare embedded tiny-init");
+		if (guest_cfg_fd < 0 && argi >= argc)
+			z_errx(1, "guest config not available (memfd_create missing?) and no target provided");
 	}
 
 	z_printf("[Loader] Loading payload.elf...\n");
@@ -980,6 +1216,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		int loading_interp = load_interp_next;
 		fd = -1;
 		const char *path_for_open = NULL;
+		if (loading_interp)
+			set_hook_range(g_hook_min_interp, g_hook_max_interp);
+		else
+			set_hook_range(g_hook_min_default, g_hook_max_default);
 		if (bootstrap_cfg.use_init && !loading_interp) {
 			path_for_open = "(embedded tiny-init)";
 			fd = init_memfd;
