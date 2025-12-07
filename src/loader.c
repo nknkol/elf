@@ -24,34 +24,6 @@ static int g_hook_max_default = 0x7fffffff;
 static int g_hook_min_interp = 0;
 static int g_hook_max_interp = 0x7fffffff;
 
-static int z_strncmp(const char *s1, const char *s2, size_t n)
-{
-	for (size_t i = 0; i < n; i++) {
-		if (s1[i] != s2[i])
-			return s1[i] - s2[i];
-		if (s1[i] == '\0')
-			return 0;
-	}
-	return 0;
-}
-
-static int z_atoi(const char *s)
-{
-	int res = 0;
-	while (*s >= '0' && *s <= '9')
-		res = res * 10 + (*s++ - '0');
-	return res;
-}
-
-static char *z_strchr(const char *s, int c)
-{
-	while (*s != (char)c) {
-		if (!*s++)
-			return 0;
-	}
-	return (char *)s;
-}
-
 static void z_fini(void)
 {
 	/* No-op placeholder for atexit style hook */
@@ -59,14 +31,6 @@ static void z_fini(void)
 
 extern unsigned char _binary_tiny_init_tiny_init_start[];
 extern unsigned char _binary_tiny_init_tiny_init_end[];
-
-static size_t z_strlen(const char *s)
-{
-	size_t n = 0;
-	while (s && s[n])
-		n++;
-	return n;
-}
 
 static int check_ehdr(Elf_Ehdr *ehdr)
 {

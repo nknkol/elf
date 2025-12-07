@@ -15,6 +15,14 @@
 #define PROT_READ       0x1
 #define PROT_WRITE      0x2
 #define PROT_EXEC       0x4
+#define MAP_PRIVATE     0x02
+#define MAP_FIXED       0x10
+#define MAP_ANON        0x20
+#define MAP_ANONYMOUS   MAP_ANON
+#define SYS_pread64     67
+#define SYS_munmap      215
+#define SYS_prctl       167
+#define PR_JIT_WORKAROUND 0x6a6974
 #ifndef O_RDONLY
 #define O_RDONLY        0
 #endif
@@ -263,6 +271,77 @@ static int find_loader_path(char *out, size_t out_sz)
 
 static inline long do_syscall(long sys_no, long *a) {
     return raw_syscall(sys_no, a[0], a[1], a[2], a[3], a[4], a[5]);
+}
+
+static void zero_region(void *addr, unsigned long len)
+{
+    unsigned char *p = (unsigned char *)addr;
+    for (unsigned long i = 0; i < len; i++)
+        p[i] = 0;
+}
+
+static long read_into_region(int fd, void *dst, unsigned long len, long off)
+{
+    unsigned char *p = (unsigned char *)dst;
+    unsigned long remaining = len;
+    long offset = off;
+
+    while (remaining > 0) {
+        unsigned long chunk = remaining > 4096 ? 4096 : remaining;
+        long n = raw_syscall(SYS_pread64, fd, (long)p, (long)chunk, offset, 0, 0);
+        if (n < 0)
+            return n;
+        if (n == 0) {
+            zero_region(p, remaining);
+            break;
+        }
+        p += n;
+        offset += n;
+        remaining -= (unsigned long)n;
+        if (n < (long)chunk) {
+            zero_region(p, remaining);
+            break;
+        }
+    }
+    return 0;
+}
+
+static long mmap_exec_anon_fallback(long *args)
+{
+    void *req_addr = (void *)args[0];
+    unsigned long len = (unsigned long)args[1];
+    int prot = (int)args[2];
+    int flags = (int)args[3];
+    int fd = (int)args[4];
+    long off = args[5];
+
+    int anon_flags = flags | MAP_ANONYMOUS;
+    void *mapped = (void *)raw_syscall(SYS_mmap, (long)req_addr, (long)len,
+                                       PROT_READ | PROT_WRITE, anon_flags, -1, 0);
+    if ((long)mapped < 0)
+        return (long)mapped;
+
+    long rc = read_into_region(fd, mapped, len, off);
+    if (rc < 0) {
+        raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
+        return rc;
+    }
+
+    if (prot & PROT_EXEC)
+        raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 0, 0, 0, 0);
+    long mp = raw_syscall(SYS_mprotect, (long)mapped, (long)len, prot, 0, 0, 0);
+    if (prot & PROT_EXEC)
+        raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 1, 0, 0, 0);
+
+    if (mp < 0) {
+        raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
+        return mp;
+    }
+
+    if (prot & PROT_EXEC)
+        install_hook(mapped, len, (void *)&_start, 0);
+
+    return (long)mapped;
 }
 
 static int build_exec_vec(const char *const *in, char **out,
@@ -563,7 +642,11 @@ long syscall_handle_common(long sys_no, long args[6]) {
 
         case SYS_mprotect:
             SAFE_LOG("[Payload] mprotect\n");
+            if (args[2] & PROT_EXEC)
+                raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 0, 0, 0, 0);
             ret = do_syscall(sys_no, args);
+            if (args[2] & PROT_EXEC)
+                raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 1, 0, 0, 0);
             if (ret == 0 && (args[2] & PROT_EXEC)) {
                 install_hook((void *)args[0], (size_t)args[1], (void *)&_start, 0);
             }
@@ -571,9 +654,13 @@ long syscall_handle_common(long sys_no, long args[6]) {
 
         case SYS_mmap:
             SAFE_LOG("[Payload] mmap\n");
-            ret = do_syscall(sys_no, args);
-            if (ret >= 0 && (args[2] & PROT_EXEC)) {
-                install_hook((void *)ret, (size_t)args[1], (void *)&_start, 0);
+            if ((args[2] & PROT_EXEC) && !(args[3] & MAP_ANON) && (int)args[4] > 0) {
+                ret = mmap_exec_anon_fallback(args);
+            } else {
+                ret = do_syscall(sys_no, args);
+                if (ret >= 0 && (args[2] & PROT_EXEC)) {
+                    install_hook((void *)ret, (size_t)args[1], (void *)&_start, 0);
+                }
             }
             break;
 

@@ -3,7 +3,7 @@ include ../../../utils/Makefrag
 
 # 在此列出需要构建的测试程序子目录（与生成的可执行同名）
 # 新增测试时，添加子目录名即可：TESTS := test_hello tiny_target ...
-TESTS ?= test_hello tiny_target payload_demo usernamespace
+TESTS ?= test_hello tiny_target payload_demo usernamespace mmap_test
 
 # 强制将生成目录指向 userlandexec/build，避免污染 test 子目录
 override BUILD_DIR := ../../build

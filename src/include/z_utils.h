@@ -10,6 +10,10 @@
 
 void	*z_memset(void *s, int c, size_t n);
 void	*z_memcpy(void *dest, const void *src, size_t n);
+int	z_strncmp(const char *s1, const char *s2, size_t n);
+int	z_atoi(const char *s);
+char	*z_strchr(const char *s, int c);
+size_t	z_strlen(const char *s);
 
 void	z_vprintf(const char *fmt, va_list ap);
 void	z_vfdprintf(int fd, const char *fmt, va_list ap);
@@ -27,4 +31,3 @@ void	z_errx(int eval, const char *fmt, ...)
 #endif
 
 #endif /* Z_UTILS_H */
-
