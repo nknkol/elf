@@ -1,0 +1,35 @@
+# ==========================================
+# [Host Layer] 基础设施配置
+# 执行者：Loader (elfloader)
+# 作用域：宿主视角，决定容器如何“坐落”在宿主机上
+# 关键词：ROOT、BIND、DEBUG、PAYLOAD
+# ==========================================
+# 容器物理根目录
+ROOT /storage/Users/currentUser/alpine
+# 挂载数据卷 (Host:Guest)
+BIND /bin:/storage/Users/currentUser/alpine/bin
+BIND /usr:/storage/Users/currentUser/alpine/usr
+BIND /lib:/storage/Users/currentUser/alpine/lib
+BIND /lib64:/storage/Users/currentUser/alpine/lib64
+# 开启 Loader 调试日志 
+DEBUG on      
+# 指定 Payload 路径              
+PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.elf
+# ==========================================
+# [Guest Layer] 运行环境配置
+# 执行者：Init (tiny-init)
+# 作用域：容器视角，决定应用如何运行
+# 关键词：ENV、RUN、WORKDIR、USER、CMD
+# ==========================================
+# 设置环境变量
+ENV HOME=/home
+# 执行命令 (阻塞)
+RUN mkdir -p /opt
+# 切换工作目录            
+WORKDIR /opt                 
+# 后台服务 (非阻塞，Init 负责收尸)
+DAEMON /bin/sh     
+# 切换到用户（RUN 使用发行版自带工具（标准做法）创建用户）（暂时不实现）
+USER appuser
+# 主进程
+CMD /bin/sh    

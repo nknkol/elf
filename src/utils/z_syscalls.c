@@ -43,6 +43,7 @@ DEF_SYSCALL3(ssize_t, read, int, fd, void *, buf, size_t, count)
 DEF_SYSCALL3(ssize_t, write, int, fd, const void *, buf, size_t, count)
 DEF_SYSCALL1(int, close, int, fd)
 DEF_SYSCALL3(int, lseek, int, fd, off_t, off, int, whence)
+DEF_SYSCALL2(int, ftruncate, int, fd, off_t, length)
 DEF_SYSCALL1(int, exit, int, status)
 DEF_SYSCALL1(int, chdir, const char *, path)
 DEF_SYSCALL2(int, munmap, void *, addr, size_t, length)
@@ -66,6 +67,17 @@ z_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 	return (void *)SYSCALL(mmap2, addr, length, prot, flags, fd, offset >> 12);
 #else
 	return (void *)SYSCALL(mmap, addr, length, prot, flags, fd, offset);
+#endif
+}
+
+int z_memfd_create(const char *name, unsigned int flags)
+{
+#ifdef SYS_memfd_create
+	return (int)SYSCALL(memfd_create, name, flags);
+#else
+	(void)name; (void)flags;
+	z_errno = ENOSYS;
+	return -1;
 #endif
 }
 

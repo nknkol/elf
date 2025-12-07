@@ -21,6 +21,21 @@ TARGET := elfloader
 PAYLOAD_DIR := payload
 PAYLOAD_BIN := $(PAYLOAD_DIR)/payload.bin
 
+TINY_INIT_DIR := tiny-init
+TINY_INIT_BIN := $(TINY_INIT_DIR)/tiny-init
+TINY_INIT_OBJ := $(TINY_INIT_DIR)/tiny-init.o
+
+ifeq ($(ARCH),aarch64)
+  TINY_INIT_OBJFMT := elf64-littleaarch64
+  TINY_INIT_ARCH := aarch64
+else ifeq ($(ARCH),amd64)
+  TINY_INIT_OBJFMT := elf64-x86-64
+  TINY_INIT_ARCH := i386:x86-64
+else ifeq ($(ARCH),i386)
+  TINY_INIT_OBJFMT := elf32-i386
+  TINY_INIT_ARCH := i386
+endif
+
 ifeq "$(filter $(ARCH),$(ARCHS))" ""
   $(error ARCH='$(ARCH)' is not supported)
 endif
@@ -56,7 +71,7 @@ SRCS += $(wildcard $(PAYLOAD_ARCH_DIR)/hook.c) $(wildcard $(PAYLOAD_ARCH_DIR)/st
 
 ASRCS := $(wildcard $(ARCH_DIR)/*.S)
 
-OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o)
+OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(TINY_INIT_OBJ)
 
 ifdef SMALL
   OBJS := $(filter-out %/z_printf.o,$(OBJS))
@@ -74,6 +89,16 @@ $(TARGET): $(OBJS)
 $(PAYLOAD_BIN):
 	$(MAKE) -C $(PAYLOAD_DIR) ARCH=$(ARCH) CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)" EXTRA_CFLAGS="$(PAYLOAD_CFLAGS)"
 
+$(TINY_INIT_BIN):
+	$(MAKE) -C $(TINY_INIT_DIR) CC="$(CC)"
+
+$(TINY_INIT_OBJ): $(TINY_INIT_BIN)
+ifeq ($(strip $(TINY_INIT_OBJFMT)),)
+	$(error Unsupported ARCH $(ARCH) for tiny-init embedding)
+endif
+	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(TINY_INIT_BIN) $(TINY_INIT_OBJ)
+
 clean:
 	rm -rf *.o $(TARGET) */*.o */*/*.o
 	$(MAKE) -C $(PAYLOAD_DIR) clean
+	$(MAKE) -C $(TINY_INIT_DIR) clean

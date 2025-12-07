@@ -1,6 +1,9 @@
 #include "execve_utils.h"
 #include "mini_libc.h"
 #include "path_rewrite.h"
+#include "config.h"
+
+extern payload_config_t g_payload_config;
 
 static int has_prefix(const char *s, const char *key, size_t key_len)
 {
@@ -136,6 +139,7 @@ void rewrite_env_entry(const char *in, char *out, size_t out_sz)
 int build_exec_env(const char *const *in, char **out,
                    char buf[][CONFIG_MAX_PATH], size_t max_items)
 {
+    payload_config_t *cfg = &g_payload_config;
     if (!out)
         return 0;
     size_t idx = 0;
@@ -145,6 +149,37 @@ int build_exec_env(const char *const *in, char **out,
             break;
         rewrite_env_entry(s, buf[idx], sizeof(buf[idx]));
         out[idx] = buf[idx];
+    }
+    /* 注入 CLI/config 指定的环境变量，覆盖同名键 */
+    for (int i = 0; cfg && i < cfg->env_count && i < CONFIG_MAX_ENVS; i++) {
+        const char *kv = cfg->envs[i];
+        if (!kv || kv[0] == '\0')
+            continue;
+        char rewritten[CONFIG_MAX_PATH];
+        rewrite_env_entry(kv, rewritten, sizeof(rewritten));
+        /* 查找是否已有同名键，覆盖之 */
+        size_t key_len = 0;
+        while (rewritten[key_len] && rewritten[key_len] != '=')
+            key_len++;
+        int replaced = 0;
+        for (size_t j = 0; j < idx; j++) {
+            size_t exist_len = 0;
+            while (out[j][exist_len] && out[j][exist_len] != '=')
+                exist_len++;
+            if (exist_len == key_len && has_prefix(out[j], rewritten, key_len)) {
+                safe_cpy(buf[j], sizeof(buf[j]), rewritten);
+                out[j] = buf[j];
+                replaced = 1;
+                break;
+            }
+        }
+        if (replaced)
+            continue;
+        if (idx + 1 >= max_items)
+            return 0;
+        safe_cpy(buf[idx], sizeof(buf[idx]), rewritten);
+        out[idx] = buf[idx];
+        idx++;
     }
     out[idx] = NULL;
     if (in && idx + 1 == max_items && in[idx])
