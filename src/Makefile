@@ -20,6 +20,7 @@ TARGET := elfloader
 
 PAYLOAD_DIR := payload
 PAYLOAD_BIN := $(PAYLOAD_DIR)/payload.bin
+PAYLOAD_EMBED_OBJ := $(PAYLOAD_DIR)/payload_embed.o
 
 TINY_INIT_DIR := tiny-init
 TINY_INIT_BIN := $(TINY_INIT_DIR)/tiny-init
@@ -76,7 +77,7 @@ SRCS += $(wildcard $(PAYLOAD_ARCH_DIR)/hook.c) $(wildcard $(PAYLOAD_ARCH_DIR)/st
 
 ASRCS := $(wildcard $(ARCH_DIR)/*.S)
 
-OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(TINY_INIT_OBJ)
+OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(TINY_INIT_OBJ) $(PAYLOAD_EMBED_OBJ)
 
 ifdef SMALL
   OBJS := $(filter-out %/z_printf.o,$(OBJS))
@@ -102,6 +103,9 @@ ifeq ($(strip $(TINY_INIT_OBJFMT)),)
 	$(error Unsupported ARCH $(ARCH) for tiny-init embedding)
 endif
 	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(TINY_INIT_BIN) $(TINY_INIT_OBJ)
+
+$(PAYLOAD_EMBED_OBJ): $(PAYLOAD_BIN)
+	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(PAYLOAD_BIN) $(PAYLOAD_EMBED_OBJ)
 
 clean:
 	rm -rf *.o $(TARGET) */*.o */*/*.o

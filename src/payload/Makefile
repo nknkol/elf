@@ -1,5 +1,4 @@
-TARGET = payload.elf
-ELF = payload.elf
+TARGET = payload.bin
 
 ARCH ?= aarch64
 
@@ -30,12 +29,7 @@ CFLAGS += $(EXTRA_CFLAGS)
 
 all: $(TARGET)
 
-$(TARGET): $(ELF)
-	@echo "Extracting raw binary..."
-	$(OBJCOPY) -O binary -j .text -j .rodata $(ELF) $(TARGET)
-	@echo "Payload size: $$(stat -c%s $(TARGET)) bytes"
-
-$(ELF): $(OBJ)
+$(TARGET): $(OBJ)
 	@echo "Linking payload..."
 	# Note: order matters for entry point, but we use -e _start so entry.o doesn't STRICTLY need to be first,
 	# but it's good practice.
@@ -48,4 +42,4 @@ $(ELF): $(OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJ) *.o $(ELF) $(TARGET)
+	rm -f $(OBJ) *.o $(TARGET)

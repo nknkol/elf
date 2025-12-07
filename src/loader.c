@@ -31,6 +31,8 @@ static void z_fini(void)
 
 extern unsigned char _binary_tiny_init_tiny_init_start[];
 extern unsigned char _binary_tiny_init_tiny_init_end[];
+extern unsigned char _binary_payload_payload_bin_start[];
+extern unsigned char _binary_payload_payload_bin_end[];
 
 static int check_ehdr(Elf_Ehdr *ehdr)
 {
@@ -131,21 +133,21 @@ err:
 #define Z_PROG		0
 #define Z_INTERP	1
 
-static void *load_elf_payload(const char *path, size_t *entry_point_out)
+static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 {
-	int fd = z_open(path, O_RDONLY);
 	if (fd < 0)
+		return NULL;
+
+	if (z_lseek(fd, 0, SEEK_SET) < 0)
 		return NULL;
 
 	Elf_Ehdr ehdr;
 	if (z_read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
-		z_close(fd);
 		return NULL;
 	}
 
 	if (ehdr.e_ident[EI_MAG0] != ELFMAG0 || ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
 	    ehdr.e_ident[EI_MAG2] != ELFMAG2 || ehdr.e_ident[EI_MAG3] != ELFMAG3) {
-		z_close(fd);
 		return NULL;
 	}
 
@@ -153,7 +155,6 @@ static void *load_elf_payload(const char *path, size_t *entry_point_out)
 	Elf_Phdr *phdr = z_alloca(ph_size);
 	if (z_lseek(fd, ehdr.e_phoff, SEEK_SET) < 0 ||
 	    z_read(fd, phdr, ph_size) != (ssize_t)ph_size) {
-		z_close(fd);
 		return NULL;
 	}
 
@@ -173,7 +174,6 @@ static void *load_elf_payload(const char *path, size_t *entry_point_out)
 
 	void *base = z_mmap(NULL, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (base == (void *)-1) {
-		z_close(fd);
 		return NULL;
 	}
 
@@ -190,13 +190,11 @@ static void *load_elf_payload(const char *path, size_t *entry_point_out)
 				 MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (p == (void *)-1) {
 			z_munmap(base, total_size);
-			z_close(fd);
 			return NULL;
 		}
 
 		if (z_lseek(fd, phdr[i].p_offset, SEEK_SET) < 0) {
 			z_munmap(base, total_size);
-			z_close(fd);
 			return NULL;
 		}
 
@@ -207,12 +205,22 @@ static void *load_elf_payload(const char *path, size_t *entry_point_out)
 			arch_flush_cache(p, seg_sz);
 	}
 
-	z_close(fd);
-
 	if (entry_point_out)
 		*entry_point_out = (size_t)base + ehdr.e_entry;
 
 	return base;
+}
+
+static void *load_elf_payload_path(const char *path, size_t *entry_point_out)
+{
+	if (!path || !path[0])
+		return NULL;
+	int fd = z_open(path, O_RDONLY);
+	if (fd < 0)
+		return NULL;
+	void *res = load_elf_payload_fd(fd, entry_point_out);
+	z_close(fd);
+	return res;
 }
 
 static int write_all(int fd, const unsigned char *buf, size_t len)
@@ -241,6 +249,27 @@ static int create_tiny_init_memfd(void)
 	if (z_lseek(fd, 0, SEEK_SET) < 0)
 		goto err;
 	z_printf("[Loader] tiny-init memfd prepared (fd=%d, size=%lu)\n",
+		 fd, (unsigned long)sz);
+	return fd;
+err:
+	z_close(fd);
+	return -1;
+}
+
+static int create_payload_memfd(void)
+{
+	size_t sz = (size_t)(_binary_payload_payload_bin_end -
+			     _binary_payload_payload_bin_start);
+	int fd = z_memfd_create("payload.bin", 0);
+	if (fd < 0) {
+		z_printf("[Loader] payload memfd_create failed errno=%d\n", z_errno);
+		return -1;
+	}
+	if (write_all(fd, _binary_payload_payload_bin_start, sz) < 0)
+		goto err;
+	if (z_lseek(fd, 0, SEEK_SET) < 0)
+		goto err;
+	z_printf("[Loader] Embedded payload prepared (fd=%d, size=%lu)\n",
 		 fd, (unsigned long)sz);
 	return fd;
 err:
@@ -1156,19 +1185,42 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "guest config not available (memfd_create missing?) and no target provided");
 	}
 
-	z_printf("[Loader] Loading payload.elf...\n");
 	const char *payload_path = payload_path_override[0] ? payload_path_override : CONFIG_DEFAULT_PAYLOAD_PATH;
-	payload_base = load_elf_payload(payload_path, &payload_entry_addr);
+	const char *payload_source = payload_path_override[0] ? payload_path_override : "(embedded)";
+	int payload_fd = -1;
+	int used_embedded = 0;
+
+	if (payload_path_override[0]) {
+		z_printf("[Loader] Loading payload.bin from custom path \"%s\"...\n", payload_path);
+		payload_base = load_elf_payload_path(payload_path, &payload_entry_addr);
+	} else {
+		z_printf("[Loader] Loading embedded payload...\n");
+		payload_fd = create_payload_memfd();
+		if (payload_fd >= 0)
+			payload_base = load_elf_payload_fd(payload_fd, &payload_entry_addr);
+		if (payload_fd >= 0)
+			z_close(payload_fd);
+		if (payload_base) {
+			used_embedded = 1;
+		} else {
+			z_printf("[Loader] Embedded payload load failed, trying fallback path \"%s\"...\n",
+				 payload_path);
+			payload_base = load_elf_payload_path(payload_path, &payload_entry_addr);
+			payload_source = payload_path;
+		}
+	}
 
 	if (!payload_base) {
-		z_printf("[Loader] Warning: payload.elf not found or invalid.\n");
+		z_printf("[Loader] Warning: payload.bin not found or invalid.\n");
 	} else {
-		z_printf("[Loader] Payload loaded. Base: %p, Entry: %p\n",
-			 payload_base, (void *)payload_entry_addr);
+		z_printf("[Loader] Payload loaded from %s. Base: %p, Entry: %p\n",
+			 payload_source, payload_base, (void *)payload_entry_addr);
 		payload_cfg = locate_payload_config((void *)payload_entry_addr);
 		if (payload_cfg) {
 			init_payload_config(payload_cfg);
 			z_memcpy(payload_cfg, &bootstrap_cfg, sizeof(*payload_cfg));
+			if (!payload_path_override[0] && used_embedded)
+				copy_cstr(payload_cfg->payload_path, CONFIG_MAX_PATH, "(embedded)");
 			ensure_loader_bind(payload_cfg);
 			log_bind_list(payload_cfg, "payload config");
 		} else {

@@ -11,7 +11,7 @@
 - 默认架构：`make`（默认为 `ARCH=aarch64`）。
 - 指定架构：`make ARCH=amd64` 或 `make ARCH=i386`（需有对应 arch 源）。
 - 精简模式：`make SMALL=1`（去掉 printf/err）。
-- 默认 payload 路径可在构建时覆盖：`make DEFAULT_PAYLOAD_PATH=/path/to/payload.elf`。
+- 默认 payload 路径可在构建时覆盖：`make DEFAULT_PAYLOAD_PATH=/path/to/payload.bin`。
 
 payload 会在顶层构建时自动生成：`src/payload/payload.bin`（并嵌入到 elfloader）。
 

@@ -97,7 +97,7 @@
 ## 配置文件
 
 - 默认不自动加载配置文件；可用 `elfloader -c /path/to/loader.rc <target>` 指定配置（样板：`elf/src/config/loader.rc.sample`）。
-- 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=1`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d`、`PAYLOAD_PATH=/path/to/payload.elf` 等；`#` 开头为注释，空行和空白行会被忽略。`PAYLOAD_PATH` 若未设置默认取 `CONFIG_DEFAULT_PAYLOAD_PATH`（当前 `./payload.elf`）。
+- 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=1`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d`、`PAYLOAD_PATH=/path/to/payload.bin` 等；`#` 开头为注释，空行和空白行会被忽略。`PAYLOAD_PATH` 若未设置默认取 `CONFIG_DEFAULT_PAYLOAD_PATH`（当前 `./payload.bin`）。
 - 加载顺序：仅读取配置文件，随后自动补上 `/elfloader` 绑定，不再信任容器内环境变量，避免被覆写导致逃逸。
 - 编译期可通过 `make DEFAULT_CONFIG_PATH=/your/path` 覆盖默认配置路径；可用 `SAMPLE_CONFIG_PATH=/your/sample` 在构建时自动复制 `loader.conf.sample` 到指定位置（可与默认配置路径不同）。
 - 环境传递：loader 不再透传宿主环境，默认空环境；仅注入 CLI `-e/--env` 指定的键。启用 `--init` 时，内嵌 tiny-init 会在空环境基础上填充 PATH/HOME/TERM/USER 等默认值后再 exec 用户命令（tiny-init 作为资源打包到 elfloader，运行时写入 memfd 直接 exec，名义路径为相对的 `tiny-init`）。

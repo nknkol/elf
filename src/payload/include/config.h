@@ -17,7 +17,7 @@
 #define CONFIG_DEFAULT_CONFIG_PATH "" /* 默认为空，不自动读取配置文件 */
 #endif
 #ifndef CONFIG_DEFAULT_PAYLOAD_PATH
-#define CONFIG_DEFAULT_PAYLOAD_PATH "./payload.elf"
+#define CONFIG_DEFAULT_PAYLOAD_PATH "./payload.bin"
 #endif
 #define CONFIG_CHILD_LOADER_ARG "--child-loader"
 

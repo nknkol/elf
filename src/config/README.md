@@ -32,7 +32,7 @@
 ROOT /storage/Users/currentUser/alpine
 BIND /bin:/storage/Users/currentUser/alpine/bin
 DEBUG on
-PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.elf
+PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.bin
 
 [Guest Layer]
 ENV HOME=/home

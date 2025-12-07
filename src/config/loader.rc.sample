@@ -14,7 +14,7 @@ BIND /lib64:/storage/Users/currentUser/alpine/lib64
 # 开启 Loader 调试日志 
 DEBUG on      
 # 指定 Payload 路径              
-PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.elf
+PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.bin
 # ==========================================
 # [Guest Layer] 运行环境配置
 # 执行者：Init (tiny-init)
