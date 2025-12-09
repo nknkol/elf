@@ -398,6 +398,61 @@ long syscall_handle_common(long sys_no, long args[6]) {
             ret = do_syscall(sys_no, args);
             break;
 
+        /* Fakeroot Phase1/2: 身份切换调用全部假成功 */
+        case SYS_setuid:
+        case SYS_setgid:
+        case SYS_setreuid:
+        case SYS_setregid:
+        case SYS_setresuid:
+        case SYS_setresgid:
+        case SYS_setfsuid:
+        case SYS_setfsgid:
+        case SYS_setgroups:
+            SAFE_LOG("[Payload] fakeroot set* uid/gid -> fake 0\n");
+            ret = 0;
+            break;
+
+        /* Fakeroot Phase2: 信息查询伪造 */
+        case SYS_getuid:
+        case SYS_geteuid:
+        case SYS_getgid:
+        case SYS_getegid:
+            SAFE_LOG("[Payload] fakeroot get[u/g]id -> 0\n");
+            ret = 0;
+            break;
+        case SYS_getresuid: {
+            SAFE_LOG("[Payload] fakeroot getresuid\n");
+            int *ruid = (int *)args[0];
+            int *euid = (int *)args[1];
+            int *suid = (int *)args[2];
+            if (ruid) *ruid = 0;
+            if (euid) *euid = 0;
+            if (suid) *suid = 0;
+            ret = 0;
+            break;
+        }
+        case SYS_getresgid: {
+            SAFE_LOG("[Payload] fakeroot getresgid\n");
+            int *rgid = (int *)args[0];
+            int *egid = (int *)args[1];
+            int *sgid = (int *)args[2];
+            if (rgid) *rgid = 0;
+            if (egid) *egid = 0;
+            if (sgid) *sgid = 0;
+            ret = 0;
+            break;
+        }
+        case SYS_getgroups: {
+            SAFE_LOG("[Payload] fakeroot getgroups\n");
+            int size = (int)args[0];
+            int *list = (int *)args[1];
+            if (list && size > 0) {
+                list[0] = 0; /* root group */
+            }
+            ret = (size > 0) ? 1 : 0;
+            break;
+        }
+
         case SYS_mkdirat:
         case SYS_mknodat:
         case SYS_unlinkat:

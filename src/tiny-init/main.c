@@ -97,6 +97,15 @@ static void set_default_env(const char *key, const char *val)
 		setenv(key, val, 1);
 }
 
+static void rstrip(char *s)
+{
+	if (!s)
+		return;
+	size_t len = strlen(s);
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r' || s[len - 1] == '\n'))
+		s[--len] = '\0';
+}
+
 static void load_env_file(const char *path)
 {
 	FILE *fp = fopen(path, "r");
@@ -105,36 +114,52 @@ static void load_env_file(const char *path)
 	char line[512];
 	while (fgets(line, sizeof(line), fp)) {
 		char *p = line;
-		while (*p == ' ' || *p == '\t')
+		while (*p && isspace((unsigned char)*p))
 			p++;
-		if (*p == '#' || *p == '\n' || *p == '\0')
+		if (*p == '#' || *p == '\0')
 			continue;
+		if (strncmp(p, "export", 6) == 0 && isspace((unsigned char)p[6])) {
+			p += 6;
+			while (*p && isspace((unsigned char)*p))
+				p++;
+		}
 		char *eq = strchr(p, '=');
 		if (!eq)
 			continue;
 		*eq = '\0';
 		char *val = eq + 1;
-		char *nl = strchr(val, '\n');
-		if (nl)
-			*nl = '\0';
+		rstrip(p);
+		while (*val && isspace((unsigned char)*val))
+			val++;
+		rstrip(val);
+		/* 去掉对称引号（简单处理） */
+		size_t vlen = strlen(val);
+		if (vlen >= 2 && ((val[0] == '"' && val[vlen - 1] == '"') ||
+				  (val[0] == '\'' && val[vlen - 1] == '\''))) {
+			val[vlen - 1] = '\0';
+			val++;
+		}
+		if (p[0] == '\0')
+			continue;
 		setenv(p, val, 1);
 	}
 	fclose(fp);
+}
+
+static void load_env_home_file(const char *rel)
+{
+	const char *home = getenv("HOME");
+	if (!home || !home[0] || !rel || !rel[0])
+		return;
+	char path[512];
+	snprintf(path, sizeof(path), "%s/%s", home, rel);
+	load_env_file(path);
 }
 
 static void forward_handler(int sig)
 {
 	if (g_child > 0)
 		kill(g_child, sig);
-}
-
-static void rstrip(char *s)
-{
-	if (!s)
-		return;
-	size_t len = strlen(s);
-	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r'))
-		s[--len] = '\0';
 }
 
 static void parse_guest_config_fd(int fd)
@@ -187,9 +212,14 @@ int main(int argc, char **argv)
 	set_default_env("LOGNAME", "root");
 
 	load_env_file("/etc/environment");
+	load_env_file("/etc/profile");
+	load_env_home_file(".profile");
 
 	if (g_workdir[0] && chdir(g_workdir) < 0)
 		die("tiny-init: chdir %s failed: %s\n", g_workdir, strerror(errno));
+
+	load_env_file(".env");
+	load_env_home_file(".env");
 
 	char *child_argv[MAX_CMD_ARGS + 1] = {0};
 	int child_argc = 0;

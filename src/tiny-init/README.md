@@ -1,6 +1,6 @@
 ## 当前实现（已完成）
 - 内嵌到 elfloader，通过 memfd 写入后直接 exec，无需容器内文件。
-- 默认环境填充：缺省时设置 PATH/HOME/TERM/USER/LOGNAME，读取 `/etc/environment`。
+- 默认环境填充：缺省时设置 PATH/HOME/TERM/USER/LOGNAME，读取 `/etc/environment`，并额外尝试 `/etc/profile`、`$HOME/.profile`、当前工作目录 `.env` 以及 `$HOME/.env`。
 - 信号转发：PID1 捕获 SIGTERM/SIGINT/SIGQUIT/SIGHUP，转发给主子进程。
 - 僵尸回收：循环 waitpid(-1)，回收孤儿；主子进程退出后按退出码/信号退出 init。
 - 进程启动：fork 子进程，子进程恢复默认信号后 `execvp` 目标。`CMD` 直接拆成 argv 执行，不再 `/bin/sh -c`，未指定时默认 `/bin/sh`。
@@ -8,10 +8,10 @@
 - 名义路径为相对 `tiny-init`，仅作 argv/AT_EXECFN 占位，不依赖容器内同名文件。
 
 ## 未实现（待补充）
-- 环境文件扩展：加载 `/etc/profile`、`.env` 等更多登陆环境。
 - 主机名/用户配置：支持设定 HOSTNAME/UID/GID/补充组/能力降级。
 - 前台进程组管理：显式设置进程组/终端控制，完善 Ctrl+C 等 TTY 行为。
 - 日志/输出控制：可选重定向、日志文件滚动、前后台切换。
+- 内核隔离特性：不使用 namespace/chroot/pivot_root，保持纯用户态；如需“容器”效果依赖上层 payload/loader 的路径改写与绑定模拟。
 
 ## 设计目标（需求清单）
 - 保持极简、稳定的 PID1 管家：始终回收僵尸、转发信号、退出与主进程绑定。

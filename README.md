@@ -2,6 +2,11 @@
 
 自举 ELF loader + 静态 PIE payload，用于在目标程序内做 syscall 级 hook（路径重写/链式 loader 等）。loader 不依赖宿主 libc，直接走 `z_syscall.c`。
 
+## 设计约束
+- 面向受限设备：假设无法启用 namespace/`chroot`/`pivot_root` 等内核特性，也不依赖容器运行时。
+- 纯用户态方案：通过内存 hook + syscall 拦截模拟 PROOT 行为（路径改写、绑定覆盖、链式 loader），不改变内核全局状态。
+- 兼容只读/noexec 挂载：payload/loader 内嵌，执行时从内存 memfd 映射，避免对宿主文件系统的可执行依赖。
+
 ## 目录结构
 - `src/`: loader 通用代码（`loader.c`、`utils/` 等），架构相关的启动/辅助在 `src/arch/<arch>/`。
 - `src/payload/`: payload 通用逻辑在 `logic/`，架构特定实现（入口、raw_syscall、mini_libc、reentry_guard、syscall_disp）在 `arch/<arch>/`，头文件集中在 `include/`。

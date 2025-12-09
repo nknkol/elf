@@ -39,6 +39,38 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_renameat
     b.eq    slow_path
+    cmp     x8, #SYS_setuid
+    b.eq    slow_path
+    cmp     x8, #SYS_setgid
+    b.eq    slow_path
+    cmp     x8, #SYS_setreuid
+    b.eq    slow_path
+    cmp     x8, #SYS_setregid
+    b.eq    slow_path
+    cmp     x8, #SYS_setresuid
+    b.eq    slow_path
+    cmp     x8, #SYS_setresgid
+    b.eq    slow_path
+    cmp     x8, #SYS_setfsuid
+    b.eq    slow_path
+    cmp     x8, #SYS_setfsgid
+    b.eq    slow_path
+    cmp     x8, #SYS_setgroups
+    b.eq    slow_path
+    cmp     x8, #SYS_getuid
+    b.eq    slow_path
+    cmp     x8, #SYS_geteuid
+    b.eq    slow_path
+    cmp     x8, #SYS_getgid
+    b.eq    slow_path
+    cmp     x8, #SYS_getegid
+    b.eq    slow_path
+    cmp     x8, #SYS_getresuid
+    b.eq    slow_path
+    cmp     x8, #SYS_getresgid
+    b.eq    slow_path
+    cmp     x8, #SYS_getgroups
+    b.eq    slow_path
     cmp     x8, #SYS_openat
     b.eq    slow_path
     cmp     x8, #SYS_close
