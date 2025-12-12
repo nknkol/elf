@@ -39,6 +39,14 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_renameat
     b.eq    slow_path
+    cmp     x8, #SYS_fchmod
+    b.eq    slow_path
+    cmp     x8, #SYS_fchmodat
+    b.eq    slow_path
+    cmp     x8, #SYS_fchownat
+    b.eq    slow_path
+    cmp     x8, #SYS_fchown
+    b.eq    slow_path
     cmp     x8, #SYS_setuid
     b.eq    slow_path
     cmp     x8, #SYS_setgid
@@ -83,11 +91,15 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_newfstatat
     b.eq    slow_path
+    cmp     x8, #SYS_utimensat
+    b.eq    slow_path
     cmp     x8, #SYS_exit
     b.eq    slow_path
     cmp     x8, #SYS_exit_group
     b.eq    slow_path
     cmp     x8, #SYS_execve
+    b.eq    slow_path
+    cmp     x8, #SYS_execveat
     b.eq    slow_path
     cmp     x8, #SYS_mprotect
     b.eq    slow_path

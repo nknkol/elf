@@ -7,6 +7,23 @@
 - 纯用户态方案：通过内存 hook + syscall 拦截模拟 PROOT 行为（路径改写、绑定覆盖、链式 loader），不改变内核全局状态。
 - 兼容只读/noexec 挂载：payload/loader 内嵌，执行时从内存 memfd 映射，避免对宿主文件系统的可执行依赖。
 
+## 容器/兼容模式拆分与 Hook 层次（实现方案）
+- 模式定义与开关
+  - 兼容模式：面向“在宿主机跑得更顺滑”，保留宿主身份/权限，开放 bind 映射与 env 追加，仍保留 execve 链式、mmap/mprotect hook 以维持受控环境。
+  - 容器模式：面向隔离，启用 root/bind 虚拟化 + fakeroot 身份伪装，默认最小化对宿主可见信息。
+  - 配置入口：CLI/配置文件暴露 `--mode container|compat` 或 `RUN_MODE=container|compat`，未显式指定时“存在 PROOT_ROOT → container，否则 compat”。`g_payload_config` 增加 `mode` 与 `hook_mask` 位图（BASE/COMPAT/ISOLATION）。
+- Hook 三层职责
+  - 地基 Hook（BASE，始终开启，两模式共用）：execve 链式 loader（含 argv/env 复制、PATH/LD_LIBRARY_PATH 列表重写、shebang 解析）、PT_INTERP 重写、路径改写（root/bind + 软链展开）覆盖 openat/faccessat/fstatat/readlinkat/symlinkat/linkat/renameat/mkdirat/mknodat/chdir/getcwd/unlinkat、mmap/mprotect 执行段 hook（用于后续动态库补钩与 noexec 绕过）。
+  - 兼容性补全（COMPAT，两模式均可开，兼容模式默认开、容器模式可选）：bind 映射表/环境变量追加、readlink 回填 guest 路径、argv/env 里绝对路径替换、PATH 拼接工作目录、宿主 cwd 透传等，保证“非隔离”场景下也能跑起来。
+  - 隔离/Fakeroot Hook（ISOLATION，仅容器模式）：getuid/geteuid/getgid/getegid/getgroups 返回 0/空组，set*uid/gid/setgroups/clearenv 等伪成功、屏蔽泄露；auxv 中 AT_UID/AT_GID 归零；必要时拦截 prctl/seccomp 替换/拒绝敏感操作；后续可在此层挂载元数据虚拟化（stat uid/gid/ctime 伪装）。
+- 运行时流程拆分
+  1) loader 解析 CLI/配置 → 生成 `mode` 与 `hook_mask`，写入 payload_config；链式 exec 进入子进程时继承该配置。
+  2) payload 安装 hook 时根据 `hook_mask` 决定是否 patch 对应 syscall（BASE 无条件，COMPAT/ISOLATION 按位判断）；单个 hook 内也可用掩码做早退，避免无谓开销。
+  3) execve 路径：先做 argv/env 路径重写 → 确保跳转到 `/elfloader` 链式 → 重新写入目标 argv/env（兼容层插入额外 env/bind），容器模式下附带身份伪装。
+  4) mmap/mprotect 路径：拦截可执行映射后立即调用 install_hook 对新段补钩，确保动态库同样受 BASE/COMPAT/ISOLATION 控制。
+  5) get*uid/gid/grouplist 等在容器模式返回伪造值，兼容模式透传原始结果；set* 系列容器模式直接返回 0（或记录日志），兼容模式透传。
+  6) readlink/stat 系列返回宿主路径时，兼容层负责回填 guest 路径，容器层可附加权限/uid/gid 伪装；路径重写始终走 BASE。
+
 ## 目录结构
 - `src/`: loader 通用代码（`loader.c`、`utils/` 等），架构相关的启动/辅助在 `src/arch/<arch>/`。
 - `src/payload/`: payload 通用逻辑在 `logic/`，架构特定实现（入口、raw_syscall、mini_libc、reentry_guard、syscall_disp）在 `arch/<arch>/`，头文件集中在 `include/`。

@@ -6,6 +6,13 @@
 #define CONFIG_MAGIC        0x484f4f4b /* "HOOK" */
 #define CONFIG_VERSION      1
 
+#define CONFIG_MODE_COMPAT     0
+#define CONFIG_MODE_CONTAINER  1
+
+#define HOOK_LAYER_BASE       (1 << 0)
+#define HOOK_LAYER_COMPAT     (1 << 1)
+#define HOOK_LAYER_ISOLATION  (1 << 2)
+
 #define CONFIG_MAX_PATH     256
 #define CONFIG_MAX_BINDS    8
 #define CONFIG_MAX_ENVS     16
@@ -28,6 +35,9 @@ struct bind_entry {
 
 typedef struct payload_config {
     int32_t log_enabled;
+    int32_t mode;            /* CONFIG_MODE_* */
+    int32_t mode_explicit;   /* 标记是否显式指定模式，避免被 ROOT 推导覆盖 */
+    int32_t hook_mask;       /* HOOK_LAYER_* 位图，BASE 必开 */
     int32_t bind_count;
     int32_t env_count;
     int32_t use_init;
@@ -49,5 +59,7 @@ typedef struct payload_config {
 
 extern payload_config_t g_payload_config;
 int config_log_enabled(void);
+int config_mode(void);
+int hook_layer_enabled(int layer_mask);
 
 #endif /* PAYLOAD_CONFIG_H */

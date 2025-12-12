@@ -22,6 +22,11 @@ PAYLOAD_DIR := payload
 PAYLOAD_BIN := $(PAYLOAD_DIR)/payload.bin
 PAYLOAD_EMBED_OBJ := $(PAYLOAD_DIR)/payload_embed.o
 
+SHELL_DIR := shell
+SHELL_BIN_SRC ?= ../../../build/bin/dash
+SHELL_EMBED_BIN := $(SHELL_DIR)/dash
+SHELL_EMBED_OBJ := $(SHELL_DIR)/dash.o
+
 TINY_INIT_DIR := tiny-init
 TINY_INIT_BIN := $(TINY_INIT_DIR)/tiny-init
 TINY_INIT_OBJ := $(TINY_INIT_DIR)/tiny-init.o
@@ -77,7 +82,7 @@ SRCS += $(wildcard $(PAYLOAD_ARCH_DIR)/hook.c) $(wildcard $(PAYLOAD_ARCH_DIR)/st
 
 ASRCS := $(wildcard $(ARCH_DIR)/*.S)
 
-OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(TINY_INIT_OBJ) $(PAYLOAD_EMBED_OBJ)
+OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(TINY_INIT_OBJ) $(PAYLOAD_EMBED_OBJ) $(SHELL_EMBED_OBJ)
 
 ifdef SMALL
   OBJS := $(filter-out %/z_printf.o,$(OBJS))
@@ -107,7 +112,21 @@ endif
 $(PAYLOAD_EMBED_OBJ): $(PAYLOAD_BIN)
 	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(PAYLOAD_BIN) $(PAYLOAD_EMBED_OBJ)
 
+$(SHELL_DIR):
+	mkdir -p $(SHELL_DIR)
+
+$(SHELL_EMBED_BIN): $(SHELL_BIN_SRC) | $(SHELL_DIR)
+	@if [ ! -f "$(SHELL_BIN_SRC)" ]; then \
+		echo "Embedded shell missing: $(SHELL_BIN_SRC)"; \
+		echo "Please build dash (make dash-build) before building elfloader."; \
+		exit 1; \
+	fi
+	cp $(SHELL_BIN_SRC) $(SHELL_EMBED_BIN)
+
+$(SHELL_EMBED_OBJ): $(SHELL_EMBED_BIN)
+	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(SHELL_EMBED_BIN) $(SHELL_EMBED_OBJ)
+
 clean:
-	rm -rf *.o $(TARGET) */*.o */*/*.o
+	rm -rf *.o $(TARGET) */*.o */*/*.o $(SHELL_DIR)
 	$(MAKE) -C $(PAYLOAD_DIR) clean
 	$(MAKE) -C $(TINY_INIT_DIR) clean

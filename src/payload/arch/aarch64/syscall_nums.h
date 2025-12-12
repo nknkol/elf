@@ -10,6 +10,10 @@
 #define SYS_renameat     38
 #define SYS_faccessat    48
 #define SYS_chdir        49
+#define SYS_fchmod       52
+#define SYS_fchmodat     53
+#define SYS_fchownat     54
+#define SYS_fchown       55
 #define SYS_setregid     143
 #define SYS_setgid       144
 #define SYS_setreuid     145
@@ -39,11 +43,13 @@
 #define SYS_symlinkat    36
 #define SYS_readlinkat   78
 #define SYS_newfstatat   79
+#define SYS_utimensat    88
 #define SYS_exit         93
 #define SYS_exit_group   94
 #define SYS_mmap         222
 #define SYS_rt_sigreturn 139
 #define SYS_execve       221
+#define SYS_execveat     281
 #define SYS_mprotect     226
 
 #endif /* SYSCALL_NUMS_H */

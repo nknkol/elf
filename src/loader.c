@@ -33,6 +33,8 @@ extern unsigned char _binary_tiny_init_tiny_init_start[];
 extern unsigned char _binary_tiny_init_tiny_init_end[];
 extern unsigned char _binary_payload_payload_bin_start[];
 extern unsigned char _binary_payload_payload_bin_end[];
+extern unsigned char _binary_shell_dash_start[];
+extern unsigned char _binary_shell_dash_end[];
 
 static int check_ehdr(Elf_Ehdr *ehdr)
 {
@@ -277,6 +279,27 @@ err:
 	return -1;
 }
 
+static int create_shell_memfd(void)
+{
+	size_t sz = (size_t)(_binary_shell_dash_end -
+			     _binary_shell_dash_start);
+	int fd = z_memfd_create("compat-shell", 0);
+	if (fd < 0) {
+		z_printf("[Loader] compat-shell memfd_create failed errno=%d\n", z_errno);
+		return -1;
+	}
+	if (write_all(fd, _binary_shell_dash_start, sz) < 0)
+		goto err;
+	if (z_lseek(fd, 0, SEEK_SET) < 0)
+		goto err;
+	z_printf("[Loader] compat-shell memfd prepared (fd=%d, size=%lu)\n",
+		 fd, (unsigned long)sz);
+	return fd;
+err:
+	z_close(fd);
+	return -1;
+}
+
 /* Parse hook range string "A-B" */
 static int parse_range_str(const char *s, int *min_out, int *max_out)
 {
@@ -363,6 +386,39 @@ static void parse_bind_list(payload_config_t *cfg, const char *val)
 	}
 }
 
+static int parse_mode_value(const char *s)
+{
+	if (!s)
+		return -1;
+	if (z_strncmp(s, "container", 10) == 0 && (s[9] == '\0' || s[9] == '\n'))
+		return CONFIG_MODE_CONTAINER;
+	if (z_strncmp(s, "compat", 7) == 0 && (s[6] == '\0' || s[6] == '\n'))
+		return CONFIG_MODE_COMPAT;
+	return -1;
+}
+
+static void apply_mode(payload_config_t *cfg, int mode, int explicit_flag)
+{
+	if (!cfg)
+		return;
+	cfg->mode = mode;
+	cfg->hook_mask = HOOK_LAYER_BASE | HOOK_LAYER_COMPAT;
+	if (mode == CONFIG_MODE_CONTAINER)
+		cfg->hook_mask |= HOOK_LAYER_ISOLATION;
+	if (explicit_flag)
+		cfg->mode_explicit = 1;
+}
+
+static void maybe_set_container_mode(payload_config_t *cfg)
+{
+	if (!cfg)
+		return;
+	if (cfg->mode_explicit)
+		return;
+	if (cfg->mode != CONFIG_MODE_CONTAINER)
+		apply_mode(cfg, CONFIG_MODE_CONTAINER, 0);
+}
+
 static void init_payload_config(payload_config_t *cfg)
 {
 	if (cfg)
@@ -372,6 +428,7 @@ static void init_payload_config(payload_config_t *cfg)
 		cfg->hook_max = 0x7fffffff;
 		cfg->hook_min_interp = 0;
 		cfg->hook_max_interp = 0x7fffffff;
+		apply_mode(cfg, CONFIG_MODE_COMPAT, 0);
 	}
 }
 
@@ -384,6 +441,7 @@ static void apply_config_entry(payload_config_t *cfg, const char *entry, char *p
 		cfg->log_enabled = (val[0] != '\0' && val[0] != '0') ? 1 : 0;
 	} else if (z_strncmp(entry, "PROOT_ROOT=", 11) == 0) {
 		copy_cstr(cfg->root, CONFIG_MAX_PATH, entry + 11);
+		maybe_set_container_mode(cfg);
 	} else if (z_strncmp(entry, "PROOT_BIND=", 11) == 0) {
 		parse_bind_list(cfg, entry + 11);
 	} else if (z_strncmp(entry, "PAYLOAD_PATH=", 13) == 0) {
@@ -391,6 +449,10 @@ static void apply_config_entry(payload_config_t *cfg, const char *entry, char *p
 		if (payload_path_out)
 			copy_cstr(payload_path_out, CONFIG_MAX_PATH, p);
 		copy_cstr(cfg->payload_path, CONFIG_MAX_PATH, p);
+	} else if (z_strncmp(entry, "RUN_MODE=", 9) == 0) {
+		int mode = parse_mode_value(entry + 9);
+		if (mode >= 0)
+			apply_mode(cfg, mode, 1);
 	}
 }
 
@@ -549,6 +611,7 @@ static void parse_loader_rc(payload_config_t *cfg, const char *path, char *paylo
 		if (z_strncmp(line, "ROOT ", 5) == 0) {
 			copy_cstr(cfg->root, CONFIG_MAX_PATH, line + 5);
 			z_printf("[Loader] Host ROOT=\"%s\"\n", cfg->root);
+			maybe_set_container_mode(cfg);
 		} else if (z_strncmp(line, "BIND ", 5) == 0) {
 			const char *val = line + 5;
 			const char *colon = z_strchr(val, ':');
@@ -569,6 +632,12 @@ static void parse_loader_rc(payload_config_t *cfg, const char *path, char *paylo
 				copy_cstr(payload_path_out, CONFIG_MAX_PATH, p);
 			copy_cstr(cfg->payload_path, CONFIG_MAX_PATH, p);
 			z_printf("[Loader] Host PAYLOAD=\"%s\"\n", cfg->payload_path);
+		} else if (z_strncmp(line, "MODE ", 5) == 0) {
+			int mode = parse_mode_value(line + 5);
+			if (mode >= 0) {
+				apply_mode(cfg, mode, 1);
+				z_printf("[Loader] Host MODE=%s\n", mode == CONFIG_MODE_CONTAINER ? "container" : "compat");
+			}
 		} else if (z_strncmp(line, "HOOK_RANGE ", 11) == 0) {
 			int a = 0, b = 0x7fffffff;
 			if (parse_range_str(line + 11, &a, &b)) {
@@ -644,9 +713,11 @@ static const char *find_config_path_arg(int argc, char **argv)
 }
 
 static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
-			     int *child_loader_out, int *target_index_out)
+			     int *child_loader_out, int *target_index_out,
+			     int *shell_mode_out)
 {
 	int child_loader = 0;
+	int shell_mode = 0;
 	int idx = argc;
 
 	for (int i = 1; i < argc; i++) {
@@ -660,6 +731,22 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		if (arg[0] == '-' && arg[1] == '-' && arg[2] == '\0') {
 			idx = i + 1;
 			break;
+		}
+
+		if (z_strncmp(arg, "--mode", 7) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			int mode = parse_mode_value(argv[i + 1]);
+			if (mode < 0)
+				z_errx(1, "invalid mode for %s (expect compat|container)", arg);
+			apply_mode(cfg, mode, 1);
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, "-s", 3) == 0 || z_strncmp(arg, "--shell", 8) == 0) {
+			shell_mode = 1;
+			continue;
 		}
 
 		if (is_child_loader_arg(arg)) {
@@ -739,6 +826,7 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			copy_cstr(cfg->root, CONFIG_MAX_PATH, argv[++i]);
+			maybe_set_container_mode(cfg);
 			continue;
 		}
 
@@ -767,6 +855,8 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		*child_loader_out = child_loader;
 	if (target_index_out)
 		*target_index_out = idx;
+	if (shell_mode_out)
+		*shell_mode_out = shell_mode;
 	return 0;
 }
 static int has_loader_bind(payload_config_t *cfg)
@@ -1074,7 +1164,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	int load_interp_next = 0;
 	int child_loader = 0;
 	int shebang_mode = 0;
+	int shell_mode = 0;
 	int init_memfd = -1;
+	int shell_memfd = -1;
 
 	void *payload_base = NULL;
 	size_t payload_entry_addr = 0;
@@ -1099,20 +1191,33 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	init_payload_config(&bootstrap_cfg);
 	static char clean_env_store[CONFIG_MAX_ENVS][CONFIG_MAX_PATH];
 	static char *clean_env_ptrs[CONFIG_MAX_ENVS + 1];
+	char **compat_env_ptrs = NULL;
+	int compat_envc = 0;
 	int guest_cfg_fd = -1;
 	const char *cli_cfg = find_config_path_arg(argc, argv);
 	if (cli_cfg)
 		config_path = cli_cfg;
 	parse_loader_rc(&bootstrap_cfg, config_path, payload_path_override, &guest_cfg_fd);
 	int target_index = 0;
-	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index);
+	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
+			  &shell_mode);
 	int argi = target_index;
 	int has_config = (config_path && config_path[0]) ? 1 : 0;
+
+	if (shell_mode) {
+		apply_mode(&bootstrap_cfg, CONFIG_MODE_COMPAT, 1);
+		if (bootstrap_cfg.use_init) {
+			z_printf("[Loader] --shell disables --init\n");
+			bootstrap_cfg.use_init = 0;
+		}
+	}
+
 	/* Apply hook ranges from config/CLI */
 	g_hook_min_default = bootstrap_cfg.hook_min;
 	g_hook_max_default = bootstrap_cfg.hook_max;
 	g_hook_min_interp = bootstrap_cfg.hook_min_interp;
 	g_hook_max_interp = bootstrap_cfg.hook_max_interp;
+	int compat_mode = (bootstrap_cfg.mode == CONFIG_MODE_COMPAT);
 	int clean_envc = 0;
 	for (int i = 0; i < bootstrap_cfg.env_count && i < CONFIG_MAX_ENVS; i++) {
 		copy_cstr(clean_env_store[clean_envc], CONFIG_MAX_PATH, bootstrap_cfg.envs[i]);
@@ -1152,10 +1257,47 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		clean_envc++;
 		clean_env_ptrs[clean_envc] = NULL;
 	}
+	char **final_env_ptrs = clean_env_ptrs;
+	int final_envc = clean_envc;
+	if (compat_mode) {
+		/* 兼容模式：保留宿主环境，再追加/覆盖 CLI 或配置注入的环境变量 */
+		int parent_envc = 0;
+		while (env && env[parent_envc])
+			parent_envc++;
+		int max_envc = parent_envc + clean_envc;
+		compat_env_ptrs = z_alloca(sizeof(char *) * (max_envc + 1));
+		for (int i = 0; i < parent_envc; i++)
+			compat_env_ptrs[compat_envc++] = env[i];
+		for (int i = 0; i < clean_envc; i++) {
+			const char *kv = clean_env_store[i];
+			size_t key_len = 0;
+			while (kv[key_len] && kv[key_len] != '=')
+				key_len++;
+			int replaced = 0;
+			for (int j = 0; j < compat_envc; j++) {
+				size_t exist_len = 0;
+				while (compat_env_ptrs[j][exist_len] && compat_env_ptrs[j][exist_len] != '=')
+					exist_len++;
+				if (exist_len == key_len &&
+				    z_strncmp(compat_env_ptrs[j], kv, key_len) == 0) {
+					compat_env_ptrs[j] = (char *)kv;
+					replaced = 1;
+					break;
+				}
+			}
+			if (!replaced)
+				compat_env_ptrs[compat_envc++] = clean_env_store[i];
+		}
+		compat_env_ptrs[compat_envc] = NULL;
+		final_env_ptrs = compat_env_ptrs;
+		final_envc = compat_envc;
+	}
 	log_bind_list(&bootstrap_cfg, "config loaded");
-	z_printf("[Loader] child_loader=%d argv_target=\"%s\" payload_path_override=\"%s\"\n",
-		 child_loader, (argi < argc && argv[argi]) ? argv[argi] : "(none)",
-		 payload_path_override[0] ? payload_path_override : "(none)");
+	z_printf("[Loader] child_loader=%d argv_target=\"%s\" payload_path_override=\"%s\" shell=%d\n",
+		 child_loader,
+		 (shell_mode || argi >= argc || !argv[argi]) ? "(none)" : argv[argi],
+		 payload_path_override[0] ? payload_path_override : "(none)",
+		 shell_mode);
 	/* 主 loader 才主动 chdir 到 root；子 loader 保留调用方 cwd 以正确解析相对路径 */
 	if (bootstrap_cfg.root[0] && !child_loader) {
 		if (z_chdir(bootstrap_cfg.root) < 0)
@@ -1163,19 +1305,34 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	}
 	if (!has_config && bootstrap_cfg.use_init)
 		z_errx(1, "--init requires a config (-c)");
-	if (!has_config && argi >= argc)
+	if (!shell_mode && !has_config && argi >= argc)
 		z_errx(1, "no input file");
-	if (has_config && !bootstrap_cfg.use_init && argi >= argc)
+	if (!shell_mode && has_config && !bootstrap_cfg.use_init && argi >= argc)
 		z_errx(1, "no input file");
 	if (bootstrap_cfg.use_init) {
 		file = CONFIG_DEFAULT_INIT_PATH;
+	} else if (shell_mode) {
+		file = "(embedded shell)";
 	} else {
 		file = argv[argi];
 	}
-	if (bootstrap_cfg.root[0] && file && file[0] == '/' && !child_loader)
+	if (bootstrap_cfg.root[0] && file && file[0] == '/' && !child_loader && !shell_mode)
 		z_errx(1, "absolute path not allowed when PROOT_ROOT is set; use path relative to root");
-	static char *empty_argv[] = { NULL };
-	char **target_argv = (argi < argc) ? &argv[argi] : empty_argv;
+	char **target_argv = NULL;
+	if (shell_mode) {
+		int shell_argc = argc - argi;
+		if (shell_argc < 0)
+			shell_argc = 0;
+		target_argv = z_alloca(sizeof(char *) * (shell_argc + 2));
+		int pos = 0;
+		target_argv[pos++] = (char *)"dash";
+		for (int k = 0; k < shell_argc; k++)
+			target_argv[pos++] = argv[argi + k];
+		target_argv[pos] = NULL;
+	} else {
+		static char *empty_argv[] = { NULL };
+		target_argv = (argi < argc) ? &argv[argi] : empty_argv;
+	}
 
 	if (bootstrap_cfg.use_init) {
 		init_memfd = create_tiny_init_memfd();
@@ -1183,6 +1340,11 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "failed to prepare embedded tiny-init");
 		if (guest_cfg_fd < 0 && argi >= argc)
 			z_errx(1, "guest config not available (memfd_create missing?) and no target provided");
+	}
+	if (shell_mode) {
+		shell_memfd = create_shell_memfd();
+		if (shell_memfd < 0)
+			z_errx(1, "failed to prepare embedded compat shell");
 	}
 
 	const char *payload_path = payload_path_override[0] ? payload_path_override : CONFIG_DEFAULT_PAYLOAD_PATH;
@@ -1236,7 +1398,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			set_hook_range(g_hook_min_interp, g_hook_max_interp);
 		else
 			set_hook_range(g_hook_min_default, g_hook_max_default);
-		if (bootstrap_cfg.use_init && !loading_interp) {
+		if (shell_mode && !loading_interp) {
+			path_for_open = "(embedded shell)";
+			fd = shell_memfd;
+		} else if (bootstrap_cfg.use_init && !loading_interp) {
 			path_for_open = "(embedded tiny-init)";
 			fd = init_memfd;
 		} else {
@@ -1245,7 +1410,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		}
 		z_printf("[Loader] child=%d open target \"%s\" (arg=\"%s\")\n",
 			 child_loader, path_for_open, file);
-		if (!bootstrap_cfg.use_init && child_loader && !loading_interp && !shebang_mode) {
+		if (!bootstrap_cfg.use_init && !shell_mode && child_loader && !loading_interp && !shebang_mode) {
 			z_memset(shebang_interp, 0, sizeof(shebang_interp));
 			z_memset(shebang_interp_arg, 0, sizeof(shebang_interp_arg));
 			if (parse_shebang(path_for_open, shebang_interp, sizeof(shebang_interp),
@@ -1270,7 +1435,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 				continue;
 			}
 		}
-		if (child_loader && !bootstrap_cfg.use_init) {
+		if (child_loader && !bootstrap_cfg.use_init && !shell_mode) {
 			int elf = is_elf_file(path_for_open);
 			z_printf("[Loader] child=%d ELF check \"%s\": %s\n",
 				 child_loader, path_for_open, elf ? "yes" : "no");
@@ -1333,6 +1498,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
 		AVSET(AT_ENTRY, av, entry[Z_PROG]);
 		const char *execfn = bootstrap_cfg.use_init ? file : target_argv[0];
+		if (shell_mode)
+			execfn = target_argv[0];
 		if (shebang_mode && shebang_script[0])
 			execfn = shebang_script;
 		AVSET(AT_EXECFN, av, (unsigned long)execfn);
@@ -1345,7 +1512,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	++av;
 
 	if (shebang_mode) {
-		int envc = clean_envc;
+		int envc = final_envc;
 
 		int auxc = 0;
 		Elf_auxv_t *aux_src = av_start;
@@ -1372,7 +1539,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 		char **dst_env = &dst[new_argc + 1];
 		for (int e = 0; e < envc; e++)
-			dst_env[e] = clean_env_ptrs[e];
+			dst_env[e] = final_env_ptrs[e];
 		dst_env[envc] = NULL;
 
 		Elf_auxv_t *dst_aux = (Elf_auxv_t *)&dst_env[envc + 1];
@@ -1381,7 +1548,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 		*sp = new_argc;
 	} else {
-		int envc = clean_envc;
+		int envc = final_envc;
 
 		int auxc = 0;
 		Elf_auxv_t *aux_src = av_start;
@@ -1390,19 +1557,27 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		auxc++;
 
 		int user_argc = argc - argi;
-		int extra = bootstrap_cfg.use_init ? 1 : 0;
+		if (user_argc < 0)
+			user_argc = 0;
+		int extra = (bootstrap_cfg.use_init && !shell_mode) ? 1 : 0;
 		int new_argc = user_argc + extra;
 		char **dst = argv;
 		int pos = 0;
-		if (bootstrap_cfg.use_init)
-			dst[pos++] = (char *)file;
-		for (int k = 0; k < user_argc; k++)
-			dst[pos++] = argv[argi + k];
+		if (shell_mode) {
+			for (int k = 0; target_argv[k]; k++)
+				dst[pos++] = target_argv[k];
+			new_argc = pos;
+		} else {
+			if (bootstrap_cfg.use_init)
+				dst[pos++] = (char *)file;
+			for (int k = 0; k < user_argc; k++)
+				dst[pos++] = argv[argi + k];
+		}
 		dst[new_argc] = NULL;
 
 		char **dst_env = &dst[new_argc + 1];
 		for (int e = 0; e < envc; e++)
-			dst_env[e] = clean_env_ptrs[e];
+			dst_env[e] = final_env_ptrs[e];
 		dst_env[envc] = NULL;
 
 		Elf_auxv_t *dst_aux = (Elf_auxv_t *)&dst_env[envc + 1];

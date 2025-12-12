@@ -7,6 +7,7 @@
 #include "hook_runtime.h"
 
 #define AT_FDCWD        (-100)
+#define AT_EMPTY_PATH   0x1000
 #define ENOENT          2
 
 #define MAX_EXEC_ARGS   128
@@ -193,6 +194,23 @@ static int resolve_symlink_chain(const char *path, char *out, size_t out_sz)
     return 1;
 }
 
+static const char *rewrite_path_resolved(const char *orig, char *buf, size_t buf_sz)
+{
+    if (!orig)
+        return orig;
+    const char *rw = rewrite_path(orig, buf, buf_sz);
+    char resolved[CONFIG_MAX_PATH];
+    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
+        safe_cpy(buf, buf_sz, resolved);
+        rw = buf;
+    }
+    return rw;
+}
+
+static int build_exec_vec(const char *const *in, char **out,
+                          char buf[][CONFIG_MAX_PATH], size_t max_items,
+                          int rewrite_paths);
+
 static int is_elf_file(const char *path)
 {
     if (!path)
@@ -344,6 +362,207 @@ static long mmap_exec_anon_fallback(long *args)
     return (long)mapped;
 }
 
+static long handle_execve_like(long sys_no, long *args, int is_execveat)
+{
+    int path_idx = is_execveat ? 1 : 0;
+    int argv_idx = is_execveat ? 2 : 1;
+    int env_idx = is_execveat ? 3 : 2;
+    int flags_idx = is_execveat ? 4 : -1;
+    long dirfd = is_execveat ? args[0] : AT_FDCWD;
+    int flags = (flags_idx >= 0) ? (int)args[flags_idx] : 0;
+
+    if (is_execveat) {
+        SAFE_LOG("[Payload] execveat\n");
+    } else {
+        SAFE_LOG("[Payload] execve\n");
+    }
+
+    const char *orig_path = (const char *)args[path_idx];
+    if (!orig_path)
+        return do_syscall(sys_no, args);
+    if (is_execveat && orig_path[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return do_syscall(sys_no, args);
+
+    char argv_buf[MAX_EXEC_ARGS][CONFIG_MAX_PATH];
+    char env_buf[MAX_EXEC_ENVS][CONFIG_MAX_PATH];
+    char *argv_out[MAX_EXEC_ARGS];
+    char *env_out[MAX_EXEC_ENVS];
+    payload_config_t *cfg = &g_payload_config;
+    const char *cfg_path = cfg->config_path[0] ? cfg->config_path : NULL;
+
+    /* Build argv list with rewritten paths */
+    if (!build_exec_vec((const char *const *)args[argv_idx], argv_out, argv_buf, MAX_EXEC_ARGS, 1))
+        return -ENOENT;
+
+    /* Build env list with rewritten PATH/LD_LIBRARY_PATH/etc. */
+    if (!build_exec_env((const char *const *)args[env_idx], env_out, env_buf, MAX_EXEC_ENVS))
+        return -ENOENT;
+
+    char exec_path[CONFIG_MAX_PATH];
+    rewrite_path(orig_path, exec_path, sizeof(exec_path));
+    log_path_pair(is_execveat ? "[Payload] execveat pathname " : "[Payload] execve pathname ",
+                  orig_path, exec_path);
+
+    char resolved[CONFIG_MAX_PATH];
+    int is_link = resolve_symlink_chain(exec_path, resolved, sizeof(resolved));
+    const char *target_path = is_link ? resolved : exec_path;
+    log_path_pair(is_execveat ? "[Payload] execveat target " : "[Payload] execve target ",
+                  exec_path, target_path);
+    const char *arg0_path = argv_out[0]; /* 原始 argv[0] 名字 */
+
+    int elf = is_elf_file(target_path);
+    log_path_pair(is_execveat ? "[Payload] execveat elf? " : "[Payload] execve elf? ",
+                  target_path, elf ? "yes" : "no");
+    if (!elf) {
+        char sb_interp[CONFIG_MAX_PATH];
+        char sb_arg[CONFIG_MAX_PATH];
+        if (parse_shebang(target_path, sb_interp, sizeof(sb_interp),
+                          sb_arg, sizeof(sb_arg))) {
+            log_path(is_execveat ? "[Payload] execveat shebang interp=" : "[Payload] execve shebang interp=", sb_interp);
+            if (sb_arg[0])
+                log_path(is_execveat ? "[Payload] execveat shebang arg=" : "[Payload] execve shebang arg=", sb_arg);
+            char interp_full[CONFIG_MAX_PATH];
+            if (sb_interp[0] == '/') {
+                rewrite_path(sb_interp, interp_full, sizeof(interp_full));
+            } else {
+                size_t prefix_len = dir_len(target_path);
+                join_paths(interp_full, sizeof(interp_full),
+                           target_path, prefix_len, sb_interp);
+                rewrite_path(interp_full, interp_full, sizeof(interp_full));
+            }
+            log_path(is_execveat ? "[Payload] execveat shebang interp rewritten=" : "[Payload] execve shebang interp rewritten=", interp_full);
+
+            if (is_execveat) {
+                SAFE_LOG("[Payload] execveat shebang -> loader\n");
+            } else {
+                SAFE_LOG("[Payload] execve shebang -> loader\n");
+            }
+            argv_out[0] = (char *)interp_full;
+
+            char loader_path[CONFIG_MAX_PATH];
+            if (!find_loader_path(loader_path, sizeof(loader_path))) {
+                SAFE_LOG("[Payload] loader not found\n");
+                return -ENOENT;
+            }
+
+            int argc = 0;
+            while (argv_out[argc])
+                argc++;
+            int extra = 3 + (cfg_path ? 2 : 0);
+            if (sb_arg[0])
+                extra++;
+            if (argc + extra + 1 >= MAX_EXEC_ARGS)
+                return -ENOENT;
+
+            for (int i = argc; i >= 1; i--)
+                argv_out[i + extra - 1] = argv_out[i];
+
+            int pos = 0;
+            argv_out[pos++] = loader_path;
+            if (cfg_path) {
+                argv_out[pos++] = "-c";
+                argv_out[pos++] = (char *)cfg_path;
+            }
+            argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
+            argv_out[pos++] = (char *)interp_full;
+            if (sb_arg[0])
+                argv_out[pos++] = sb_arg;
+            argv_out[pos++] = (char *)arg0_path;
+            argv_out[argc + extra] = NULL;
+
+            if (is_execveat) {
+                args[0] = AT_FDCWD;
+                if (flags_idx >= 0)
+                    args[flags_idx] = 0;
+            }
+            args[path_idx] = (long)loader_path;
+            args[argv_idx] = (long)argv_out;
+            args[env_idx] = (long)env_out;
+
+            return do_syscall(sys_no, args);
+        } else {
+            if (is_execveat) {
+                SAFE_LOG("[Payload] execveat passthrough (non-elf, no shebang)\n");
+            } else {
+                SAFE_LOG("[Payload] execve passthrough (non-elf, no shebang)\n");
+            }
+            argv_out[0] = (char *)target_path;
+            if (is_execveat) {
+                args[0] = dirfd;
+                if (flags_idx >= 0)
+                    args[flags_idx] = flags;
+            }
+            args[path_idx] = (long)target_path;
+            args[argv_idx] = (long)argv_out;
+            args[env_idx] = (long)env_out;
+            return do_syscall(sys_no, args);
+        }
+    }
+
+    if (is_execveat) {
+        SAFE_LOG("[Payload] execveat chain loader (elf)\n");
+    } else {
+        SAFE_LOG("[Payload] execve chain loader (elf)\n");
+    }
+    argv_out[0] = (char *)orig_path;
+
+    char loader_path[CONFIG_MAX_PATH];
+    if (!find_loader_path(loader_path, sizeof(loader_path))) {
+        SAFE_LOG("[Payload] loader not found\n");
+        return -ENOENT;
+    }
+
+    int argc = 0;
+    while (argv_out[argc])
+        argc++;
+    int extra = 2 + (cfg_path ? 2 : 0);
+    if (g_payload_config.hook_range_set)
+        extra += 2;
+    if (g_payload_config.hook_range_interp_set)
+        extra += 2;
+    if (argc + extra + 1 >= MAX_EXEC_ARGS)
+        return -ENOENT;
+
+    for (int i = argc; i >= 0; i--)
+        argv_out[i + extra] = argv_out[i];
+
+    int pos = 0;
+    argv_out[pos++] = loader_path;
+    if (cfg_path) {
+        argv_out[pos++] = "-c";
+        argv_out[pos++] = (char *)cfg_path;
+    }
+    argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
+    if (g_payload_config.hook_range_set) {
+        argv_out[pos++] = "--hook-range";
+        static char hook_buf[32];
+        format_range(g_payload_config.hook_min,
+                     g_payload_config.hook_max,
+                     hook_buf, sizeof(hook_buf));
+        argv_out[pos++] = hook_buf;
+    }
+    if (g_payload_config.hook_range_interp_set) {
+        argv_out[pos++] = "--hook-range-interp";
+        static char hook_buf2[32];
+        format_range(g_payload_config.hook_min_interp,
+                     g_payload_config.hook_max_interp,
+                     hook_buf2, sizeof(hook_buf2));
+        argv_out[pos++] = hook_buf2;
+    }
+    argv_out[argc + extra] = NULL;
+
+    if (is_execveat) {
+        args[0] = AT_FDCWD;
+        if (flags_idx >= 0)
+            args[flags_idx] = 0;
+    }
+    args[path_idx] = (long)loader_path;
+    args[argv_idx] = (long)argv_out;
+    args[env_idx] = (long)env_out;
+
+    return do_syscall(sys_no, args);
+}
+
 static int build_exec_vec(const char *const *in, char **out,
                           char buf[][CONFIG_MAX_PATH], size_t max_items,
                           int rewrite_paths)
@@ -374,6 +593,7 @@ long syscall_handle_common(long sys_no, long args[6]) {
     char new_path[CONFIG_MAX_PATH];
     char new_path2[CONFIG_MAX_PATH];
     char out_path[CONFIG_MAX_PATH];
+    int isolation_on = hook_layer_enabled(HOOK_LAYER_ISOLATION);
 
     switch (sys_no) {
         case SYS_getcwd:
@@ -408,6 +628,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_setfsuid:
         case SYS_setfsgid:
         case SYS_setgroups:
+            if (!isolation_on) {
+                ret = do_syscall(sys_no, args);
+                break;
+            }
             SAFE_LOG("[Payload] fakeroot set* uid/gid -> fake 0\n");
             ret = 0;
             break;
@@ -417,10 +641,18 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_geteuid:
         case SYS_getgid:
         case SYS_getegid:
+            if (!isolation_on) {
+                ret = do_syscall(sys_no, args);
+                break;
+            }
             SAFE_LOG("[Payload] fakeroot get[u/g]id -> 0\n");
             ret = 0;
             break;
         case SYS_getresuid: {
+            if (!isolation_on) {
+                ret = do_syscall(sys_no, args);
+                break;
+            }
             SAFE_LOG("[Payload] fakeroot getresuid\n");
             int *ruid = (int *)args[0];
             int *euid = (int *)args[1];
@@ -432,6 +664,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
         }
         case SYS_getresgid: {
+            if (!isolation_on) {
+                ret = do_syscall(sys_no, args);
+                break;
+            }
             SAFE_LOG("[Payload] fakeroot getresgid\n");
             int *rgid = (int *)args[0];
             int *egid = (int *)args[1];
@@ -443,6 +679,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
         }
         case SYS_getgroups: {
+            if (!isolation_on) {
+                ret = do_syscall(sys_no, args);
+                break;
+            }
             SAFE_LOG("[Payload] fakeroot getgroups\n");
             int size = (int)args[0];
             int *list = (int *)args[1];
@@ -513,180 +753,73 @@ long syscall_handle_common(long sys_no, long args[6]) {
             }
             break;
 
-        case SYS_execve:
-            SAFE_LOG("[Payload] execve\n");
-            if (!args[0]) {
-                ret = do_syscall(sys_no, args);
+        case SYS_fchmodat: {
+            SAFE_LOG("[Payload] fchmodat\n");
+            if (isolation_on) {
+                ret = 0;
                 break;
             }
-
-            {
-                char argv_buf[MAX_EXEC_ARGS][CONFIG_MAX_PATH];
-                char env_buf[MAX_EXEC_ENVS][CONFIG_MAX_PATH];
-                char *argv_out[MAX_EXEC_ARGS];
-                char *env_out[MAX_EXEC_ENVS];
-                payload_config_t *cfg = &g_payload_config;
-                const char *cfg_path = cfg->config_path[0] ? cfg->config_path : NULL;
-
-                /* Build argv list with rewritten paths */
-                if (!build_exec_vec((const char *const *)args[1], argv_out, argv_buf, MAX_EXEC_ARGS, 1)) {
-                    ret = -ENOENT;
-                    break;
-                }
-
-                /* Build env list with rewritten PATH/LD_LIBRARY_PATH/etc. */
-                if (!build_exec_env((const char *const *)args[2], env_out, env_buf, MAX_EXEC_ENVS)) {
-                    ret = -ENOENT;
-                    break;
-                }
-
-                const char *orig_path = (const char *)args[0];
-                char exec_path[CONFIG_MAX_PATH];
-                rewrite_path(orig_path, exec_path, sizeof(exec_path));
-                log_path_pair("[Payload] execve pathname ", orig_path, exec_path);
-
-                char resolved[CONFIG_MAX_PATH];
-                int is_link = resolve_symlink_chain(exec_path, resolved, sizeof(resolved));
-                const char *target_path = is_link ? resolved : exec_path;
-                log_path_pair("[Payload] execve target ", exec_path, target_path);
-                const char *arg0_path = argv_out[0]; /* 原始 argv[0] 名字 */
-
-                int elf = is_elf_file(target_path);
-                log_path_pair("[Payload] execve elf? ", target_path, elf ? "yes" : "no");
-                if (!elf) {
-                    char sb_interp[CONFIG_MAX_PATH];
-                    char sb_arg[CONFIG_MAX_PATH];
-                    if (parse_shebang(target_path, sb_interp, sizeof(sb_interp),
-                                      sb_arg, sizeof(sb_arg))) {
-                        log_path("[Payload] execve shebang interp=", sb_interp);
-                        if (sb_arg[0])
-                            log_path("[Payload] execve shebang arg=", sb_arg);
-                        char interp_full[CONFIG_MAX_PATH];
-                        if (sb_interp[0] == '/') {
-                            rewrite_path(sb_interp, interp_full, sizeof(interp_full));
-                        } else {
-                            size_t prefix_len = dir_len(target_path);
-                            join_paths(interp_full, sizeof(interp_full),
-                                       target_path, prefix_len, sb_interp);
-                            rewrite_path(interp_full, interp_full, sizeof(interp_full));
-                        }
-                        log_path("[Payload] execve shebang interp rewritten=", interp_full);
-
-                        SAFE_LOG("[Payload] execve shebang -> loader\n");
-                        /* interpreter path will be argv_out[0] after loader insertion */
-                        argv_out[0] = (char *)interp_full;
-
-                        char loader_path[CONFIG_MAX_PATH];
-                        if (!find_loader_path(loader_path, sizeof(loader_path))) {
-                            SAFE_LOG("[Payload] loader not found\n");
-                            ret = -ENOENT;
-                            break;
-                        }
-
-                        int argc = 0;
-                        while (argv_out[argc])
-                            argc++;
-                        int extra = 3 + (cfg_path ? 2 : 0); /* loader, child flag, script */
-                        if (sb_arg[0])
-                            extra++;
-                        if (argc + extra + 1 >= MAX_EXEC_ARGS) {
-                            ret = -ENOENT;
-                            break;
-                        }
-                        for (int i = argc; i >= 1; i--) {
-                            argv_out[i + extra - 1] = argv_out[i];
-                        }
-
-                        int pos = 0;
-                        argv_out[pos++] = loader_path;
-                        if (cfg_path) {
-                            argv_out[pos++] = "-c";
-                            argv_out[pos++] = (char *)cfg_path;
-                        }
-                        argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
-                        /* interpreter (already rewritten) */
-                        argv_out[pos++] = (char *)interp_full;
-                        if (sb_arg[0])
-                            argv_out[pos++] = sb_arg;
-                        argv_out[pos++] = (char *)arg0_path; /* script 保留原始名/路径 */
-                        argv_out[argc + extra] = NULL;
-
-                        args[0] = (long)loader_path;
-                        args[1] = (long)argv_out;
-                        args[2] = (long)env_out;
-
-                        ret = do_syscall(sys_no, args);
-                        break;
-                    } else {
-                        SAFE_LOG("[Payload] execve passthrough (non-elf, no shebang)\n");
-                        argv_out[0] = (char *)target_path;
-                        args[0] = (long)target_path;
-                        args[1] = (long)argv_out;
-                        args[2] = (long)env_out;
-                        ret = do_syscall(sys_no, args);
-                        break;
-                    }
-                }
-                /* 错误写法: argv_out[0] = (char *)arg0_path; */
-                /* 正确写法: 使用原始虚拟路径 (如 /bin/ls) */
-                SAFE_LOG("[Payload] execve chain loader (elf)\n");
-                argv_out[0] = (char *)orig_path;
-
-                /* Resolve loader path */
-                char loader_path[CONFIG_MAX_PATH];
-                if (!find_loader_path(loader_path, sizeof(loader_path))) {
-                    SAFE_LOG("[Payload] loader not found\n");
-                    ret = -ENOENT;
-                    break;
-                }
-
-                /* Shift argv right by 2 to insert loader + child flag */
-                int argc = 0;
-                while (argv_out[argc])
-                    argc++;
-                int extra = 2 + (cfg_path ? 2 : 0);
-                if (g_payload_config.hook_range_set)
-                    extra += 2;
-                if (g_payload_config.hook_range_interp_set)
-                    extra += 2;
-                if (argc + extra + 1 >= MAX_EXEC_ARGS) {
-                    ret = -ENOENT;
-                    break;
-                }
-                for (int i = argc; i >= 0; i--) {
-                    argv_out[i + extra] = argv_out[i];
-                }
-                int pos = 0;
-                argv_out[pos++] = loader_path;
-                if (cfg_path) {
-                    argv_out[pos++] = "-c";
-                    argv_out[pos++] = (char *)cfg_path;
-                }
-                argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
-                if (g_payload_config.hook_range_set) {
-                    argv_out[pos++] = "--hook-range";
-                    static char hook_buf[32];
-                    format_range(g_payload_config.hook_min,
-                                 g_payload_config.hook_max,
-                                 hook_buf, sizeof(hook_buf));
-                    argv_out[pos++] = hook_buf;
-                }
-                if (g_payload_config.hook_range_interp_set) {
-                    argv_out[pos++] = "--hook-range-interp";
-                    static char hook_buf2[32];
-                    format_range(g_payload_config.hook_min_interp,
-                                 g_payload_config.hook_max_interp,
-                                 hook_buf2, sizeof(hook_buf2));
-                    argv_out[pos++] = hook_buf2;
-                }
-                argv_out[argc + extra] = NULL;
-
-                args[0] = (long)loader_path;
-                args[1] = (long)argv_out;
-                args[2] = (long)env_out;
-
-                ret = do_syscall(sys_no, args);
+            if ((const char *)args[1]) {
+                const char *orig = (const char *)args[1];
+                const char *rw = rewrite_path_resolved(orig, new_path, sizeof(new_path));
+                log_path_pair("[Payload] fchmodat path ", orig, rw);
+                args[1] = (long)rw;
             }
+            ret = do_syscall(sys_no, args);
+            break;
+        }
+
+        case SYS_fchownat: {
+            SAFE_LOG("[Payload] fchownat\n");
+            if ((const char *)args[1]) {
+                const char *orig = (const char *)args[1];
+                const char *rw = rewrite_path_resolved(orig, new_path, sizeof(new_path));
+                log_path_pair("[Payload] fchownat path ", orig, rw);
+                args[1] = (long)rw;
+            }
+            if (isolation_on) {
+                ret = 0;
+                break;
+            }
+            ret = do_syscall(sys_no, args);
+            break;
+        }
+
+        case SYS_utimensat:
+            SAFE_LOG("[Payload] utimensat\n");
+            if ((const char *)args[1]) {
+                const char *orig = (const char *)args[1];
+                const char *rw = rewrite_path_resolved(orig, new_path, sizeof(new_path));
+                log_path_pair("[Payload] utimensat path ", orig, rw);
+                args[1] = (long)rw;
+            }
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_fchmod:
+            SAFE_LOG("[Payload] fchmod\n");
+            if (isolation_on) {
+                ret = 0;
+                break;
+            }
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_fchown:
+            SAFE_LOG("[Payload] fchown\n");
+            if (isolation_on) {
+                ret = 0;
+                break;
+            }
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_execve:
+            ret = handle_execve_like(sys_no, args, 0);
+            break;
+
+        case SYS_execveat:
+            ret = handle_execve_like(sys_no, args, 1);
             break;
 
         case SYS_exit:
