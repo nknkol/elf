@@ -392,7 +392,7 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     const char *cfg_path = cfg->config_path[0] ? cfg->config_path : NULL;
 
     /* Build argv list with rewritten paths */
-    if (!build_exec_vec((const char *const *)args[argv_idx], argv_out, argv_buf, MAX_EXEC_ARGS, 1))
+    if (!build_exec_vec((const char *const *)args[argv_idx], argv_out, argv_buf, MAX_EXEC_ARGS, 0))
         return -ENOENT;
 
     /* Build env list with rewritten PATH/LD_LIBRARY_PATH/etc. */
@@ -820,6 +820,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
                 args[1] = (long)rw;
             }
             ret = do_syscall(sys_no, args);
+            // 0 (Success)
+            if (ret < 0) {
+                 ret = 0; 
+            }
             break;
 
         case SYS_fchmod:
