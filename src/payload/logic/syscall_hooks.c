@@ -694,6 +694,32 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
         }
 
+        case SYS_symlinkat: {
+            /* symlinkat(target, newdirfd, linkpath) 参数顺序与 *at 系列不同 */
+            if ((const char *)args[0]) {
+                const char *orig_target = (const char *)args[0];
+                const char *rw_target = rewrite_path(orig_target, new_path, sizeof(new_path));
+                char resolved_target[CONFIG_MAX_PATH];
+                if (resolve_symlink_chain(rw_target, resolved_target, sizeof(resolved_target))) {
+                    rw_target = resolved_target;
+                }
+                log_path_pair("[Payload] symlink target ", orig_target, rw_target);
+                args[0] = (long)rw_target;
+            }
+            if ((const char *)args[2]) {
+                const char *orig_link = (const char *)args[2];
+                const char *rw_link = rewrite_path(orig_link, new_path2, sizeof(new_path2));
+                char resolved_link[CONFIG_MAX_PATH];
+                if (resolve_symlink_chain(rw_link, resolved_link, sizeof(resolved_link))) {
+                    rw_link = resolved_link;
+                }
+                log_path_pair("[Payload] path arg2 ", orig_link, rw_link);
+                args[2] = (long)rw_link;
+            }
+            ret = do_syscall(sys_no, args);
+            break;
+        }
+
         case SYS_mkdirat:
         case SYS_mknodat:
         case SYS_unlinkat:
@@ -701,7 +727,6 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_renameat:
         case SYS_openat:
         case SYS_faccessat:
-        case SYS_symlinkat:
         case SYS_readlinkat:
         case SYS_newfstatat:
             if ((const char *)args[1]) {
