@@ -9,7 +9,7 @@
 ### Host Layer（loader / 子 loader）
 - `ROOT <path>`：容器根。
 - `BIND <host>:<guest>`：可多次。
-- `DEBUG on|off`：对应 HOOK_LOG。
+- `DEBUG <0-4|on|off>`：日志级别，对应 HOOK_LOG。`4`/`on` 输出完整调试日志（桩岛 hook 也在此级别），`0`/`off` 关闭。
 - `PAYLOAD <path>`：payload 路径。
 
 ### Guest Layer（tiny-init）
@@ -31,7 +31,7 @@
 [Host Layer]
 ROOT /storage/Users/currentUser/alpine
 BIND /bin:/storage/Users/currentUser/alpine/bin
-DEBUG on
+DEBUG 4
 PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.bin
 
 [Guest Layer]

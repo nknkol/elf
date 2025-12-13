@@ -1,3 +1,4 @@
+#include "config.h"
 #include "hook.h"
 #include "z_syscalls.h"
 #include "z_utils.h"
@@ -14,11 +15,26 @@
 
 static int g_hook_min = 0;
 static int g_hook_max = 0x7fffffff;
+static int g_hook_log_level = LOG_LEVEL_ERROR;
+
+#define HOOK_LOG(level, fmt, ...) \
+    do { if (g_hook_log_level >= (level)) z_printf(fmt, ##__VA_ARGS__); } while (0)
+#define HOOK_DBG(fmt, ...)  HOOK_LOG(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define HOOK_WARN(fmt, ...) HOOK_LOG(LOG_LEVEL_WARN, fmt, ##__VA_ARGS__)
+#define HOOK_ERR(fmt, ...)  HOOK_LOG(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
 
 void set_hook_range(int min, int max) {
     g_hook_min = min;
     g_hook_max = max;
-    z_printf("[Hook] Config: Range [%d - %d]\n", g_hook_min, g_hook_max);
+    HOOK_DBG("[Hook] Config: Range [%d - %d]\n", g_hook_min, g_hook_max);
+}
+
+void set_hook_log_level(int level) {
+    if (level < LOG_LEVEL_ERROR)
+        level = LOG_LEVEL_ERROR; /* 仍保留错误日志 */
+    if (level > LOG_LEVEL_DEBUG)
+        level = LOG_LEVEL_DEBUG;
+    g_hook_log_level = level;
 }
 
 /* Stub Pool State */
@@ -32,11 +48,11 @@ static uint32_t generate_branch_insn(uintptr_t src, uintptr_t dest)
     int64_t offset = (int64_t)dest - (int64_t)src;
 
     if (offset < -134217728 || offset > 134217727) {
-        z_printf("[Hook Error] Branch out of range! Dist: %ld\n", offset);
+        HOOK_ERR("[Hook Error] Branch out of range! Dist: %ld\n", offset);
         return 0;
     }
     if (offset % 4 != 0) {
-        z_printf("[Hook Error] Branch target not aligned!\n");
+        HOOK_ERR("[Hook Error] Branch target not aligned!\n");
         return 0;
     }
     uint32_t imm26 = (offset >> 2) & 0x03ffffff;
@@ -79,13 +95,13 @@ static void *alloc_stub_slot(uintptr_t hint_addr) {
     if (stub_pool_base == NULL) {
         need_new = 1;
     } else if (stub_pool_offset + STUB_SIZE > STUB_PAGE_SIZE) {
-        z_printf("[Hook] Stub Page Full. Allocating new.\n");
+        HOOK_DBG("[Hook] Stub Page Full. Allocating new.\n");
         need_new = 1;
     } else {
         int64_t dist = (int64_t)stub_pool_base - (int64_t)hint_addr;
         if (dist < 0) dist = -dist;
         if (dist > STUB_DIST_LIMIT) {
-            z_printf("[Hook] Stub Page too far (%ld bytes). Allocating new.\n", dist);
+            HOOK_WARN("[Hook] Stub Page too far (%ld bytes). Allocating new.\n", dist);
             need_new = 1;
         }
     }
@@ -109,14 +125,14 @@ static void *alloc_stub_slot(uintptr_t hint_addr) {
         }
 
         if (new_page == (void*)-1) {
-            z_printf("[Hook] Fatal: z_mmap failed for stub page!\n");
+            HOOK_ERR("[Hook] Fatal: z_mmap failed for stub page!\n");
             return NULL;
         }
         stub_pool_base = new_page;
         stub_pool_offset = 0;
         
         int64_t dist = (int64_t)stub_pool_base - (int64_t)hint_addr;
-        z_printf("[Hook] New Stub Page: %p (Dist from target: %ld bytes)\n", stub_pool_base, dist);
+        HOOK_DBG("[Hook] New Stub Page: %p (Dist from target: %ld bytes)\n", stub_pool_base, dist);
     }
 
     void *slot = (void*)((uintptr_t)stub_pool_base + stub_pool_offset);
@@ -156,7 +172,7 @@ int install_hook(void *target_base, size_t target_size, void *payload_entry, siz
     // payload_header_t *header = (payload_header_t *)payload_entry;
     // Magic check skipped for ELF payload as entry points to code directly
 
-    z_printf("[Hook] Scanning %p - %p (%ld bytes)\n", 
+    HOOK_DBG("[Hook] Scanning %p - %p (%ld bytes)\n", 
              target_base, (void*)((uintptr_t)target_base + target_size), target_size);
 
     for (size_t i = 0; i < count; i++) {
@@ -171,28 +187,28 @@ int install_hook(void *target_base, size_t target_size, void *payload_entry, siz
             /* 1. Create Stub */
             uintptr_t stub_addr = create_stub(hook_addr, (uintptr_t)payload_entry, return_addr);
             if (!stub_addr) {
-                z_printf("[Hook Error] Alloc stub failed at %p\n", (void*)hook_addr);
+                HOOK_ERR("[Hook Error] Alloc stub failed at %p\n", (void*)hook_addr);
                 continue;
             }
 
             /* 2. Calculate Jump */
             uint32_t jmp_to_stub = generate_branch_insn(hook_addr, stub_addr);
             if (jmp_to_stub == 0) {
-                 z_printf("[Hook Error] Stub too far from %p to %p. Skipping.\n", (void*)hook_addr, (void*)stub_addr);
+                 HOOK_ERR("[Hook Error] Stub too far from %p to %p. Skipping.\n", (void*)hook_addr, (void*)stub_addr);
                  continue;
             }
 
             /* 3. Patch */
             if (patch_instruction(hook_addr, jmp_to_stub) < 0) {
-                 z_printf("[Hook Error] Failed to patch instruction at %p\n", (void*)hook_addr);
+                 HOOK_ERR("[Hook Error] Failed to patch instruction at %p\n", (void*)hook_addr);
             } else {
                  hook_count++;
-                 z_printf("[Hook] Hook #%d: %p -> Stub %p (Dist: %ld)\n", 
+                 HOOK_DBG("[Hook] Hook #%d: %p -> Stub %p (Dist: %ld)\n", 
                           scan_index, (void*)hook_addr, (void*)stub_addr, (int64_t)(stub_addr - hook_addr));
             }
         }
     }
 
-    z_printf("[Hook] Installed: %d hooks\n", hook_count);
+    HOOK_DBG("[Hook] Installed: %d hooks\n", hook_count);
     return hook_count > 0;
 }

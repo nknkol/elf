@@ -322,6 +322,31 @@ static int parse_range_str(const char *s, int *min_out, int *max_out)
 	return 1;
 }
 
+static int clamp_log_level(int level)
+{
+	if (level < LOG_LEVEL_NONE)
+		return LOG_LEVEL_NONE;
+	if (level > LOG_LEVEL_DEBUG)
+		return LOG_LEVEL_DEBUG;
+	return level;
+}
+
+static int parse_log_level_value(const char *s)
+{
+	if (!s)
+		return LOG_LEVEL_NONE;
+	while (*s == ' ' || *s == '\t')
+		s++;
+	if (s[0] == '\0')
+		return LOG_LEVEL_NONE;
+	if (s[0] == 'o' || s[0] == 'O') {
+		if (s[1] == 'f' || s[1] == 'F')
+			return LOG_LEVEL_NONE;
+		return LOG_LEVEL_DEBUG;
+	}
+	return clamp_log_level(z_atoi(s));
+}
+
 typedef struct {
 	uint32_t magic;
 	uint32_t config_off;
@@ -424,6 +449,7 @@ static void init_payload_config(payload_config_t *cfg)
 	if (cfg)
 		z_memset(cfg, 0, sizeof(*cfg));
 	if (cfg) {
+		cfg->log_level = LOG_LEVEL_NONE;
 		cfg->hook_min = 0;
 		cfg->hook_max = 0x7fffffff;
 		cfg->hook_min_interp = 0;
@@ -437,8 +463,7 @@ static void apply_config_entry(payload_config_t *cfg, const char *entry, char *p
 	if (!cfg || !entry)
 		return;
 	if (z_strncmp(entry, "HOOK_LOG=", 9) == 0) {
-		const char *val = entry + 9;
-		cfg->log_enabled = (val[0] != '\0' && val[0] != '0') ? 1 : 0;
+		cfg->log_level = parse_log_level_value(entry + 9);
 	} else if (z_strncmp(entry, "PROOT_ROOT=", 11) == 0) {
 		copy_cstr(cfg->root, CONFIG_MAX_PATH, entry + 11);
 		maybe_set_container_mode(cfg);
@@ -624,8 +649,8 @@ static void parse_loader_rc(payload_config_t *cfg, const char *path, char *paylo
 				z_printf("[Loader] Host BIND %s -> %s\n", left, right);
 			}
 		} else if (z_strncmp(line, "DEBUG ", 6) == 0) {
-			cfg->log_enabled = (line[6] == 'o' || line[6] == 'O') ? 1 : 0;
-			z_printf("[Loader] Host DEBUG=%d\n", cfg->log_enabled);
+			cfg->log_level = parse_log_level_value(line + 6);
+			z_printf("[Loader] Host DEBUG=%d\n", cfg->log_level);
 		} else if (z_strncmp(line, "PAYLOAD ", 8) == 0) {
 			const char *p = line + 8;
 			if (payload_path_out)
@@ -1217,6 +1242,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	g_hook_max_default = bootstrap_cfg.hook_max;
 	g_hook_min_interp = bootstrap_cfg.hook_min_interp;
 	g_hook_max_interp = bootstrap_cfg.hook_max_interp;
+	set_hook_log_level(bootstrap_cfg.log_level);
 	int compat_mode = (bootstrap_cfg.mode == CONFIG_MODE_COMPAT);
 	int clean_envc = 0;
 	for (int i = 0; i < bootstrap_cfg.env_count && i < CONFIG_MAX_ENVS; i++) {

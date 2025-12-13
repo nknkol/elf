@@ -2,9 +2,19 @@
 
 payload_config_t g_payload_config;
 
+int config_log_level(void)
+{
+    int level = g_payload_config.log_level;
+    if (level < LOG_LEVEL_NONE)
+        level = LOG_LEVEL_NONE;
+    if (level > LOG_LEVEL_DEBUG)
+        level = LOG_LEVEL_DEBUG;
+    return level;
+}
+
 int config_log_enabled(void)
 {
-    return g_payload_config.log_enabled != 0;
+    return config_log_level() > LOG_LEVEL_NONE;
 }
 
 int config_mode(void)

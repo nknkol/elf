@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 
+#define LOG_LEVEL_NONE   0
+#define LOG_LEVEL_ERROR  1
+#define LOG_LEVEL_WARN   2
+#define LOG_LEVEL_INFO   3
+#define LOG_LEVEL_DEBUG  4
+
 #define CONFIG_MAGIC        0x484f4f4b /* "HOOK" */
 #define CONFIG_VERSION      1
 
@@ -34,7 +40,7 @@ struct bind_entry {
 };
 
 typedef struct payload_config {
-    int32_t log_enabled;
+    int32_t log_level;       /* LOG_LEVEL_* */
     int32_t mode;            /* CONFIG_MODE_* */
     int32_t mode_explicit;   /* 标记是否显式指定模式，避免被 ROOT 推导覆盖 */
     int32_t hook_mask;       /* HOOK_LAYER_* 位图，BASE 必开 */
@@ -58,6 +64,7 @@ typedef struct payload_config {
 } payload_config_t;
 
 extern payload_config_t g_payload_config;
+int config_log_level(void);
 int config_log_enabled(void);
 int config_mode(void);
 int hook_layer_enabled(int layer_mask);

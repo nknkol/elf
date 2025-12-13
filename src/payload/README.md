@@ -83,7 +83,7 @@
 - 解释器路径重写：加载 ELF 时会把 PT_INTERP 指向的解释器路径按配置的 root/bind 改写，优先使用容器内路径，避免直接访问宿主 `/lib/…` 造成逃逸。
 - 根目录强制：配置 `PROOT_ROOT` 后主 loader 启动即 `chdir` 到该根，拒绝绝对路径目标；子 loader 通过 `--child-loader` 标记保留调用方 cwd，但解析时会把相对/软链路径落在 root/bind 内。
 - 路径改写稳定：修复了 bind 目标长于源时的自覆盖拼接问题；`rewrite_path_from_host` 同步修正。
-- 日志与调试：`HOOK_LOG=1` 打印关键 syscall（含 execve 链路路径），便于确认是否正确链式/重写。
+- 日志与调试：`HOOK_LOG=0-4|on|off` 控制日志等级，`4`/`on` 才打印完整桩岛 hook 轨迹（含 execve 链路路径），默认 `0` 关闭以免干扰目标。
 - 仍未实现/待办：网络相关 hook（socket/bind/connect）、环境变量白名单、`HOOK_LOADER_PATH`/`HOOK_LOADER_NAME`/`ENV_` 扩展、后台/日志重定向、白障（whiteout）覆盖逻辑、链式自检和错误回退策略。
 - 动态库逃逸防范（方案）：最彻底的做法是直接在 ld.so 内挂钩其库加载路径（如 `_dl_map_object`/`load_library` 等），在每个新映射的可执行段完成 mmap/mprotect 后立即调用 `install_hook` 扫描并补丁 text，这样 libc/libm 等后续加载的共享库也会被改写 `svc`，避免 printf 等经由未改写的 stub 逃逸。可在 loader 阶段对 ld.so 目标函数打跳转到包装函数，包装里先走原逻辑再补丁新段；比单纯 syscall 拦截更精准、更彻底。
 
@@ -97,7 +97,7 @@
 ## 配置文件
 
 - 默认不自动加载配置文件；可用 `elfloader -c /path/to/loader.rc <target>` 指定配置（样板：`elf/src/config/loader.rc.sample`）。
-- 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=1`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d`、`PAYLOAD_PATH=/path/to/payload.bin` 等；`#` 开头为注释，空行和空白行会被忽略。`PAYLOAD_PATH` 若未设置默认取 `CONFIG_DEFAULT_PAYLOAD_PATH`（当前 `./payload.bin`）。
+- 配置文件格式为 `KEY=VAL`，支持 `HOOK_LOG=0-4|on|off`、`PROOT_ROOT=/rootfs`、`PROOT_BIND=/a:/b,/c:/d`、`PAYLOAD_PATH=/path/to/payload.bin` 等；`#` 开头为注释，空行和空白行会被忽略。`PAYLOAD_PATH` 若未设置默认取 `CONFIG_DEFAULT_PAYLOAD_PATH`（当前 `./payload.bin`）。
 - 加载顺序：仅读取配置文件，随后自动补上 `/elfloader` 绑定，不再信任容器内环境变量，避免被覆写导致逃逸。
 - 编译期可通过 `make DEFAULT_CONFIG_PATH=/your/path` 覆盖默认配置路径；可用 `SAMPLE_CONFIG_PATH=/your/sample` 在构建时自动复制 `loader.conf.sample` 到指定位置（可与默认配置路径不同）。
 - 环境传递：loader 不再透传宿主环境，默认空环境；仅注入 CLI `-e/--env` 指定的键。启用 `--init` 时，内嵌 tiny-init 会在空环境基础上填充 PATH/HOME/TERM/USER 等默认值后再 exec 用户命令（tiny-init 作为资源打包到 elfloader，运行时写入 memfd 直接 exec，名义路径为相对的 `tiny-init`）。

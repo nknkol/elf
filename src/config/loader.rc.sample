@@ -11,8 +11,8 @@ BIND /bin:/storage/Users/currentUser/alpine/bin
 BIND /usr:/storage/Users/currentUser/alpine/usr
 BIND /lib:/storage/Users/currentUser/alpine/lib
 BIND /lib64:/storage/Users/currentUser/alpine/lib64
-# 开启 Loader 调试日志 
-DEBUG on      
+# 调试日志级别（0-4，on/off 兼容；4 输出所有桩岛 hook 日志）
+DEBUG 4      
 # 指定 Payload 路径              
 PAYLOAD /data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/payload.bin
 # ==========================================
