@@ -9,6 +9,19 @@
 #include "hook.h"
 #include "config.h"
 
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0x20000
+#endif
+
 #define PAGE_SIZE	4096
 #define ALIGN		(PAGE_SIZE - 1)
 #define ROUND_PG(x)	(((x) + (ALIGN)) & ~(ALIGN))
@@ -217,7 +230,7 @@ static void *load_elf_payload_path(const char *path, size_t *entry_point_out)
 {
 	if (!path || !path[0])
 		return NULL;
-	int fd = z_open(path, O_RDONLY);
+	int fd = z_openat(AT_FDCWD, path, O_RDONLY);
 	if (fd < 0)
 		return NULL;
 	void *res = load_elf_payload_fd(fd, entry_point_out);
@@ -700,6 +713,13 @@ static int is_child_loader_arg(const char *arg)
 		arg[key_len] == '\0';
 }
 
+typedef struct child_loader_proto {
+	const char *exec_target;
+	const char *exec_path;
+	int exec_dirfd;
+	int exec_flags;
+} child_loader_proto_t;
+
 static const char *find_config_path_arg(int argc, char **argv)
 {
 	for (int i = 1; i < argc; i++) {
@@ -728,6 +748,19 @@ static const char *find_config_path_arg(int argc, char **argv)
 			i++;
 			continue;
 		}
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_TARGET,
+			      z_strlen(CONFIG_CHILD_EXEC_TARGET) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_PATH,
+			      z_strlen(CONFIG_CHILD_EXEC_PATH) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_DIRFD,
+			      z_strlen(CONFIG_CHILD_EXEC_DIRFD) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_FLAGS,
+			      z_strlen(CONFIG_CHILD_EXEC_FLAGS) + 1) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			i++;
+			continue;
+		}
 		if (is_child_loader_arg(arg) || z_strncmp(arg, "--init", 7) == 0 ||
 		    z_strncmp(arg, "-d", 3) == 0 || z_strncmp(arg, "--detach", 9) == 0) {
 			continue;
@@ -739,11 +772,17 @@ static const char *find_config_path_arg(int argc, char **argv)
 
 static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 			     int *child_loader_out, int *target_index_out,
-			     int *shell_mode_out)
+			     int *shell_mode_out, child_loader_proto_t *child_proto)
 {
 	int child_loader = 0;
 	int shell_mode = 0;
 	int idx = argc;
+	if (child_proto) {
+		child_proto->exec_target = NULL;
+		child_proto->exec_path = NULL;
+		child_proto->exec_dirfd = AT_FDCWD;
+		child_proto->exec_flags = 0;
+	}
 
 	for (int i = 1; i < argc; i++) {
 		char *arg = argv[i];
@@ -776,6 +815,46 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 
 		if (is_child_loader_arg(arg)) {
 			child_loader = 1;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_TARGET,
+			      z_strlen(CONFIG_CHILD_EXEC_TARGET) + 1) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			if (child_proto)
+				child_proto->exec_target = argv[i + 1];
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_PATH,
+			      z_strlen(CONFIG_CHILD_EXEC_PATH) + 1) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			if (child_proto)
+				child_proto->exec_path = argv[i + 1];
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_DIRFD,
+			      z_strlen(CONFIG_CHILD_EXEC_DIRFD) + 1) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			if (child_proto)
+				child_proto->exec_dirfd = z_atoi(argv[i + 1]);
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_FLAGS,
+			      z_strlen(CONFIG_CHILD_EXEC_FLAGS) + 1) == 0) {
+			if (i + 1 >= argc)
+				z_errx(1, "missing value for %s", arg);
+			if (child_proto)
+				child_proto->exec_flags = z_atoi(argv[i + 1]);
+			i++;
 			continue;
 		}
 
@@ -895,8 +974,8 @@ static int has_loader_bind(payload_config_t *cfg)
 	return 0;
 }
 
-static int parse_shebang(const char *path, char *interp, size_t interp_sz,
-			 char *arg, size_t arg_sz)
+static int parse_shebang_at(int dirfd, const char *path, char *interp, size_t interp_sz,
+			    char *arg, size_t arg_sz)
 {
 	if (!path || !interp || interp_sz == 0)
 		return 0;
@@ -940,11 +1019,11 @@ static int parse_shebang(const char *path, char *interp, size_t interp_sz,
 	return 1;
 }
 
-static int is_elf_file(const char *path)
+static int is_elf_file_at(int dirfd, const char *path)
 {
 	if (!path)
 		return 0;
-	int fd = z_open(path, O_RDONLY);
+	int fd = z_openat(dirfd, path, O_RDONLY);
 	if (fd < 0)
 		return 0;
 	unsigned char ident[4];
@@ -955,6 +1034,11 @@ static int is_elf_file(const char *path)
 	z_close(fd);
 	return ident[0] == ELFMAG0 && ident[1] == ELFMAG1 &&
 	       ident[2] == ELFMAG2 && ident[3] == ELFMAG3;
+}
+
+static int is_elf_file(const char *path)
+{
+	return is_elf_file_at(AT_FDCWD, path);
 }
 
 static void log_bind_list(payload_config_t *cfg, const char *tag)
@@ -1188,6 +1272,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	int argc, fd, i;
 	int load_interp_next = 0;
 	int child_loader = 0;
+	child_loader_proto_t child_proto;
 	int shebang_mode = 0;
 	int shell_mode = 0;
 	int init_memfd = -1;
@@ -1225,9 +1310,13 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	parse_loader_rc(&bootstrap_cfg, config_path, payload_path_override, &guest_cfg_fd);
 	int target_index = 0;
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
-			  &shell_mode);
+			  &shell_mode, &child_proto);
 	int argi = target_index;
 	int has_config = (config_path && config_path[0]) ? 1 : 0;
+	const char *child_exec_target = child_proto.exec_target;
+	const char *child_exec_path = child_proto.exec_path;
+	int child_exec_dirfd = child_proto.exec_dirfd;
+	int child_exec_flags = child_proto.exec_flags;
 
 	if (shell_mode) {
 		apply_mode(&bootstrap_cfg, CONFIG_MODE_COMPAT, 1);
@@ -1319,9 +1408,14 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		final_envc = compat_envc;
 	}
 	log_bind_list(&bootstrap_cfg, "config loaded");
-	z_printf("[Loader] child_loader=%d argv_target=\"%s\" payload_path_override=\"%s\" shell=%d\n",
+	const char *argv_target = (shell_mode || argi >= argc || !argv[argi]) ?
+		"(none)" : argv[argi];
+	const char *exec_target_log = child_exec_target ?
+		child_exec_target : argv_target;
+	z_printf("[Loader] child_loader=%d argv_target=\"%s\" exec_target=\"%s\" payload_path_override=\"%s\" shell=%d\n",
 		 child_loader,
-		 (shell_mode || argi >= argc || !argv[argi]) ? "(none)" : argv[argi],
+		 argv_target,
+		 exec_target_log,
 		 payload_path_override[0] ? payload_path_override : "(none)",
 		 shell_mode);
 	/* 主 loader 才主动 chdir 到 root；子 loader 保留调用方 cwd 以正确解析相对路径 */
@@ -1340,7 +1434,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	} else if (shell_mode) {
 		file = "(embedded shell)";
 	} else {
-		file = argv[argi];
+		const char *default_target = (argi < argc) ? argv[argi] : NULL;
+		file = child_exec_target ? child_exec_target : default_target;
 	}
 	if (bootstrap_cfg.root[0] && file && file[0] == '/' && !child_loader && !shell_mode)
 		z_errx(1, "absolute path not allowed when PROOT_ROOT is set; use path relative to root");
@@ -1420,6 +1515,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		int loading_interp = load_interp_next;
 		fd = -1;
 		const char *path_for_open = NULL;
+		const char *base_path = file;
 		if (loading_interp)
 			set_hook_range(g_hook_min_interp, g_hook_max_interp);
 		else
@@ -1430,17 +1526,27 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		} else if (bootstrap_cfg.use_init && !loading_interp) {
 			path_for_open = "(embedded tiny-init)";
 			fd = init_memfd;
+		} else if (child_loader && child_exec_target) {
+			/* 已由 payload 重写/定位的路径，避免重复套 ROOT/BIND */
+			copy_cstr(open_path, sizeof(open_path), base_path ? base_path : "");
+			path_for_open = open_path;
 		} else {
-			path_for_open = resolve_child_loader_path(&bootstrap_cfg,
-					file, child_loader, open_path, sizeof(open_path));
+			if (child_exec_dirfd == AT_FDCWD || (base_path && base_path[0] == '/')) {
+				path_for_open = resolve_child_loader_path(&bootstrap_cfg,
+						base_path, child_loader, open_path, sizeof(open_path));
+			} else {
+				copy_cstr(open_path, sizeof(open_path), base_path ? base_path : "");
+				path_for_open = open_path;
+			}
 		}
-		z_printf("[Loader] child=%d open target \"%s\" (arg=\"%s\")\n",
-			 child_loader, path_for_open, file);
+		z_printf("[Loader] child=%d open target \"%s\" (arg=\"%s\" dirfd=%d flags=0x%x)\n",
+			 child_loader, path_for_open, file, child_exec_dirfd, child_exec_flags);
 		if (!bootstrap_cfg.use_init && !shell_mode && child_loader && !loading_interp && !shebang_mode) {
 			z_memset(shebang_interp, 0, sizeof(shebang_interp));
 			z_memset(shebang_interp_arg, 0, sizeof(shebang_interp_arg));
-			if (parse_shebang(path_for_open, shebang_interp, sizeof(shebang_interp),
-					  shebang_interp_arg, sizeof(shebang_interp_arg))) {
+			if (parse_shebang_at(child_exec_dirfd, path_for_open,
+					     shebang_interp, sizeof(shebang_interp),
+					     shebang_interp_arg, sizeof(shebang_interp_arg))) {
 				copy_cstr(shebang_script, sizeof(shebang_script), path_for_open);
 				char resolved_interp[CONFIG_MAX_PATH];
 				if (shebang_interp[0] == '/') {
@@ -1462,15 +1568,20 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			}
 		}
 		if (child_loader && !bootstrap_cfg.use_init && !shell_mode) {
-			int elf = is_elf_file(path_for_open);
+			int elf = is_elf_file_at(child_exec_dirfd, path_for_open);
 			z_printf("[Loader] child=%d ELF check \"%s\": %s\n",
 				 child_loader, path_for_open, elf ? "yes" : "no");
 			if (!elf) {
 				z_errx(1, "target is not ELF: %s", path_for_open);
 			}
 		}
-		if (fd < 0 && (fd = z_open(path_for_open, O_RDONLY)) < 0)
-			z_errx(1, "can't open %s", path_for_open);
+		if (fd < 0) {
+			int open_flags = O_RDONLY;
+			if (child_exec_flags & AT_SYMLINK_NOFOLLOW)
+				open_flags |= O_NOFOLLOW;
+			if ((fd = z_openat(child_exec_dirfd, path_for_open, open_flags)) < 0)
+				z_errx(1, "can't open %s", path_for_open);
+		}
 		if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
 			z_errx(1, "can't read ELF header %s", file);
 		if (!check_ehdr(ehdr))
@@ -1524,9 +1635,11 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
 		AVSET(AT_ENTRY, av, entry[Z_PROG]);
 		const char *execfn = bootstrap_cfg.use_init ? file : target_argv[0];
+		if (child_loader && child_exec_path)
+			execfn = child_exec_path;
 		if (shell_mode)
 			execfn = target_argv[0];
-		if (shebang_mode && shebang_script[0])
+		if (shebang_mode && shebang_script[0] && !child_exec_path)
 			execfn = shebang_script;
 		AVSET(AT_EXECFN, av, (unsigned long)execfn);
 		AVSET(AT_BASE, av, elf_interp ?

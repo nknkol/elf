@@ -33,6 +33,10 @@
 #define CONFIG_DEFAULT_PAYLOAD_PATH "./payload.bin"
 #endif
 #define CONFIG_CHILD_LOADER_ARG "--child-loader"
+#define CONFIG_CHILD_EXEC_TARGET "--exec-target"
+#define CONFIG_CHILD_EXEC_PATH "--exec-path"
+#define CONFIG_CHILD_EXEC_DIRFD "--exec-dirfd"
+#define CONFIG_CHILD_EXEC_FLAGS "--exec-flags"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];

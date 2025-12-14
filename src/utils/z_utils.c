@@ -31,9 +31,16 @@ int z_strncmp(const char *s1, const char *s2, size_t n)
 int z_atoi(const char *s)
 {
 	int res = 0;
+	int sign = 1;
+	if (*s == '-') {
+		sign = -1;
+		s++;
+	} else if (*s == '+') {
+		s++;
+	}
 	while (*s >= '0' && *s <= '9')
 		res = res * 10 + (*s++ - '0');
-	return res;
+	return res * sign;
 }
 
 char *z_strchr(const char *s, int c)

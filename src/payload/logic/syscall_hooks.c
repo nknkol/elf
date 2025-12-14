@@ -24,6 +24,24 @@
 #define SYS_pread64     67
 #define SYS_munmap      215
 #define SYS_prctl       167
+#ifndef EPERM
+#define EPERM           1
+#endif
+#ifndef EXDEV
+#define EXDEV           18
+#endif
+#ifndef EOPNOTSUPP
+#define EOPNOTSUPP      95
+#endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW      0x20000
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif
+#ifndef AT_SYMLINK_FOLLOW
+#define AT_SYMLINK_FOLLOW 0x400
+#endif
 #define PR_JIT_WORKAROUND 0x6a6974
 #ifndef O_RDONLY
 #define O_RDONLY        0
@@ -112,6 +130,33 @@ static void format_range(int min, int max, char *buf, size_t buf_sz)
     buf[pos < buf_sz ? pos : buf_sz - 1] = '\0';
 }
 
+static void format_int(long v, char *buf, size_t buf_sz)
+{
+    if (!buf || buf_sz == 0)
+        return;
+    size_t pos = 0;
+    int sign = 0;
+    if (v < 0) {
+        sign = 1;
+        v = -v;
+    }
+    char rev[32];
+    size_t rpos = 0;
+    if (v == 0) {
+        rev[rpos++] = '0';
+    } else {
+        while (v > 0 && rpos < sizeof(rev)) {
+            rev[rpos++] = '0' + (v % 10);
+            v /= 10;
+        }
+    }
+    if (sign && rpos < sizeof(rev))
+        rev[rpos++] = '-';
+    while (rpos > 0 && pos + 1 < buf_sz)
+        buf[pos++] = rev[--rpos];
+    buf[pos < buf_sz ? pos : buf_sz - 1] = '\0';
+}
+
 static int path_exists(const char *path)
 {
     if (!path || !path[0])
@@ -153,12 +198,13 @@ static void join_paths(char *out, size_t out_sz,
     out[pos] = '\0';
 }
 
-static int resolve_symlink_target(const char *path, char *resolved, size_t resolved_sz)
+static int resolve_symlink_target_at(long dirfd, const char *path,
+                                     char *resolved, size_t resolved_sz)
 {
     if (!path || !resolved || resolved_sz == 0)
         return 0;
     char linkbuf[CONFIG_MAX_PATH];
-    long n = raw_syscall(SYS_readlinkat, AT_FDCWD, (long)path, (long)linkbuf, sizeof(linkbuf) - 1, 0, 0);
+    long n = raw_syscall(SYS_readlinkat, dirfd, (long)path, (long)linkbuf, sizeof(linkbuf) - 1, 0, 0);
     if (n < 0)
         return 0;
     if ((size_t)n >= sizeof(linkbuf))
@@ -174,7 +220,12 @@ static int resolve_symlink_target(const char *path, char *resolved, size_t resol
     return 1;
 }
 
-static int resolve_symlink_chain(const char *path, char *out, size_t out_sz)
+static int resolve_symlink_target(const char *path, char *resolved, size_t resolved_sz)
+{
+    return resolve_symlink_target_at(AT_FDCWD, path, resolved, resolved_sz);
+}
+
+static int resolve_symlink_chain_at(long dirfd, const char *path, char *out, size_t out_sz)
 {
     if (!path || !out || out_sz == 0)
         return 0;
@@ -184,7 +235,7 @@ static int resolve_symlink_chain(const char *path, char *out, size_t out_sz)
     int changed = 0;
     for (int depth = 0; depth < 4; depth++) {
         char next[CONFIG_MAX_PATH];
-        if (!resolve_symlink_target(current, next, sizeof(next)))
+        if (!resolve_symlink_target_at(dirfd, current, next, sizeof(next)))
             break;
         safe_cpy(current, sizeof(current), next);
         changed = 1;
@@ -193,6 +244,11 @@ static int resolve_symlink_chain(const char *path, char *out, size_t out_sz)
         return 0;
     safe_cpy(out, out_sz, current);
     return 1;
+}
+
+static int resolve_symlink_chain(const char *path, char *out, size_t out_sz)
+{
+    return resolve_symlink_chain_at(AT_FDCWD, path, out, out_sz);
 }
 
 static const char *rewrite_path_resolved(const char *orig, char *buf, size_t buf_sz)
@@ -212,11 +268,11 @@ static int build_exec_vec(const char *const *in, char **out,
                           char buf[][CONFIG_MAX_PATH], size_t max_items,
                           int rewrite_paths);
 
-static int is_elf_file(const char *path)
+static int is_elf_file_at(long dirfd, const char *path)
 {
     if (!path)
         return 0;
-    long fd = raw_syscall(SYS_openat, AT_FDCWD, (long)path, O_RDONLY, 0, 0, 0);
+    long fd = raw_syscall(SYS_openat, dirfd, (long)path, O_RDONLY, 0, 0, 0);
     if (fd < 0)
         return 0;
     unsigned char magic[4];
@@ -228,15 +284,15 @@ static int is_elf_file(const char *path)
            magic[2] == ELFMAG2 && magic[3] == ELFMAG3;
 }
 
-static int parse_shebang(const char *path, char *interp, size_t interp_sz,
-                         char *arg, size_t arg_sz)
+static int parse_shebang_at(long dirfd, const char *path, char *interp, size_t interp_sz,
+                            char *arg, size_t arg_sz)
 {
     if (!path || !interp || interp_sz == 0)
         return 0;
     if (arg && arg_sz)
         arg[0] = '\0';
 
-    long fd = raw_syscall(SYS_openat, AT_FDCWD, (long)path, O_RDONLY, 0, 0, 0);
+    long fd = raw_syscall(SYS_openat, dirfd, (long)path, O_RDONLY, 0, 0, 0);
     if (fd < 0)
         return 0;
 
@@ -399,26 +455,33 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     if (!build_exec_env((const char *const *)args[env_idx], env_out, env_buf, MAX_EXEC_ENVS))
         return -ENOENT;
 
+    char exec_path_arg[CONFIG_MAX_PATH];
+    safe_cpy(exec_path_arg, sizeof(exec_path_arg), orig_path);
     char exec_path[CONFIG_MAX_PATH];
     rewrite_path(orig_path, exec_path, sizeof(exec_path));
     log_path_pair(is_execveat ? "[Payload] execveat pathname " : "[Payload] execve pathname ",
                   orig_path, exec_path);
 
     char resolved[CONFIG_MAX_PATH];
-    int is_link = resolve_symlink_chain(exec_path, resolved, sizeof(resolved));
+    long path_dirfd = dirfd;
+    int is_link = resolve_symlink_chain_at(path_dirfd, exec_path, resolved, sizeof(resolved));
     const char *target_path = is_link ? resolved : exec_path;
     log_path_pair(is_execveat ? "[Payload] execveat target " : "[Payload] execve target ",
                   exec_path, target_path);
     const char *arg0_path = argv_out[0]; /* 原始 argv[0] 名字 */
+    char dirfd_buf[32];
+    char flags_buf[32];
+    format_int(path_dirfd, dirfd_buf, sizeof(dirfd_buf));
+    format_int(flags, flags_buf, sizeof(flags_buf));
 
-    int elf = is_elf_file(target_path);
+    int elf = is_elf_file_at(path_dirfd, target_path);
     log_path_pair(is_execveat ? "[Payload] execveat elf? " : "[Payload] execve elf? ",
                   target_path, elf ? "yes" : "no");
     if (!elf) {
         char sb_interp[CONFIG_MAX_PATH];
         char sb_arg[CONFIG_MAX_PATH];
-        if (parse_shebang(target_path, sb_interp, sizeof(sb_interp),
-                          sb_arg, sizeof(sb_arg))) {
+        if (parse_shebang_at(path_dirfd, target_path, sb_interp, sizeof(sb_interp),
+                             sb_arg, sizeof(sb_arg))) {
             log_path(is_execveat ? "[Payload] execveat shebang interp=" : "[Payload] execve shebang interp=", sb_interp);
             if (sb_arg[0])
                 log_path(is_execveat ? "[Payload] execveat shebang arg=" : "[Payload] execve shebang arg=", sb_arg);
@@ -446,18 +509,28 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
                 return -ENOENT;
             }
 
-            int argc = 0;
-            while (argv_out[argc])
-                argc++;
-            int extra = 3 + (cfg_path ? 2 : 0);
+            int orig_argc = 0;
+            while (argv_out[orig_argc])
+                orig_argc++;
+            int option_slots = 1; /* loader_path */
+            if (cfg_path)
+                option_slots += 2; /* -c <cfg> */
+            option_slots += 1; /* --child-loader */
+            option_slots += 8; /* --exec-* options */
+            if (g_payload_config.hook_range_set)
+                option_slots += 2;
+            if (g_payload_config.hook_range_interp_set)
+                option_slots += 2;
+            int additional_user = 1; /* script path */
             if (sb_arg[0])
-                extra++;
-            if (argc + extra + 1 >= MAX_EXEC_ARGS)
+                additional_user++;
+            int total_needed = option_slots + orig_argc + additional_user;
+            if (total_needed + 1 >= MAX_EXEC_ARGS)
                 return -ENOENT;
 
-            for (int i = argc; i >= 1; i--)
-                argv_out[i + extra - 1] = argv_out[i];
-
+            char *orig_args[MAX_EXEC_ARGS];
+            for (int i = 0; i <= orig_argc && i < MAX_EXEC_ARGS; i++)
+                orig_args[i] = argv_out[i];
             int pos = 0;
             argv_out[pos++] = loader_path;
             if (cfg_path) {
@@ -465,11 +538,37 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
                 argv_out[pos++] = (char *)cfg_path;
             }
             argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
+            argv_out[pos++] = CONFIG_CHILD_EXEC_TARGET;
+            argv_out[pos++] = (char *)interp_full;
+            argv_out[pos++] = CONFIG_CHILD_EXEC_PATH;
+            argv_out[pos++] = exec_path_arg;
+            argv_out[pos++] = CONFIG_CHILD_EXEC_DIRFD;
+            argv_out[pos++] = dirfd_buf;
+            argv_out[pos++] = CONFIG_CHILD_EXEC_FLAGS;
+            argv_out[pos++] = flags_buf;
+            if (g_payload_config.hook_range_set) {
+                argv_out[pos++] = "--hook-range";
+                static char hook_buf[32];
+                format_range(g_payload_config.hook_min,
+                             g_payload_config.hook_max,
+                             hook_buf, sizeof(hook_buf));
+                argv_out[pos++] = hook_buf;
+            }
+            if (g_payload_config.hook_range_interp_set) {
+                argv_out[pos++] = "--hook-range-interp";
+                static char hook_buf2[32];
+                format_range(g_payload_config.hook_min_interp,
+                             g_payload_config.hook_max_interp,
+                             hook_buf2, sizeof(hook_buf2));
+                argv_out[pos++] = hook_buf2;
+            }
             argv_out[pos++] = (char *)interp_full;
             if (sb_arg[0])
                 argv_out[pos++] = sb_arg;
             argv_out[pos++] = (char *)arg0_path;
-            argv_out[argc + extra] = NULL;
+            for (int i = 1; i < orig_argc && pos < MAX_EXEC_ARGS - 1; i++)
+                argv_out[pos++] = orig_args[i];
+            argv_out[pos] = NULL;
 
             if (is_execveat) {
                 args[0] = AT_FDCWD;
@@ -505,7 +604,6 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     } else {
         DEBUG_LOG("[Payload] execve chain loader (elf)\n");
     }
-    argv_out[0] = (char *)orig_path;
 
     char loader_path[CONFIG_MAX_PATH];
     if (!find_loader_path(loader_path, sizeof(loader_path))) {
@@ -517,6 +615,7 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     while (argv_out[argc])
         argc++;
     int extra = 2 + (cfg_path ? 2 : 0);
+    extra += 8; /* --exec-* options (key + value x4) */
     if (g_payload_config.hook_range_set)
         extra += 2;
     if (g_payload_config.hook_range_interp_set)
@@ -534,6 +633,14 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
         argv_out[pos++] = (char *)cfg_path;
     }
     argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
+    argv_out[pos++] = CONFIG_CHILD_EXEC_TARGET;
+    argv_out[pos++] = (char *)target_path;
+    argv_out[pos++] = CONFIG_CHILD_EXEC_PATH;
+    argv_out[pos++] = exec_path_arg;
+    argv_out[pos++] = CONFIG_CHILD_EXEC_DIRFD;
+    argv_out[pos++] = dirfd_buf;
+    argv_out[pos++] = CONFIG_CHILD_EXEC_FLAGS;
+    argv_out[pos++] = flags_buf;
     if (g_payload_config.hook_range_set) {
         argv_out[pos++] = "--hook-range";
         static char hook_buf[32];
@@ -594,7 +701,6 @@ long syscall_handle_common(long sys_no, long args[6]) {
     char new_path[CONFIG_MAX_PATH];
     char new_path2[CONFIG_MAX_PATH];
     char out_path[CONFIG_MAX_PATH];
-    int isolation_on = hook_layer_enabled(HOOK_LAYER_ISOLATION);
 
     switch (sys_no) {
         case SYS_getcwd:
@@ -629,10 +735,6 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_setfsuid:
         case SYS_setfsgid:
         case SYS_setgroups:
-            if (!isolation_on) {
-                ret = do_syscall(sys_no, args);
-                break;
-            }
             DEBUG_LOG("[Payload] fakeroot set* uid/gid -> fake 0\n");
             ret = 0;
             break;
@@ -642,18 +744,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_geteuid:
         case SYS_getgid:
         case SYS_getegid:
-            if (!isolation_on) {
-                ret = do_syscall(sys_no, args);
-                break;
-            }
             DEBUG_LOG("[Payload] fakeroot get[u/g]id -> 0\n");
             ret = 0;
             break;
         case SYS_getresuid: {
-            if (!isolation_on) {
-                ret = do_syscall(sys_no, args);
-                break;
-            }
             DEBUG_LOG("[Payload] fakeroot getresuid\n");
             int *ruid = (int *)args[0];
             int *euid = (int *)args[1];
@@ -665,10 +759,6 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
         }
         case SYS_getresgid: {
-            if (!isolation_on) {
-                ret = do_syscall(sys_no, args);
-                break;
-            }
             DEBUG_LOG("[Payload] fakeroot getresgid\n");
             int *rgid = (int *)args[0];
             int *egid = (int *)args[1];
@@ -680,10 +770,6 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
         }
         case SYS_getgroups: {
-            if (!isolation_on) {
-                ret = do_syscall(sys_no, args);
-                break;
-            }
             DEBUG_LOG("[Payload] fakeroot getgroups\n");
             int size = (int)args[0];
             int *list = (int *)args[1];
@@ -720,10 +806,37 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
         }
 
+        case SYS_linkat: {
+            /* 设备不支持硬链时退化为软链；源/目标仅做前缀重写，不解析 */
+            const char *orig_old = (const char *)args[1];
+            const char *orig_new = (const char *)args[3];
+            if (orig_old) {
+                const char *rw_old = rewrite_path(orig_old, new_path, sizeof(new_path));
+                log_path_pair("[Payload] linkat old ", orig_old, rw_old);
+                args[1] = (long)rw_old;
+            }
+            if (orig_new) {
+                const char *rw_new = rewrite_path(orig_new, new_path2, sizeof(new_path2));
+                log_path_pair("[Payload] linkat new ", orig_new, rw_new);
+                args[3] = (long)rw_new;
+            }
+            long link_ret = do_syscall(sys_no, args);
+            if (link_ret < 0) {
+                long err = -link_ret;
+                if (err == EPERM || err == EOPNOTSUPP || err == EXDEV) {
+                    DEBUG_LOG("[Payload] linkat fallback -> symlinkat\n");
+                    long sym_ret = raw_syscall(SYS_symlinkat, args[1], args[2], args[3], 0, 0, 0);
+                    if (sym_ret == 0)
+                        link_ret = 0;
+                }
+            }
+            ret = link_ret;
+            break;
+        }
+
         case SYS_mkdirat:
         case SYS_mknodat:
         case SYS_unlinkat:
-        case SYS_linkat:
         case SYS_renameat:
         case SYS_openat:
         case SYS_faccessat:
@@ -732,22 +845,35 @@ long syscall_handle_common(long sys_no, long args[6]) {
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
                 const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
-                char resolved[CONFIG_MAX_PATH];
-                if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
-                    rw = resolved;
+                int need_resolve = 1;
+                if (sys_no == SYS_unlinkat || sys_no == SYS_readlinkat || sys_no == SYS_renameat) {
+                    need_resolve = 0;
+                } else if (sys_no == SYS_openat) {
+                    int flags = (int)args[2];
+                    if (flags & O_NOFOLLOW)
+                        need_resolve = 0;
+                } else if (sys_no == SYS_newfstatat || sys_no == SYS_faccessat) {
+                    int flags = (int)args[3];
+                    if (flags & AT_SYMLINK_NOFOLLOW) {
+                        need_resolve = 0;
+                    }
+                }
+                if (need_resolve) {
+                    char resolved[CONFIG_MAX_PATH];
+                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
+                        rw = resolved;
+                    }
                 }
                 log_path_pair("[Payload] path arg1 ", orig, rw);
                 args[1] = (long)rw;
             }
 
-            if (sys_no == SYS_linkat || sys_no == SYS_renameat || sys_no == SYS_symlinkat) {
+            /* Only renameat reaches here; symlinkat has its own handler */
+            if (sys_no == SYS_renameat) {
                 if ((const char *)args[3]) {
                     const char *orig2 = (const char *)args[3];
                     const char *rw2 = rewrite_path(orig2, new_path2, sizeof(new_path2));
-                    char resolved2[CONFIG_MAX_PATH];
-                    if (resolve_symlink_chain(rw2, resolved2, sizeof(resolved2))) {
-                        rw2 = resolved2;
-                    }
+                    /* renameat/linkat 新路径不应跟随符号链接 */
                     log_path_pair("[Payload] path arg3 ", orig2, rw2);
                     args[3] = (long)rw2;
                 }
@@ -781,17 +907,20 @@ long syscall_handle_common(long sys_no, long args[6]) {
 
         case SYS_fchmodat: {
             DEBUG_LOG("[Payload] fchmodat\n");
-            if (isolation_on) {
-                ret = 0;
-                break;
-            }
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path_resolved(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                int flags = (int)args[3];
+                if (!(flags & AT_SYMLINK_NOFOLLOW)) {
+                    char resolved[CONFIG_MAX_PATH];
+                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
+                        rw = resolved;
+                    }
+                }
                 log_path_pair("[Payload] fchmodat path ", orig, rw);
                 args[1] = (long)rw;
             }
-            ret = do_syscall(sys_no, args);
+            ret = 0;
             break;
         }
 
@@ -799,15 +928,18 @@ long syscall_handle_common(long sys_no, long args[6]) {
             DEBUG_LOG("[Payload] fchownat\n");
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path_resolved(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                int flags = (int)args[3];
+                if (!(flags & AT_SYMLINK_NOFOLLOW)) {
+                    char resolved[CONFIG_MAX_PATH];
+                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
+                        rw = resolved;
+                    }
+                }
                 log_path_pair("[Payload] fchownat path ", orig, rw);
                 args[1] = (long)rw;
             }
-            if (isolation_on) {
-                ret = 0;
-                break;
-            }
-            ret = do_syscall(sys_no, args);
+            ret = 0;
             break;
         }
 
@@ -815,33 +947,28 @@ long syscall_handle_common(long sys_no, long args[6]) {
             DEBUG_LOG("[Payload] utimensat\n");
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path_resolved(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                int flags = (int)args[3];
+                if (!(flags & AT_SYMLINK_NOFOLLOW)) {
+                    char resolved[CONFIG_MAX_PATH];
+                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
+                        rw = resolved;
+                    }
+                }
                 log_path_pair("[Payload] utimensat path ", orig, rw);
                 args[1] = (long)rw;
             }
-            ret = do_syscall(sys_no, args);
-            // 0 (Success)
-            if (ret < 0) {
-                 ret = 0; 
-            }
+            ret = 0;
             break;
 
         case SYS_fchmod:
             DEBUG_LOG("[Payload] fchmod\n");
-            if (isolation_on) {
-                ret = 0;
-                break;
-            }
-            ret = do_syscall(sys_no, args);
+            ret = 0;
             break;
 
         case SYS_fchown:
             DEBUG_LOG("[Payload] fchown\n");
-            if (isolation_on) {
-                ret = 0;
-                break;
-            }
-            ret = do_syscall(sys_no, args);
+            ret = 0;
             break;
 
         case SYS_execve:
