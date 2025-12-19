@@ -51,5 +51,13 @@
 #define SYS_execve       221
 #define SYS_execveat     281
 #define SYS_mprotect     226
+/* 新增调试用 Syscall ID */
+#define SYS_prctl        167
+#define SYS_getrandom    278
+#define SYS_membarrier   283
+#define SYS_statx        291
+#define SYS_rseq         293
+#define SYS_clone3       435
+#define SYS_faccessat2   439
 
 #endif /* SYSCALL_NUMS_H */

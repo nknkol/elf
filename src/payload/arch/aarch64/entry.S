@@ -105,6 +105,21 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_mmap
     b.eq    slow_path
+    /* Compatibility / debug syscalls */
+    cmp     x8, #SYS_rseq
+    b.eq    slow_path
+    cmp     x8, #SYS_getrandom
+    b.eq    slow_path
+    cmp     x8, #SYS_membarrier
+    b.eq    slow_path
+    cmp     x8, #SYS_prctl
+    b.eq    slow_path
+    cmp     x8, #SYS_faccessat2
+    b.eq    slow_path
+    cmp     x8, #SYS_statx
+    b.eq    slow_path
+    cmp     x8, #SYS_clone3
+    b.eq    slow_path
     b       fast_passthrough
 
 slow_path:

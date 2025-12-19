@@ -987,11 +987,23 @@ long syscall_handle_common(long sys_no, long args[6]) {
 
         case SYS_mprotect:
             DEBUG_LOG("[Payload] mprotect\n");
+            /* * 关键修复：防止 Execute-Only Memory (XOM) 导致 Loader 崩溃。
+             * 如果目标请求 PROT_EXEC，我们强制加上 PROT_READ，
+             * 否则 install_hook() 在扫描内存时会触发 SIGSEGV。
+             */
+            if (args[2] & PROT_EXEC) {
+                args[2] |= PROT_READ; 
+                // 可选：如果 install_hook 需要写入，还需要 PROT_WRITE，
+                // 但通常 hook 机制会自己处理 mprotect(WRITE)。
+                // 主要是防止扫描时挂掉。
+            }
             if (args[2] & PROT_EXEC)
                 raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 0, 0, 0, 0);
+            
             ret = do_syscall(sys_no, args);
             if (args[2] & PROT_EXEC)
                 raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 1, 0, 0, 0);
+            
             if (ret == 0 && (args[2] & PROT_EXEC)) {
                 install_hook((void *)args[0], (size_t)args[1], (void *)&_start, 0);
             }
@@ -999,6 +1011,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
 
         case SYS_mmap:
             DEBUG_LOG("[Payload] mmap\n");
+            /* 同样，防止 mmap 出来的内存不可读 */
+            if (args[2] & PROT_EXEC) {
+                args[2] |= PROT_READ;
+            }
             if ((args[2] & PROT_EXEC) && !(args[3] & MAP_ANON) && (int)args[4] > 0) {
                 ret = mmap_exec_anon_fallback(args);
             } else {
@@ -1007,6 +1023,48 @@ long syscall_handle_common(long sys_no, long args[6]) {
                     install_hook((void *)ret, (size_t)args[1], (void *)&_start, 0);
                 }
             }
+            break;
+
+        case SYS_rseq:
+            /* * CRITICAL FIX:
+             * Glibc 2.32+ 默认使用 rseq (Restartable Sequences) 优化线程同步。
+             * 宿主环境 (HarmonyOS) 的安全策略禁止此调用并发送 SIGSYS。
+             * 解决方法：拦截并返回 -ENOSYS (Function not implemented)，
+             * 迫使 Glibc 降级使用旧的锁机制。
+             */
+            DEBUG_LOG("[Payload] Mocking rseq -> -ENOSYS to prevent SIGSYS\n");
+            ret = -38; /* -ENOSYS */
+            break;
+
+        /* Debugging Suspect Syscalls */
+        case SYS_getrandom:
+            DEBUG_LOG("[Payload] SYSCALL: getrandom (278) - Passing through...\n");
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_membarrier:
+            DEBUG_LOG("[Payload] SYSCALL: membarrier (283) - Passing through...\n");
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_prctl:
+            DEBUG_LOG("[Payload] SYSCALL: prctl (167) - Passing through...\n");
+            ret = do_syscall(sys_no, args);
+            break;
+            
+        case SYS_faccessat2:
+            DEBUG_LOG("[Payload] SYSCALL: faccessat2 (439) - Passing through...\n");
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_statx:
+            DEBUG_LOG("[Payload] SYSCALL: statx (291) - Passing through...\n");
+            ret = do_syscall(sys_no, args);
+            break;
+
+        case SYS_clone3:
+            DEBUG_LOG("[Payload] Mocking clone3(435) -> -ENOSYS to force fallback to clone()\n");
+            ret = -38; /* -ENOSYS */
             break;
 
         default:
