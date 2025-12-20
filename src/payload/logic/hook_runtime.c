@@ -76,11 +76,11 @@ static void *do_mmap(void *addr, size_t len, int prot, int flags, int fd, long o
 static int patch_instruction(uintptr_t addr, uint32_t instruction)
 {
     uintptr_t page = addr & ~(uintptr_t)(STUB_PAGE_SIZE - 1);
-    if (do_mprotect((void *)page, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC | PROT_BTI) < 0)
+    if (do_mprotect((void *)page, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC) < 0)
         return -1;
     *(uint32_t *)addr = instruction;
     sys_flush_cache((void *)addr, 4);
-    do_mprotect((void *)page, STUB_PAGE_SIZE, PROT_READ | PROT_EXEC | PROT_BTI);
+    do_mprotect((void *)page, STUB_PAGE_SIZE, PROT_READ | PROT_EXEC);
     return 0;
 }
 

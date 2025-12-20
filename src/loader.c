@@ -1,5 +1,18 @@
 #include <stdint.h>
 #include <errno.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <syscall.h>
+
+#ifdef sa_handler
+#undef sa_handler
+#endif
+#ifdef sa_sigaction
+#undef sa_sigaction
+#endif
+#ifdef sa_restorer
+#undef sa_restorer
+#endif
 
 #include "z_asm.h"
 #include "z_syscalls.h"
@@ -36,6 +49,369 @@ static int g_hook_min_default = 0;
 static int g_hook_max_default = 0x7fffffff;
 static int g_hook_min_interp = 0;
 static int g_hook_max_interp = 0x7fffffff;
+static unsigned long g_loader_version = 0;
+
+/* Embedded debugger: dump guest state on SIGSEGV using a safe alt stack. */
+static unsigned char g_sigsegv_stack[SIGSTKSZ];
+static stack_t g_sigsegv_stack_cfg;
+static volatile sig_atomic_t g_sigsegv_handling = 0;
+
+static int install_guest_debugger(void);
+
+/* Kernel ABI sigset/sigaction (avoid libc layout differences). */
+typedef struct {
+	unsigned long sig[1]; /* AArch64 kernel expects 1-word sigset */
+} k_sigset_t;
+
+typedef void (*k_sigaction_handler_t)(int, siginfo_t *, void *);
+typedef struct {
+	k_sigaction_handler_t sa_handler;
+	unsigned long sa_flags;
+	void (*sa_restorer)(void);
+	k_sigset_t sa_mask;
+} k_sigaction_t;
+
+static k_sigaction_t g_prev_sigsegv;
+
+#ifndef __NR_rt_sigaction
+#define __NR_rt_sigaction 13
+#endif
+#ifndef __NR_sigaltstack
+#define __NR_sigaltstack 132
+#endif
+
+static long dbg_syscall_check(long rc)
+{
+	if (rc < 0 && rc > -4096) {
+		z_errno = (int)-rc;
+		return -1;
+	}
+	return rc;
+}
+
+static int dbg_rt_sigaction(int signum, const k_sigaction_t *act,
+			    k_sigaction_t *oldact)
+{
+	return (int)dbg_syscall_check(z_syscall(__NR_rt_sigaction,
+						signum, act, oldact,
+						sizeof(k_sigset_t), 0, 0));
+}
+
+static int dbg_sigaltstack(const stack_t *ss, stack_t *old)
+{
+	return (int)dbg_syscall_check(z_syscall(__NR_sigaltstack,
+						ss, old, 0, 0, 0, 0));
+}
+
+static void dbg_sigemptyset(k_sigset_t *set)
+{
+	if (set)
+		z_memset(set, 0, sizeof(*set));
+}
+
+static size_t dbg_strlen(const char *s)
+{
+	size_t n = 0;
+	while (s && s[n])
+		n++;
+	return n;
+}
+
+static void dbg_write_all(const char *buf, size_t len)
+{
+	size_t off = 0;
+	while (off < len) {
+		ssize_t n = z_write(2, buf + off, len - off);
+		if (n <= 0)
+			break;
+		off += (size_t)n;
+	}
+}
+
+static void dbg_write_cstr(const char *s)
+{
+	if (!s)
+		return;
+	dbg_write_all(s, dbg_strlen(s));
+}
+
+static unsigned long generate_loader_version(void)
+{
+	/* 低成本伪随机：混合几个静态符号地址，再做几轮搅动 */
+	unsigned long v = (unsigned long)&g_loader_version;
+	v ^= (unsigned long)&g_hook_min_default << 7;
+	v ^= (unsigned long)&install_hook << 13;
+	v ^= (unsigned long)&install_guest_debugger << 21;
+
+	/* xorshift64* */
+	v ^= v >> 12;
+	v ^= v << 25;
+	v ^= v >> 27;
+	v *= 0x2545F4914F6CDD1Dull;
+	if (v == 0)
+		v = 0x9e3779b97f4a7c15ull; /* 避免输出 0 */
+	return v;
+}
+
+static size_t dbg_append_str(char *buf, size_t cap, size_t pos, const char *s)
+{
+	if (!buf || !s || cap == 0)
+		return pos;
+	while (pos + 1 < cap && *s) {
+		buf[pos++] = *s++;
+	}
+	return pos;
+}
+
+static size_t dbg_append_uint(char *buf, size_t cap, size_t pos, unsigned long v)
+{
+	char tmp[32];
+	size_t tpos = 0;
+	if (v == 0) {
+		tmp[tpos++] = '0';
+	} else {
+		while (v > 0 && tpos < sizeof(tmp)) {
+			tmp[tpos++] = (char)('0' + (v % 10));
+			v /= 10;
+		}
+	}
+	while (tpos > 0 && pos + 1 < cap)
+		buf[pos++] = tmp[--tpos];
+	return pos;
+}
+
+static size_t dbg_append_hex64(char *buf, size_t cap, size_t pos, unsigned long v)
+{
+	static const char hex[] = "0123456789abcdef";
+	if (!buf || cap == 0)
+		return pos;
+	if (pos + 2 < cap) {
+		buf[pos++] = '0';
+		buf[pos++] = 'x';
+	}
+	for (int i = 0; i < 16 && pos + 1 < cap; i++) {
+		int shift = 60 - (i * 4);
+		buf[pos++] = hex[(v >> shift) & 0xf];
+	}
+	return pos;
+}
+
+static size_t dbg_append_hex8(char *buf, size_t cap, size_t pos, unsigned int v)
+{
+	static const char hex[] = "0123456789abcdef";
+	if (!buf || cap == 0)
+		return pos;
+	if (pos + 2 < cap) {
+		buf[pos++] = hex[(v >> 4) & 0xf];
+		buf[pos++] = hex[v & 0xf];
+	}
+	return pos;
+}
+
+static void dbg_dump_regs(const ucontext_t *uc)
+{
+#if defined(__aarch64__)
+	if (!uc)
+		return;
+	const unsigned long *regs = uc->uc_mcontext.regs;
+	char line[256];
+	size_t pos = 0;
+
+	dbg_write_cstr("[Debugger] ARM64 register dump:\n");
+	for (int i = 0; i < 31; i++) {
+		line[pos++] = 'x';
+		pos = dbg_append_uint(line, sizeof(line), pos, (unsigned long)i);
+		if (pos + 1 < sizeof(line))
+			line[pos++] = '=';
+		pos = dbg_append_hex64(line, sizeof(line), pos, regs[i]);
+		if ((i % 4) == 3 || i == 30) {
+			if (pos + 1 < sizeof(line))
+				line[pos++] = '\n';
+			dbg_write_all(line, pos);
+			pos = 0;
+		} else if (pos + 1 < sizeof(line)) {
+			line[pos++] = ' ';
+		} else {
+			dbg_write_all(line, pos);
+			pos = 0;
+		}
+	}
+
+	char meta[160];
+	size_t p = 0;
+	p = dbg_append_str(meta, sizeof(meta), p, "SP=");
+	p = dbg_append_hex64(meta, sizeof(meta), p, uc->uc_mcontext.sp);
+	p = dbg_append_str(meta, sizeof(meta), p, " PC=");
+	p = dbg_append_hex64(meta, sizeof(meta), p, uc->uc_mcontext.pc);
+	p = dbg_append_str(meta, sizeof(meta), p, " PSTATE=");
+	p = dbg_append_hex64(meta, sizeof(meta), p, uc->uc_mcontext.pstate);
+	if (p + 1 < sizeof(meta))
+		meta[p++] = '\n';
+	dbg_write_all(meta, p);
+
+	char fault[96];
+	p = 0;
+	p = dbg_append_str(fault, sizeof(fault), p, "Fault address=");
+	p = dbg_append_hex64(fault, sizeof(fault), p, uc->uc_mcontext.fault_address);
+	if (p + 1 < sizeof(fault))
+		fault[p++] = '\n';
+	dbg_write_all(fault, p);
+#else
+	(void)uc;
+	dbg_write_cstr("[Debugger] Register dump not implemented for this arch\n");
+#endif
+}
+
+static void dbg_dump_stack(const ucontext_t *uc)
+{
+#if defined(__aarch64__)
+	if (!uc)
+		return;
+	const unsigned long sp = uc->uc_mcontext.sp;
+	const unsigned long *ptr = (const unsigned long *)sp;
+	if (!ptr) {
+		dbg_write_cstr("[Debugger] Stack pointer is NULL\n");
+		return;
+	}
+
+	dbg_write_cstr("[Debugger] Stack snapshot (top 16 qwords):\n");
+	for (int i = 0; i < 16; i++) {
+		char line[192];
+		size_t pos = 0;
+		pos = dbg_append_str(line, sizeof(line), pos, "  [");
+		pos = dbg_append_uint(line, sizeof(line), pos, (unsigned long)i);
+		pos = dbg_append_str(line, sizeof(line), pos, "] ");
+		pos = dbg_append_hex64(line, sizeof(line), pos, (unsigned long)(ptr + i));
+		pos = dbg_append_str(line, sizeof(line), pos, ": ");
+		unsigned long val = ptr[i];
+		pos = dbg_append_hex64(line, sizeof(line), pos, val);
+		if (pos + 1 < sizeof(line))
+			line[pos++] = '\n';
+		dbg_write_all(line, pos);
+	}
+#else
+	(void)uc;
+	dbg_write_cstr("[Debugger] Stack dump not implemented for this arch\n");
+#endif
+}
+
+static void dbg_dump_bytes(const char *tag, const unsigned char *addr, size_t len)
+{
+	if (!addr || len == 0)
+		return;
+	if (tag)
+		dbg_write_cstr(tag);
+	size_t per_line = 16;
+	for (size_t off = 0; off < len; off += per_line) {
+		char line[256];
+		size_t pos = 0;
+		pos = dbg_append_str(line, sizeof(line), pos, "  ");
+		pos = dbg_append_hex64(line, sizeof(line), pos, (unsigned long)(addr + off));
+		pos = dbg_append_str(line, sizeof(line), pos, ": ");
+		size_t chunk = per_line;
+		if (off + chunk > len)
+			chunk = len - off;
+		for (size_t i = 0; i < chunk; i++) {
+			pos = dbg_append_hex8(line, sizeof(line), pos, addr[off + i]);
+			if (pos + 1 < sizeof(line))
+				line[pos++] = ' ';
+		}
+		if (pos + 1 < sizeof(line))
+			line[pos++] = '\n';
+		dbg_write_all(line, pos);
+	}
+}
+
+static void loader_sigsegv_handler(int sig, siginfo_t *si, void *ucontext)
+{
+	if (g_sigsegv_handling) {
+		dbg_write_cstr("[Debugger] Recursive SIGSEGV inside handler, exiting\n");
+		z_exit(128 + SIGSEGV);
+	}
+	g_sigsegv_handling = 1;
+
+	dbg_write_cstr("[Debugger] Caught signal ");
+	char sigbuf[32];
+	size_t spos = 0;
+	spos = dbg_append_uint(sigbuf, sizeof(sigbuf), spos, (unsigned long)sig);
+	if (spos + 1 < sizeof(sigbuf))
+		sigbuf[spos++] = '\n';
+	dbg_write_all(sigbuf, spos);
+	if (si) {
+		char line[128];
+		size_t pos = 0;
+		pos = dbg_append_str(line, sizeof(line), pos, "  si_code=");
+		pos = dbg_append_uint(line, sizeof(line), pos, (unsigned long)si->si_code);
+		pos = dbg_append_str(line, sizeof(line), pos, " si_addr=");
+		pos = dbg_append_hex64(line, sizeof(line), pos, (unsigned long)si->si_addr);
+		if (pos + 1 < sizeof(line))
+			line[pos++] = '\n';
+		dbg_write_all(line, pos);
+	}
+
+	dbg_dump_regs((const ucontext_t *)ucontext);
+	dbg_dump_stack((const ucontext_t *)ucontext);
+
+#if defined(__aarch64__)
+	const ucontext_t *uc = (const ucontext_t *)ucontext;
+	const unsigned char *pc_bytes = (const unsigned char *)uc->uc_mcontext.pc;
+	if (pc_bytes) {
+		unsigned long page = TRUNC_PG((unsigned long)pc_bytes);
+		if (z_mprotect((void *)page, PAGE_SIZE, PROT_READ | PROT_EXEC) < 0) {
+			char msg[128];
+			size_t pos = 0;
+			pos = dbg_append_str(msg, sizeof(msg), pos, "[Debugger] mprotect PC page failed: ");
+			pos = dbg_append_uint(msg, sizeof(msg), pos, (unsigned long)z_errno);
+			if (pos + 1 < sizeof(msg))
+				msg[pos++] = '\n';
+			dbg_write_all(msg, pos);
+		} else {
+			unsigned long base = (unsigned long)pc_bytes & ~(unsigned long)0xf;
+			dbg_dump_bytes("[Debugger] Bytes near PC:\n", (const unsigned char *)base, 32);
+		}
+	}
+	if (si && si->si_addr) {
+		const unsigned char *fa = (const unsigned char *)si->si_addr;
+		unsigned long page = TRUNC_PG((unsigned long)fa);
+		if (z_mprotect((void *)page, PAGE_SIZE, PROT_READ | PROT_EXEC) == 0) {
+			unsigned long base = (unsigned long)fa & ~(unsigned long)0xf;
+			dbg_dump_bytes("[Debugger] Bytes near fault addr:\n", (const unsigned char *)base, 32);
+		}
+	}
+#endif
+
+	z_exit(128 + SIGSEGV);
+}
+
+static int install_guest_debugger(void)
+{
+	z_printf("[Debugger] Installing SIGSEGV handler...\n");
+	g_sigsegv_stack_cfg.ss_sp = g_sigsegv_stack;
+	g_sigsegv_stack_cfg.ss_size = sizeof(g_sigsegv_stack);
+	g_sigsegv_stack_cfg.ss_flags = 0;
+	if (dbg_sigaltstack(&g_sigsegv_stack_cfg, NULL) < 0) {
+		z_fdprintf(2, "[Debugger] sigaltstack failed: %d\n", z_errno);
+		return -1;
+	}
+
+	k_sigaction_t sa;
+	z_memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = (k_sigaction_handler_t)loader_sigsegv_handler;
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	dbg_sigemptyset(&sa.sa_mask);
+
+	int sigs[] = { SIGSEGV, SIGBUS, SIGILL };
+	for (unsigned i = 0; i < sizeof(sigs)/sizeof(sigs[0]); i++) {
+		int rc = dbg_rt_sigaction(sigs[i], &sa, &g_prev_sigsegv);
+		if (rc < 0) {
+			z_fdprintf(2, "[Debugger] sigaction(%d) failed: %d\n", sigs[i], z_errno);
+			return -1;
+		}
+	}
+	z_printf("[Debugger] SIGSEGV handler installed (altstack=%p size=%lu)\n",
+		 g_sigsegv_stack_cfg.ss_sp, (unsigned long)g_sigsegv_stack_cfg.ss_size);
+	return 0;
+}
 
 static void z_fini(void)
 {
@@ -1332,6 +1708,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	g_hook_min_interp = bootstrap_cfg.hook_min_interp;
 	g_hook_max_interp = bootstrap_cfg.hook_max_interp;
 	set_hook_log_level(bootstrap_cfg.log_level);
+	if (bootstrap_cfg.log_level != LOG_LEVEL_NONE) {
+		g_loader_version = generate_loader_version();
+		z_printf("[Loader] build version %lx\n", g_loader_version);
+	}
 	int compat_mode = (bootstrap_cfg.mode == CONFIG_MODE_COMPAT);
 	int clean_envc = 0;
 	for (int i = 0; i < bootstrap_cfg.env_count && i < CONFIG_MAX_ENVS; i++) {
@@ -1725,6 +2105,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 		*sp = new_argc;
 	}
+
+	if (install_guest_debugger() < 0)
+		z_printf("[Debugger] SIGSEGV debugger setup failed, continuing without it\n");
 
 	z_trampo((void (*)(void))(elf_interp ?
 			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);

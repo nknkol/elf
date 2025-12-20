@@ -44,10 +44,11 @@
 #define SYS_readlinkat   78
 #define SYS_newfstatat   79
 #define SYS_utimensat    88
+#define SYS_rt_sigaction 13
+#define SYS_rt_sigreturn 139
 #define SYS_exit         93
 #define SYS_exit_group   94
 #define SYS_mmap         222
-#define SYS_rt_sigreturn 139
 #define SYS_execve       221
 #define SYS_execveat     281
 #define SYS_mprotect     226

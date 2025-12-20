@@ -52,6 +52,9 @@
 #define ELFMAG2 'L'
 #define ELFMAG3 'F'
 #endif
+#ifndef SIGSEGV
+#define SIGSEGV 11
+#endif
 
 #define DEBUG_LOG(msg) LOG_DEBUG(msg)
 
@@ -984,6 +987,29 @@ long syscall_handle_common(long sys_no, long args[6]) {
             /* Fast path out */
             ret = do_syscall(sys_no, args);
             break;
+
+        case SYS_rt_sigaction: {
+            int signum = (int)args[0];
+            const void *act = (const void *)args[1];
+            void *oact = (void *)args[2];
+            size_t sigsetsize = (size_t)args[3];
+
+            if (signum == SIGSEGV && act) {
+                DEBUG_LOG("[Payload] Block rt_sigaction(SIGSEGV) to keep loader debugger\n");
+                if (oact) {
+                    long query = raw_syscall(SYS_rt_sigaction, signum, 0,
+                                             (long)oact, (long)sigsetsize, 0, 0);
+                    if (query < 0) {
+                        ret = query;
+                        break;
+                    }
+                }
+                ret = 0;
+            } else {
+                ret = do_syscall(sys_no, args);
+            }
+            break;
+        }
 
         case SYS_mprotect:
             DEBUG_LOG("[Payload] mprotect\n");

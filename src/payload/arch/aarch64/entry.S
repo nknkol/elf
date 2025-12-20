@@ -25,6 +25,8 @@ real_entry:
     /* Quick filter: only instrument syscalls we care about */
     cmp     x8, #SYS_getcwd
     b.eq    slow_path
+    cmp     x8, #SYS_rt_sigaction
+    b.eq    slow_path
     cmp     x8, #SYS_mknodat
     b.eq    slow_path
     cmp     x8, #SYS_faccessat
