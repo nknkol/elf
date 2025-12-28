@@ -33,6 +33,9 @@
 #ifndef EOPNOTSUPP
 #define EOPNOTSUPP      95
 #endif
+#ifndef ENOMEM
+#define ENOMEM          12
+#endif
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW      0x20000
 #endif
@@ -422,6 +425,43 @@ static long mmap_exec_anon_fallback(long *args)
     return (long)mapped;
 }
 
+struct execve_scratch {
+    char argv_buf[MAX_EXEC_ARGS][CONFIG_MAX_PATH];
+    char env_buf[MAX_EXEC_ENVS][CONFIG_MAX_PATH];
+    char *argv_out[MAX_EXEC_ARGS];
+    char *env_out[MAX_EXEC_ENVS];
+    char exec_path_arg[CONFIG_MAX_PATH];
+    char exec_path[CONFIG_MAX_PATH];
+    char resolved[CONFIG_MAX_PATH];
+    char sb_interp[CONFIG_MAX_PATH];
+    char sb_arg[CONFIG_MAX_PATH];
+    char interp_full[CONFIG_MAX_PATH];
+    char loader_path[CONFIG_MAX_PATH];
+    char dirfd_buf[32];
+    char flags_buf[32];
+    char hook_buf[32];
+    char hook_buf2[32];
+    char *orig_args[MAX_EXEC_ARGS];
+};
+
+static struct execve_scratch *execve_scratch_alloc(void)
+{
+    size_t sz = sizeof(struct execve_scratch);
+    void *p = (void *)raw_syscall(SYS_mmap, 0, (long)sz,
+                                  PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if ((long)p < 0)
+        return NULL;
+    return (struct execve_scratch *)p;
+}
+
+static void execve_scratch_free(struct execve_scratch *scratch)
+{
+    if (!scratch)
+        return;
+    raw_syscall(SYS_munmap, (long)scratch, (long)sizeof(*scratch), 0, 0, 0, 0);
+}
+
 static long handle_execve_like(long sys_no, long *args, int is_execveat)
 {
     int path_idx = is_execveat ? 1 : 0;
@@ -443,73 +483,76 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     if (is_execveat && orig_path[0] == '\0' && (flags & AT_EMPTY_PATH))
         return do_syscall(sys_no, args);
 
-    char argv_buf[MAX_EXEC_ARGS][CONFIG_MAX_PATH];
-    char env_buf[MAX_EXEC_ENVS][CONFIG_MAX_PATH];
-    char *argv_out[MAX_EXEC_ARGS];
-    char *env_out[MAX_EXEC_ENVS];
+    struct execve_scratch *scratch = execve_scratch_alloc();
+    if (!scratch)
+        return -ENOMEM;
+    char **argv_out = scratch->argv_out;
+    char **env_out = scratch->env_out;
     payload_config_t *cfg = &g_payload_config;
     const char *cfg_path = cfg->config_path[0] ? cfg->config_path : NULL;
+    long ret = -ENOENT;
 
     /* Build argv list with rewritten paths */
-    if (!build_exec_vec((const char *const *)args[argv_idx], argv_out, argv_buf, MAX_EXEC_ARGS, 0))
-        return -ENOENT;
+    if (!build_exec_vec((const char *const *)args[argv_idx], argv_out,
+                        scratch->argv_buf, MAX_EXEC_ARGS, 0))
+        goto out;
 
     /* Build env list with rewritten PATH/LD_LIBRARY_PATH/etc. */
-    if (!build_exec_env((const char *const *)args[env_idx], env_out, env_buf, MAX_EXEC_ENVS))
-        return -ENOENT;
+    if (!build_exec_env((const char *const *)args[env_idx], env_out,
+                        scratch->env_buf, MAX_EXEC_ENVS))
+        goto out;
 
-    char exec_path_arg[CONFIG_MAX_PATH];
-    safe_cpy(exec_path_arg, sizeof(exec_path_arg), orig_path);
-    char exec_path[CONFIG_MAX_PATH];
-    rewrite_path(orig_path, exec_path, sizeof(exec_path));
+    safe_cpy(scratch->exec_path_arg, sizeof(scratch->exec_path_arg), orig_path);
+    rewrite_path(orig_path, scratch->exec_path, sizeof(scratch->exec_path));
     log_path_pair(is_execveat ? "[Payload] execveat pathname " : "[Payload] execve pathname ",
-                  orig_path, exec_path);
+                  orig_path, scratch->exec_path);
 
-    char resolved[CONFIG_MAX_PATH];
     long path_dirfd = dirfd;
-    int is_link = resolve_symlink_chain_at(path_dirfd, exec_path, resolved, sizeof(resolved));
-    const char *target_path = is_link ? resolved : exec_path;
+    int is_link = resolve_symlink_chain_at(path_dirfd, scratch->exec_path,
+                                           scratch->resolved, sizeof(scratch->resolved));
+    const char *target_path = is_link ? scratch->resolved : scratch->exec_path;
     log_path_pair(is_execveat ? "[Payload] execveat target " : "[Payload] execve target ",
-                  exec_path, target_path);
+                  scratch->exec_path, target_path);
     const char *arg0_path = argv_out[0]; /* 原始 argv[0] 名字 */
-    char dirfd_buf[32];
-    char flags_buf[32];
-    format_int(path_dirfd, dirfd_buf, sizeof(dirfd_buf));
-    format_int(flags, flags_buf, sizeof(flags_buf));
+    format_int(path_dirfd, scratch->dirfd_buf, sizeof(scratch->dirfd_buf));
+    format_int(flags, scratch->flags_buf, sizeof(scratch->flags_buf));
 
     int elf = is_elf_file_at(path_dirfd, target_path);
     log_path_pair(is_execveat ? "[Payload] execveat elf? " : "[Payload] execve elf? ",
                   target_path, elf ? "yes" : "no");
     if (!elf) {
-        char sb_interp[CONFIG_MAX_PATH];
-        char sb_arg[CONFIG_MAX_PATH];
-        if (parse_shebang_at(path_dirfd, target_path, sb_interp, sizeof(sb_interp),
-                             sb_arg, sizeof(sb_arg))) {
-            log_path(is_execveat ? "[Payload] execveat shebang interp=" : "[Payload] execve shebang interp=", sb_interp);
-            if (sb_arg[0])
-                log_path(is_execveat ? "[Payload] execveat shebang arg=" : "[Payload] execve shebang arg=", sb_arg);
-            char interp_full[CONFIG_MAX_PATH];
-            if (sb_interp[0] == '/') {
-                rewrite_path(sb_interp, interp_full, sizeof(interp_full));
+        if (parse_shebang_at(path_dirfd, target_path,
+                             scratch->sb_interp, sizeof(scratch->sb_interp),
+                             scratch->sb_arg, sizeof(scratch->sb_arg))) {
+            log_path(is_execveat ? "[Payload] execveat shebang interp=" : "[Payload] execve shebang interp=",
+                     scratch->sb_interp);
+            if (scratch->sb_arg[0])
+                log_path(is_execveat ? "[Payload] execveat shebang arg=" : "[Payload] execve shebang arg=",
+                         scratch->sb_arg);
+            if (scratch->sb_interp[0] == '/') {
+                rewrite_path(scratch->sb_interp, scratch->interp_full,
+                             sizeof(scratch->interp_full));
             } else {
                 size_t prefix_len = dir_len(target_path);
-                join_paths(interp_full, sizeof(interp_full),
-                           target_path, prefix_len, sb_interp);
-                rewrite_path(interp_full, interp_full, sizeof(interp_full));
+                join_paths(scratch->interp_full, sizeof(scratch->interp_full),
+                           target_path, prefix_len, scratch->sb_interp);
+                rewrite_path(scratch->interp_full, scratch->interp_full,
+                             sizeof(scratch->interp_full));
             }
-            log_path(is_execveat ? "[Payload] execveat shebang interp rewritten=" : "[Payload] execve shebang interp rewritten=", interp_full);
+            log_path(is_execveat ? "[Payload] execveat shebang interp rewritten=" : "[Payload] execve shebang interp rewritten=", scratch->interp_full);
 
             if (is_execveat) {
                 DEBUG_LOG("[Payload] execveat shebang -> loader\n");
             } else {
                 DEBUG_LOG("[Payload] execve shebang -> loader\n");
             }
-            argv_out[0] = (char *)interp_full;
+            argv_out[0] = (char *)scratch->interp_full;
 
-            char loader_path[CONFIG_MAX_PATH];
-            if (!find_loader_path(loader_path, sizeof(loader_path))) {
+            if (!find_loader_path(scratch->loader_path,
+                                  sizeof(scratch->loader_path))) {
                 DEBUG_LOG("[Payload] loader not found\n");
-                return -ENOENT;
+                ret = -ENOENT;
+                goto out;
             }
 
             int orig_argc = 0;
@@ -525,52 +568,49 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
             if (g_payload_config.hook_range_interp_set)
                 option_slots += 2;
             int additional_user = 1; /* script path */
-            if (sb_arg[0])
+            if (scratch->sb_arg[0])
                 additional_user++;
             int total_needed = option_slots + orig_argc + additional_user;
             if (total_needed + 1 >= MAX_EXEC_ARGS)
-                return -ENOENT;
+                goto out;
 
-            char *orig_args[MAX_EXEC_ARGS];
             for (int i = 0; i <= orig_argc && i < MAX_EXEC_ARGS; i++)
-                orig_args[i] = argv_out[i];
+                scratch->orig_args[i] = argv_out[i];
             int pos = 0;
-            argv_out[pos++] = loader_path;
+            argv_out[pos++] = scratch->loader_path;
             if (cfg_path) {
                 argv_out[pos++] = "-c";
                 argv_out[pos++] = (char *)cfg_path;
             }
             argv_out[pos++] = CONFIG_CHILD_LOADER_ARG;
             argv_out[pos++] = CONFIG_CHILD_EXEC_TARGET;
-            argv_out[pos++] = (char *)interp_full;
+            argv_out[pos++] = (char *)scratch->interp_full;
             argv_out[pos++] = CONFIG_CHILD_EXEC_PATH;
-            argv_out[pos++] = exec_path_arg;
+            argv_out[pos++] = scratch->exec_path_arg;
             argv_out[pos++] = CONFIG_CHILD_EXEC_DIRFD;
-            argv_out[pos++] = dirfd_buf;
+            argv_out[pos++] = scratch->dirfd_buf;
             argv_out[pos++] = CONFIG_CHILD_EXEC_FLAGS;
-            argv_out[pos++] = flags_buf;
+            argv_out[pos++] = scratch->flags_buf;
             if (g_payload_config.hook_range_set) {
                 argv_out[pos++] = "--hook-range";
-                static char hook_buf[32];
                 format_range(g_payload_config.hook_min,
                              g_payload_config.hook_max,
-                             hook_buf, sizeof(hook_buf));
-                argv_out[pos++] = hook_buf;
+                             scratch->hook_buf, sizeof(scratch->hook_buf));
+                argv_out[pos++] = scratch->hook_buf;
             }
             if (g_payload_config.hook_range_interp_set) {
                 argv_out[pos++] = "--hook-range-interp";
-                static char hook_buf2[32];
                 format_range(g_payload_config.hook_min_interp,
                              g_payload_config.hook_max_interp,
-                             hook_buf2, sizeof(hook_buf2));
-                argv_out[pos++] = hook_buf2;
+                             scratch->hook_buf2, sizeof(scratch->hook_buf2));
+                argv_out[pos++] = scratch->hook_buf2;
             }
-            argv_out[pos++] = (char *)interp_full;
-            if (sb_arg[0])
-                argv_out[pos++] = sb_arg;
+            argv_out[pos++] = (char *)scratch->interp_full;
+            if (scratch->sb_arg[0])
+                argv_out[pos++] = scratch->sb_arg;
             argv_out[pos++] = (char *)arg0_path;
             for (int i = 1; i < orig_argc && pos < MAX_EXEC_ARGS - 1; i++)
-                argv_out[pos++] = orig_args[i];
+                argv_out[pos++] = scratch->orig_args[i];
             argv_out[pos] = NULL;
 
             if (is_execveat) {
@@ -578,11 +618,12 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
                 if (flags_idx >= 0)
                     args[flags_idx] = 0;
             }
-            args[path_idx] = (long)loader_path;
+            args[path_idx] = (long)scratch->loader_path;
             args[argv_idx] = (long)argv_out;
             args[env_idx] = (long)env_out;
 
-            return do_syscall(sys_no, args);
+            ret = do_syscall(sys_no, args);
+            goto out;
         } else {
             if (is_execveat) {
                 DEBUG_LOG("[Payload] execveat passthrough (non-elf, no shebang)\n");
@@ -598,7 +639,8 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
             args[path_idx] = (long)target_path;
             args[argv_idx] = (long)argv_out;
             args[env_idx] = (long)env_out;
-            return do_syscall(sys_no, args);
+            ret = do_syscall(sys_no, args);
+            goto out;
         }
     }
 
@@ -608,10 +650,10 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
         DEBUG_LOG("[Payload] execve chain loader (elf)\n");
     }
 
-    char loader_path[CONFIG_MAX_PATH];
-    if (!find_loader_path(loader_path, sizeof(loader_path))) {
+    if (!find_loader_path(scratch->loader_path, sizeof(scratch->loader_path))) {
         DEBUG_LOG("[Payload] loader not found\n");
-        return -ENOENT;
+        ret = -ENOENT;
+        goto out;
     }
 
     int argc = 0;
@@ -624,13 +666,13 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     if (g_payload_config.hook_range_interp_set)
         extra += 2;
     if (argc + extra + 1 >= MAX_EXEC_ARGS)
-        return -ENOENT;
+        goto out;
 
     for (int i = argc; i >= 0; i--)
         argv_out[i + extra] = argv_out[i];
 
     int pos = 0;
-    argv_out[pos++] = loader_path;
+    argv_out[pos++] = scratch->loader_path;
     if (cfg_path) {
         argv_out[pos++] = "-c";
         argv_out[pos++] = (char *)cfg_path;
@@ -639,26 +681,24 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     argv_out[pos++] = CONFIG_CHILD_EXEC_TARGET;
     argv_out[pos++] = (char *)target_path;
     argv_out[pos++] = CONFIG_CHILD_EXEC_PATH;
-    argv_out[pos++] = exec_path_arg;
+    argv_out[pos++] = scratch->exec_path_arg;
     argv_out[pos++] = CONFIG_CHILD_EXEC_DIRFD;
-    argv_out[pos++] = dirfd_buf;
+    argv_out[pos++] = scratch->dirfd_buf;
     argv_out[pos++] = CONFIG_CHILD_EXEC_FLAGS;
-    argv_out[pos++] = flags_buf;
+    argv_out[pos++] = scratch->flags_buf;
     if (g_payload_config.hook_range_set) {
         argv_out[pos++] = "--hook-range";
-        static char hook_buf[32];
         format_range(g_payload_config.hook_min,
                      g_payload_config.hook_max,
-                     hook_buf, sizeof(hook_buf));
-        argv_out[pos++] = hook_buf;
+                     scratch->hook_buf, sizeof(scratch->hook_buf));
+        argv_out[pos++] = scratch->hook_buf;
     }
     if (g_payload_config.hook_range_interp_set) {
         argv_out[pos++] = "--hook-range-interp";
-        static char hook_buf2[32];
         format_range(g_payload_config.hook_min_interp,
                      g_payload_config.hook_max_interp,
-                     hook_buf2, sizeof(hook_buf2));
-        argv_out[pos++] = hook_buf2;
+                     scratch->hook_buf2, sizeof(scratch->hook_buf2));
+        argv_out[pos++] = scratch->hook_buf2;
     }
     argv_out[argc + extra] = NULL;
 
@@ -667,11 +707,15 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
         if (flags_idx >= 0)
             args[flags_idx] = 0;
     }
-    args[path_idx] = (long)loader_path;
+    args[path_idx] = (long)scratch->loader_path;
     args[argv_idx] = (long)argv_out;
     args[env_idx] = (long)env_out;
 
-    return do_syscall(sys_no, args);
+    ret = do_syscall(sys_no, args);
+
+out:
+    execve_scratch_free(scratch);
+    return ret;
 }
 
 static int build_exec_vec(const char *const *in, char **out,
