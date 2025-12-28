@@ -45,6 +45,28 @@
 #define LOAD_ERR	((unsigned long)-1)
 #define SYMLINK_MAX_DEPTH 4
 
+#ifndef __NR_uname
+#if defined(__aarch64__)
+#define __NR_uname 160
+#elif defined(__x86_64__)
+#define __NR_uname 63
+#elif defined(__i386__)
+#define __NR_uname 122
+#else
+#define __NR_uname 63
+#endif
+#endif
+
+#define UTSNAME_LEN 65
+typedef struct {
+	char sysname[UTSNAME_LEN];
+	char nodename[UTSNAME_LEN];
+	char release[UTSNAME_LEN];
+	char version[UTSNAME_LEN];
+	char machine[UTSNAME_LEN];
+	char domainname[UTSNAME_LEN];
+} k_utsname_t;
+
 static int g_hook_min_default = 0;
 static int g_hook_max_default = 0x7fffffff;
 static int g_hook_min_interp = 0;
@@ -151,6 +173,26 @@ static unsigned long generate_loader_version(void)
 	if (v == 0)
 		v = 0x9e3779b97f4a7c15ull; /* 避免输出 0 */
 	return v;
+}
+
+static int is_harmonyos(void)
+{
+	static int cached = -1;
+	if (cached >= 0)
+		return cached;
+
+	k_utsname_t u;
+	long rc = z_syscall(__NR_uname, &u, 0, 0, 0, 0, 0);
+	if (rc < 0) {
+		cached = 0;
+		return cached;
+	}
+
+	if (z_strncmp(u.sysname, "HarmonyOS", 9) == 0 && u.sysname[9] == '\0')
+		cached = 1;
+	else
+		cached = 0;
+	return cached;
 }
 
 static size_t dbg_append_str(char *buf, size_t cap, size_t pos, const char *s)
@@ -501,11 +543,11 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 			exec_cnt++;
 		}
 
-		if (prot & PROT_EXEC) {
+		if ((prot & PROT_EXEC) && is_harmonyos()) {
 			z_prctl(0x6a6974, 0, 0);
 		}
 		z_mprotect(p, sz, prot);
-		if (prot & PROT_EXEC) {
+		if ((prot & PROT_EXEC) && is_harmonyos()) {
 			z_prctl(0x6a6974, 0, 1);
 		}
 	}

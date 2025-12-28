@@ -30,6 +30,7 @@
 #define SYS_setsid       157
 #define SYS_getgroups    158
 #define SYS_setgroups    159
+#define SYS_uname        160
 #define SYS_getpid       172
 #define SYS_getppid      173
 #define SYS_getuid       174

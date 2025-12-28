@@ -93,6 +93,46 @@ static void log_path_pair(const char *tag, const char *p1, const char *p2)
     sys_write(2, "\n", 1);
 }
 
+#define UTSNAME_LEN 65
+struct utsname {
+    char sysname[UTSNAME_LEN];
+    char nodename[UTSNAME_LEN];
+    char release[UTSNAME_LEN];
+    char version[UTSNAME_LEN];
+    char machine[UTSNAME_LEN];
+    char domainname[UTSNAME_LEN];
+};
+
+static int sys_streq(const char *a, const char *b)
+{
+    if (!a || !b)
+        return 0;
+    while (*a && *b) {
+        if (*a != *b)
+            return 0;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int is_harmonyos(void)
+{
+    static int cached = -1;
+    if (cached >= 0)
+        return cached;
+
+    struct utsname u;
+    long rc = raw_syscall(SYS_uname, (long)&u, 0, 0, 0, 0, 0);
+    if (rc < 0) {
+        cached = 0;
+        return cached;
+    }
+
+    cached = sys_streq(u.sysname, "HarmonyOS") ? 1 : 0;
+    return cached;
+}
+
 static void small_copy(char *dst, const char *src)
 {
     if (!dst || !src) return;
@@ -231,24 +271,52 @@ static int resolve_symlink_target(const char *path, char *resolved, size_t resol
     return resolve_symlink_target_at(AT_FDCWD, path, resolved, resolved_sz);
 }
 
+struct symlink_chain_scratch {
+    char current[CONFIG_MAX_PATH];
+    char next[CONFIG_MAX_PATH];
+};
+
+static struct symlink_chain_scratch *symlink_chain_scratch_alloc(void)
+{
+    size_t sz = sizeof(struct symlink_chain_scratch);
+    void *p = (void *)raw_syscall(SYS_mmap, 0, (long)sz,
+                                  PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if ((long)p < 0)
+        return NULL;
+    return (struct symlink_chain_scratch *)p;
+}
+
+static void symlink_chain_scratch_free(struct symlink_chain_scratch *scratch)
+{
+    if (!scratch)
+        return;
+    raw_syscall(SYS_munmap, (long)scratch, (long)sizeof(*scratch), 0, 0, 0, 0);
+}
+
 static int resolve_symlink_chain_at(long dirfd, const char *path, char *out, size_t out_sz)
 {
     if (!path || !out || out_sz == 0)
         return 0;
-    char current[CONFIG_MAX_PATH];
-    safe_cpy(current, sizeof(current), path);
+    struct symlink_chain_scratch *scratch = symlink_chain_scratch_alloc();
+    if (!scratch)
+        return 0;
+    safe_cpy(scratch->current, sizeof(scratch->current), path);
 
     int changed = 0;
     for (int depth = 0; depth < 4; depth++) {
-        char next[CONFIG_MAX_PATH];
-        if (!resolve_symlink_target_at(dirfd, current, next, sizeof(next)))
+        if (!resolve_symlink_target_at(dirfd, scratch->current,
+                                       scratch->next, sizeof(scratch->next)))
             break;
-        safe_cpy(current, sizeof(current), next);
+        safe_cpy(scratch->current, sizeof(scratch->current), scratch->next);
         changed = 1;
     }
-    if (!changed)
+    if (!changed) {
+        symlink_chain_scratch_free(scratch);
         return 0;
-    safe_cpy(out, out_sz, current);
+    }
+    safe_cpy(out, out_sz, scratch->current);
+    symlink_chain_scratch_free(scratch);
     return 1;
 }
 
@@ -408,10 +476,11 @@ static long mmap_exec_anon_fallback(long *args)
         return rc;
     }
 
-    if (prot & PROT_EXEC)
+    int need_prctl = (prot & PROT_EXEC) && is_harmonyos();
+    if (need_prctl)
         raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 0, 0, 0, 0);
     long mp = raw_syscall(SYS_mprotect, (long)mapped, (long)len, prot, 0, 0, 0);
-    if (prot & PROT_EXEC)
+    if (need_prctl)
         raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 1, 0, 0, 0);
 
     if (mp < 0) {
@@ -456,6 +525,34 @@ static struct execve_scratch *execve_scratch_alloc(void)
 }
 
 static void execve_scratch_free(struct execve_scratch *scratch)
+{
+    if (!scratch)
+        return;
+    raw_syscall(SYS_munmap, (long)scratch, (long)sizeof(*scratch), 0, 0, 0, 0);
+}
+
+struct syscall_common_scratch {
+    char new_path[CONFIG_MAX_PATH];
+    char new_path2[CONFIG_MAX_PATH];
+    char out_path[CONFIG_MAX_PATH];
+    char resolved[CONFIG_MAX_PATH];
+    char resolved_target[CONFIG_MAX_PATH];
+    char resolved_link[CONFIG_MAX_PATH];
+    char bounce[CONFIG_MAX_PATH];
+};
+
+static struct syscall_common_scratch *syscall_common_scratch_alloc(void)
+{
+    size_t sz = sizeof(struct syscall_common_scratch);
+    void *p = (void *)raw_syscall(SYS_mmap, 0, (long)sz,
+                                  PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if ((long)p < 0)
+        return NULL;
+    return (struct syscall_common_scratch *)p;
+}
+
+static void syscall_common_scratch_free(struct syscall_common_scratch *scratch)
 {
     if (!scratch)
         return;
@@ -745,9 +842,9 @@ static int build_exec_vec(const char *const *in, char **out,
 
 long syscall_handle_common(long sys_no, long args[6]) {
     long ret;
-    char new_path[CONFIG_MAX_PATH];
-    char new_path2[CONFIG_MAX_PATH];
-    char out_path[CONFIG_MAX_PATH];
+    struct syscall_common_scratch *scratch = syscall_common_scratch_alloc();
+    if (!scratch)
+        return -ENOMEM;
 
     switch (sys_no) {
         case SYS_getcwd:
@@ -755,7 +852,9 @@ long syscall_handle_common(long sys_no, long args[6]) {
             ret = do_syscall(sys_no, args);
             if (ret > 0 && (const char *)args[0]) {
                 const char *host_path = (const char *)args[0];
-                const char *guest_path = rewrite_path_from_host(host_path, out_path, sizeof(out_path));
+                const char *guest_path = rewrite_path_from_host(host_path,
+                                                               scratch->out_path,
+                                                               sizeof(scratch->out_path));
                 size_t guest_len = sys_strlen(guest_path);
                 if (guest_len + 1 <= (size_t)args[1]) {
                     small_copy((char *)args[0], guest_path);
@@ -767,7 +866,9 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_chdir:
             DEBUG_LOG("[Payload] chdir\n");
             if ((const char *)args[0]) {
-                args[0] = (long)rewrite_path((const char *)args[0], new_path, sizeof(new_path));
+                args[0] = (long)rewrite_path((const char *)args[0],
+                                             scratch->new_path,
+                                             sizeof(scratch->new_path));
             }
             ret = do_syscall(sys_no, args);
             break;
@@ -831,20 +932,26 @@ long syscall_handle_common(long sys_no, long args[6]) {
             /* symlinkat(target, newdirfd, linkpath) 参数顺序与 *at 系列不同 */
             if ((const char *)args[0]) {
                 const char *orig_target = (const char *)args[0];
-                const char *rw_target = rewrite_path(orig_target, new_path, sizeof(new_path));
-                char resolved_target[CONFIG_MAX_PATH];
-                if (resolve_symlink_chain(rw_target, resolved_target, sizeof(resolved_target))) {
-                    rw_target = resolved_target;
+                const char *rw_target = rewrite_path(orig_target,
+                                                     scratch->new_path,
+                                                     sizeof(scratch->new_path));
+                if (resolve_symlink_chain(rw_target,
+                                          scratch->resolved_target,
+                                          sizeof(scratch->resolved_target))) {
+                    rw_target = scratch->resolved_target;
                 }
                 log_path_pair("[Payload] symlink target ", orig_target, rw_target);
                 args[0] = (long)rw_target;
             }
             if ((const char *)args[2]) {
                 const char *orig_link = (const char *)args[2];
-                const char *rw_link = rewrite_path(orig_link, new_path2, sizeof(new_path2));
-                char resolved_link[CONFIG_MAX_PATH];
-                if (resolve_symlink_chain(rw_link, resolved_link, sizeof(resolved_link))) {
-                    rw_link = resolved_link;
+                const char *rw_link = rewrite_path(orig_link,
+                                                   scratch->new_path2,
+                                                   sizeof(scratch->new_path2));
+                if (resolve_symlink_chain(rw_link,
+                                          scratch->resolved_link,
+                                          sizeof(scratch->resolved_link))) {
+                    rw_link = scratch->resolved_link;
                 }
                 log_path_pair("[Payload] path arg2 ", orig_link, rw_link);
                 args[2] = (long)rw_link;
@@ -858,12 +965,16 @@ long syscall_handle_common(long sys_no, long args[6]) {
             const char *orig_old = (const char *)args[1];
             const char *orig_new = (const char *)args[3];
             if (orig_old) {
-                const char *rw_old = rewrite_path(orig_old, new_path, sizeof(new_path));
+                const char *rw_old = rewrite_path(orig_old,
+                                                  scratch->new_path,
+                                                  sizeof(scratch->new_path));
                 log_path_pair("[Payload] linkat old ", orig_old, rw_old);
                 args[1] = (long)rw_old;
             }
             if (orig_new) {
-                const char *rw_new = rewrite_path(orig_new, new_path2, sizeof(new_path2));
+                const char *rw_new = rewrite_path(orig_new,
+                                                  scratch->new_path2,
+                                                  sizeof(scratch->new_path2));
                 log_path_pair("[Payload] linkat new ", orig_new, rw_new);
                 args[3] = (long)rw_new;
             }
@@ -891,7 +1002,9 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_newfstatat:
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig,
+                                              scratch->new_path,
+                                              sizeof(scratch->new_path));
                 int need_resolve = 1;
                 if (sys_no == SYS_unlinkat || sys_no == SYS_readlinkat || sys_no == SYS_renameat) {
                     need_resolve = 0;
@@ -906,9 +1019,10 @@ long syscall_handle_common(long sys_no, long args[6]) {
                     }
                 }
                 if (need_resolve) {
-                    char resolved[CONFIG_MAX_PATH];
-                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
-                        rw = resolved;
+                    if (resolve_symlink_chain(rw,
+                                              scratch->resolved,
+                                              sizeof(scratch->resolved))) {
+                        rw = scratch->resolved;
                     }
                 }
                 log_path_pair("[Payload] path arg1 ", orig, rw);
@@ -919,7 +1033,9 @@ long syscall_handle_common(long sys_no, long args[6]) {
             if (sys_no == SYS_renameat) {
                 if ((const char *)args[3]) {
                     const char *orig2 = (const char *)args[3];
-                    const char *rw2 = rewrite_path(orig2, new_path2, sizeof(new_path2));
+                    const char *rw2 = rewrite_path(orig2,
+                                                   scratch->new_path2,
+                                                   sizeof(scratch->new_path2));
                     /* renameat/linkat 新路径不应跟随符号链接 */
                     log_path_pair("[Payload] path arg3 ", orig2, rw2);
                     args[3] = (long)rw2;
@@ -927,18 +1043,19 @@ long syscall_handle_common(long sys_no, long args[6]) {
             }
             if (sys_no == SYS_readlinkat && args[2]) {
                 /* Use a bounce buffer so we can rewrite output path */
-                char bounce[CONFIG_MAX_PATH];
                 char *user_buf = (char *)args[2];
                 long user_len = args[3];
                 long count = user_len;
-                if (count > (long)sizeof(bounce))
-                    count = sizeof(bounce);
-                args[2] = (long)bounce;
+                if (count > (long)sizeof(scratch->bounce))
+                    count = sizeof(scratch->bounce);
+                args[2] = (long)scratch->bounce;
                 args[3] = count;
                 ret = do_syscall(sys_no, args);
                 if (ret > 0 && ret < count) {
-                    bounce[ret] = '\0';
-                    const char *guest_path = rewrite_path_from_host(bounce, new_path, sizeof(new_path));
+                    scratch->bounce[ret] = '\0';
+                    const char *guest_path = rewrite_path_from_host(scratch->bounce,
+                                                                   scratch->new_path,
+                                                                   sizeof(scratch->new_path));
                     size_t guest_len = sys_strlen(guest_path);
                     if (guest_len < (size_t)user_len) {
                         small_copy(user_buf, guest_path);
@@ -956,12 +1073,15 @@ long syscall_handle_common(long sys_no, long args[6]) {
             DEBUG_LOG("[Payload] fchmodat\n");
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig,
+                                              scratch->new_path,
+                                              sizeof(scratch->new_path));
                 int flags = (int)args[3];
                 if (!(flags & AT_SYMLINK_NOFOLLOW)) {
-                    char resolved[CONFIG_MAX_PATH];
-                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
-                        rw = resolved;
+                    if (resolve_symlink_chain(rw,
+                                              scratch->resolved,
+                                              sizeof(scratch->resolved))) {
+                        rw = scratch->resolved;
                     }
                 }
                 log_path_pair("[Payload] fchmodat path ", orig, rw);
@@ -975,12 +1095,15 @@ long syscall_handle_common(long sys_no, long args[6]) {
             DEBUG_LOG("[Payload] fchownat\n");
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig,
+                                              scratch->new_path,
+                                              sizeof(scratch->new_path));
                 int flags = (int)args[3];
                 if (!(flags & AT_SYMLINK_NOFOLLOW)) {
-                    char resolved[CONFIG_MAX_PATH];
-                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
-                        rw = resolved;
+                    if (resolve_symlink_chain(rw,
+                                              scratch->resolved,
+                                              sizeof(scratch->resolved))) {
+                        rw = scratch->resolved;
                     }
                 }
                 log_path_pair("[Payload] fchownat path ", orig, rw);
@@ -994,12 +1117,15 @@ long syscall_handle_common(long sys_no, long args[6]) {
             DEBUG_LOG("[Payload] utimensat\n");
             if ((const char *)args[1]) {
                 const char *orig = (const char *)args[1];
-                const char *rw = rewrite_path(orig, new_path, sizeof(new_path));
+                const char *rw = rewrite_path(orig,
+                                              scratch->new_path,
+                                              sizeof(scratch->new_path));
                 int flags = (int)args[3];
                 if (!(flags & AT_SYMLINK_NOFOLLOW)) {
-                    char resolved[CONFIG_MAX_PATH];
-                    if (resolve_symlink_chain(rw, resolved, sizeof(resolved))) {
-                        rw = resolved;
+                    if (resolve_symlink_chain(rw,
+                                              scratch->resolved,
+                                              sizeof(scratch->resolved))) {
+                        rw = scratch->resolved;
                     }
                 }
                 log_path_pair("[Payload] utimensat path ", orig, rw);
@@ -1067,11 +1193,12 @@ long syscall_handle_common(long sys_no, long args[6]) {
                 // 但通常 hook 机制会自己处理 mprotect(WRITE)。
                 // 主要是防止扫描时挂掉。
             }
-            if (args[2] & PROT_EXEC)
+            int need_prctl = (args[2] & PROT_EXEC) && is_harmonyos();
+            if (need_prctl)
                 raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 0, 0, 0, 0);
             
             ret = do_syscall(sys_no, args);
-            if (args[2] & PROT_EXEC)
+            if (need_prctl)
                 raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 1, 0, 0, 0);
             
             if (ret == 0 && (args[2] & PROT_EXEC)) {
@@ -1143,5 +1270,6 @@ long syscall_handle_common(long sys_no, long args[6]) {
             break;
     }
 
+    syscall_common_scratch_free(scratch);
     return ret;
 }
