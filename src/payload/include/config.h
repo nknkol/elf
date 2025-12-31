@@ -65,6 +65,11 @@ typedef struct payload_config {
     char config_path[CONFIG_MAX_PATH];
     char payload_path[CONFIG_MAX_PATH];
     char envs[CONFIG_MAX_ENVS][CONFIG_MAX_PATH];
+    int32_t loader_norecurse;
+    int32_t loader_fd;
+    uint64_t loader_dev;
+    uint64_t loader_ino;
+    char loader_path[CONFIG_MAX_PATH];
 } payload_config_t;
 
 extern payload_config_t g_payload_config;

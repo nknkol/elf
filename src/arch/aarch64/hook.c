@@ -109,18 +109,12 @@ static void *alloc_stub_slot(uintptr_t hint_addr) {
     if (need_new) {
         uintptr_t new_hint = (hint_addr + 4096) & ~(4096 - 1);
         void *new_page = z_mmap((void*)new_hint, STUB_PAGE_SIZE,
-                                PROT_READ | PROT_WRITE | PROT_EXEC | PROT_BTI,
+                                PROT_READ | PROT_WRITE,
                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
         if (new_page == (void*)-1) {
             new_page = z_mmap(NULL, STUB_PAGE_SIZE,
-                                PROT_READ | PROT_WRITE | PROT_EXEC | PROT_BTI,
-                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        }
-
-        if (new_page == (void*)-1) {
-            new_page = z_mmap(NULL, STUB_PAGE_SIZE,
-                                PROT_READ | PROT_WRITE | PROT_EXEC,
+                                PROT_READ | PROT_WRITE,
                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         }
 
@@ -147,6 +141,10 @@ static uintptr_t create_stub(uintptr_t near_addr, uintptr_t payload_addr, uintpt
 
     stub_emit(island, payload_addr, return_addr);
     sys_flush_cache(island, STUB_SIZE);
+    z_mprotect((void *)((uintptr_t)island & ~(STUB_PAGE_SIZE - 1)),
+               STUB_PAGE_SIZE, PROT_READ | PROT_EXEC);
+    stub_pool_base = NULL;
+    stub_pool_offset = 0;
     
     return (uintptr_t)island;
 }

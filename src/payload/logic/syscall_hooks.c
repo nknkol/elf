@@ -36,6 +36,15 @@
 #ifndef ENOMEM
 #define ENOMEM          12
 #endif
+#ifndef EINVAL
+#define EINVAL          22
+#endif
+#ifndef ENOSYS
+#define ENOSYS          38
+#endif
+#ifndef EACCES
+#define EACCES          13
+#endif
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW      0x20000
 #endif
@@ -90,6 +99,19 @@ static void log_path_pair(const char *tag, const char *p1, const char *p2)
         sys_write(2, " -> ", 4);
         sys_write(2, p2, sys_strlen(p2));
     }
+    sys_write(2, "\n", 1);
+}
+
+static void format_int(long v, char *buf, size_t buf_sz);
+
+static void log_errno_value(const char *tag, long err)
+{
+    if (!log_debug_enabled() || !tag)
+        return;
+    char buf[32];
+    format_int(err, buf, sizeof(buf));
+    sys_write(2, tag, sys_strlen(tag));
+    sys_write(2, buf, sys_strlen(buf));
     sys_write(2, "\n", 1);
 }
 
@@ -407,15 +429,104 @@ static int parse_shebang_at(long dirfd, const char *path, char *interp, size_t i
     return 1;
 }
 
-static int find_loader_path(char *out, size_t out_sz)
+static const char *path_basename(const char *path)
 {
-    char guest_path[CONFIG_MAX_PATH];
-    guest_path[0] = '/';
-    safe_cpy(guest_path + 1, sizeof(guest_path) - 1, "elfloader");
-    rewrite_path(guest_path, out, out_sz);
-    if (path_exists(out))
-        return 1;
-    return 0;
+    if (!path)
+        return NULL;
+    const char *last = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' && p[1] != '\0')
+            last = p + 1;
+    }
+    return last;
+}
+
+struct k_stat {
+    unsigned long st_dev;
+    unsigned long st_ino;
+    unsigned long st_nlink;
+    unsigned int st_mode;
+    unsigned int st_uid;
+    unsigned int st_gid;
+    unsigned int __pad0;
+    unsigned long st_rdev;
+    long st_size;
+    long st_blksize;
+    long st_blocks;
+    long st_atime;
+    unsigned long st_atime_nsec;
+    long st_mtime;
+    unsigned long st_mtime_nsec;
+    long st_ctime;
+    unsigned long st_ctime_nsec;
+    long __unused[3];
+};
+
+static int stat_dev_ino_at(long dirfd, const char *path,
+                           unsigned long *dev_out, unsigned long *ino_out)
+{
+    if (!path || !dev_out || !ino_out)
+        return 0;
+    struct k_stat st;
+    long rc = raw_syscall(SYS_newfstatat, dirfd, (long)path, (long)&st, 0, 0, 0);
+    if (rc < 0)
+        return 0;
+    *dev_out = st.st_dev;
+    *ino_out = st.st_ino;
+    return 1;
+}
+
+static const char *find_loader_path(char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0)
+        return NULL;
+    const char *val = g_payload_config.loader_path;
+    if (val && val[0]) {
+        safe_cpy(out, out_sz, val);
+        return out;
+    }
+    return NULL;
+}
+
+static int format_fd_path(char *out, size_t out_sz, int fd)
+{
+    if (!out || out_sz == 0 || fd < 0)
+        return 0;
+    const char *prefix = "/proc/self/fd/";
+    size_t pos = 0;
+    while (prefix[pos] && pos + 1 < out_sz) {
+        out[pos] = prefix[pos];
+        pos++;
+    }
+    if (pos + 2 >= out_sz)
+        return 0;
+    char numbuf[16];
+    int npos = 0;
+    if (fd == 0) {
+        numbuf[npos++] = '0';
+    } else {
+        int tmp = fd;
+        char rev[16];
+        int rpos = 0;
+        while (tmp > 0 && rpos < (int)sizeof(rev)) {
+            rev[rpos++] = '0' + (tmp % 10);
+            tmp /= 10;
+        }
+        while (rpos > 0)
+            numbuf[npos++] = rev[--rpos];
+    }
+    if (pos + npos + 1 >= out_sz)
+        return 0;
+    for (int i = 0; i < npos; i++)
+        out[pos++] = numbuf[i];
+    out[pos] = '\0';
+    return 1;
+}
+
+static long execveat_loader_fd(int fd, char **argv, char **envp)
+{
+    return raw_syscall(SYS_execveat, fd, (long)"", (long)argv,
+                       (long)envp, AT_EMPTY_PATH, 0);
 }
 
 static inline long do_syscall(long sys_no, long *a) {
@@ -598,6 +709,14 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     if (!build_exec_env((const char *const *)args[env_idx], env_out,
                         scratch->env_buf, MAX_EXEC_ENVS))
         goto out;
+    int loader_fd = cfg->loader_fd;
+    int have_loader_fd = loader_fd >= 0;
+    const char *loader_path_env = find_loader_path(scratch->loader_path,
+                                                   sizeof(scratch->loader_path));
+    int norecurse = cfg->loader_norecurse;
+    unsigned long loader_dev = (unsigned long)cfg->loader_dev;
+    unsigned long loader_ino = (unsigned long)cfg->loader_ino;
+    int have_loader_devino = (loader_dev != 0 && loader_ino != 0);
 
     safe_cpy(scratch->exec_path_arg, sizeof(scratch->exec_path_arg), orig_path);
     rewrite_path(orig_path, scratch->exec_path, sizeof(scratch->exec_path));
@@ -613,6 +732,44 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     const char *arg0_path = argv_out[0]; /* 原始 argv[0] 名字 */
     format_int(path_dirfd, scratch->dirfd_buf, sizeof(scratch->dirfd_buf));
     format_int(flags, scratch->flags_buf, sizeof(scratch->flags_buf));
+
+    if (norecurse) {
+        int is_loader = 0;
+        if (have_loader_devino) {
+            unsigned long dev = 0, ino = 0;
+            if (stat_dev_ino_at(path_dirfd, target_path, &dev, &ino)) {
+                if (dev == loader_dev && ino == loader_ino)
+                    is_loader = 1;
+            }
+        }
+        if (!is_loader) {
+            const char *base = path_basename(target_path);
+            if ((loader_path_env && sys_streq(target_path, loader_path_env)) ||
+                (base && sys_streq(base, "elfloader"))) {
+                is_loader = 1;
+            }
+        }
+        if (is_loader) {
+            DEBUG_LOG("[Payload] block recursive elfloader exec\n");
+            ret = -EPERM;
+            goto out;
+        }
+    }
+
+    if (loader_path_env && sys_streq(target_path, loader_path_env)) {
+        DEBUG_LOG("[Payload] execve target is loader, passthrough\n");
+        argv_out[0] = (char *)target_path;
+        if (is_execveat) {
+            args[0] = dirfd;
+            if (flags_idx >= 0)
+                args[flags_idx] = flags;
+        }
+        args[path_idx] = (long)target_path;
+        args[argv_idx] = (long)argv_out;
+        args[env_idx] = (long)env_out;
+        ret = do_syscall(sys_no, args);
+        goto out;
+    }
 
     int elf = is_elf_file_at(path_dirfd, target_path);
     log_path_pair(is_execveat ? "[Payload] execveat elf? " : "[Payload] execve elf? ",
@@ -644,12 +801,16 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
                 DEBUG_LOG("[Payload] execve shebang -> loader\n");
             }
             argv_out[0] = (char *)scratch->interp_full;
-
-            if (!find_loader_path(scratch->loader_path,
-                                  sizeof(scratch->loader_path))) {
-                DEBUG_LOG("[Payload] loader not found\n");
+            if (!have_loader_fd && !loader_path_env) {
+                DEBUG_LOG("[Payload] loader fd/path missing\n");
                 ret = -ENOENT;
                 goto out;
+            }
+            if (loader_path_env && loader_path_env[0]) {
+                safe_cpy(scratch->loader_path, sizeof(scratch->loader_path), loader_path_env);
+                log_path("[Payload] loader path=", scratch->loader_path);
+            } else {
+                safe_cpy(scratch->loader_path, sizeof(scratch->loader_path), "/elfloader");
             }
 
             int orig_argc = 0;
@@ -709,17 +870,41 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
             for (int i = 1; i < orig_argc && pos < MAX_EXEC_ARGS - 1; i++)
                 argv_out[pos++] = scratch->orig_args[i];
             argv_out[pos] = NULL;
-
-            if (is_execveat) {
-                args[0] = AT_FDCWD;
-                if (flags_idx >= 0)
-                    args[flags_idx] = 0;
+            if (have_loader_fd) {
+                DEBUG_LOG("[Payload] execve chain loader via fd\n");
+                ret = execveat_loader_fd(loader_fd, argv_out, env_out);
+                if (ret < 0) {
+                    long err = -ret;
+                    log_errno_value("[Payload] execveat fd failed errno=", err);
+                    if (loader_path_env && loader_path_env[0]) {
+                        argv_out[0] = scratch->loader_path;
+                        DEBUG_LOG("[Payload] execve loader path\n");
+                        ret = raw_syscall(SYS_execve, (long)scratch->loader_path,
+                                          (long)argv_out, (long)env_out, 0, 0, 0);
+                        if (ret < 0)
+                            log_errno_value("[Payload] execve loader path errno=", -ret);
+                    } else if (err == ENOSYS || err == EINVAL || err == EOPNOTSUPP ||
+                               err == EACCES || err == EPERM || err == ENOENT) {
+                        if (format_fd_path(scratch->loader_path,
+                                           sizeof(scratch->loader_path),
+                                           loader_fd)) {
+                            argv_out[0] = scratch->loader_path;
+                            log_path("[Payload] execve fd fallback path=", scratch->loader_path);
+                            DEBUG_LOG("[Payload] execve fd fallback via /proc/self/fd\n");
+                            ret = raw_syscall(SYS_execve, (long)scratch->loader_path,
+                                              (long)argv_out, (long)env_out, 0, 0, 0);
+                            if (ret < 0)
+                                log_errno_value("[Payload] execve fd fallback errno=", -ret);
+                        }
+                    }
+                }
+            } else if (loader_path_env && loader_path_env[0]) {
+                DEBUG_LOG("[Payload] execve loader path\n");
+                ret = raw_syscall(SYS_execve, (long)scratch->loader_path,
+                                  (long)argv_out, (long)env_out, 0, 0, 0);
+                if (ret < 0)
+                    log_errno_value("[Payload] execve loader path errno=", -ret);
             }
-            args[path_idx] = (long)scratch->loader_path;
-            args[argv_idx] = (long)argv_out;
-            args[env_idx] = (long)env_out;
-
-            ret = do_syscall(sys_no, args);
             goto out;
         } else {
             if (is_execveat) {
@@ -747,10 +932,16 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
         DEBUG_LOG("[Payload] execve chain loader (elf)\n");
     }
 
-    if (!find_loader_path(scratch->loader_path, sizeof(scratch->loader_path))) {
-        DEBUG_LOG("[Payload] loader not found\n");
+    if (!have_loader_fd && !loader_path_env) {
+        DEBUG_LOG("[Payload] loader fd/path missing\n");
         ret = -ENOENT;
         goto out;
+    }
+    if (loader_path_env && loader_path_env[0]) {
+        safe_cpy(scratch->loader_path, sizeof(scratch->loader_path), loader_path_env);
+        log_path("[Payload] loader path=", scratch->loader_path);
+    } else {
+        safe_cpy(scratch->loader_path, sizeof(scratch->loader_path), "/elfloader");
     }
 
     int argc = 0;
@@ -799,16 +990,41 @@ static long handle_execve_like(long sys_no, long *args, int is_execveat)
     }
     argv_out[argc + extra] = NULL;
 
-    if (is_execveat) {
-        args[0] = AT_FDCWD;
-        if (flags_idx >= 0)
-            args[flags_idx] = 0;
+    if (have_loader_fd) {
+        DEBUG_LOG("[Payload] execve chain loader via fd\n");
+        ret = execveat_loader_fd(loader_fd, argv_out, env_out);
+        if (ret < 0) {
+            long err = -ret;
+            log_errno_value("[Payload] execveat fd failed errno=", err);
+            if (loader_path_env && loader_path_env[0]) {
+                argv_out[0] = scratch->loader_path;
+                DEBUG_LOG("[Payload] execve loader path\n");
+                ret = raw_syscall(SYS_execve, (long)scratch->loader_path,
+                                  (long)argv_out, (long)env_out, 0, 0, 0);
+                if (ret < 0)
+                    log_errno_value("[Payload] execve loader path errno=", -ret);
+            } else if (err == ENOSYS || err == EINVAL || err == EOPNOTSUPP ||
+                       err == EACCES || err == EPERM || err == ENOENT) {
+                if (format_fd_path(scratch->loader_path,
+                                   sizeof(scratch->loader_path),
+                                   loader_fd)) {
+                    argv_out[0] = scratch->loader_path;
+                    log_path("[Payload] execve fd fallback path=", scratch->loader_path);
+                    DEBUG_LOG("[Payload] execve fd fallback via /proc/self/fd\n");
+                    ret = raw_syscall(SYS_execve, (long)scratch->loader_path,
+                                      (long)argv_out, (long)env_out, 0, 0, 0);
+                    if (ret < 0)
+                        log_errno_value("[Payload] execve fd fallback errno=", -ret);
+                }
+            }
+        }
+    } else if (loader_path_env && loader_path_env[0]) {
+        DEBUG_LOG("[Payload] execve loader path\n");
+        ret = raw_syscall(SYS_execve, (long)scratch->loader_path,
+                          (long)argv_out, (long)env_out, 0, 0, 0);
+        if (ret < 0)
+            log_errno_value("[Payload] execve loader path errno=", -ret);
     }
-    args[path_idx] = (long)scratch->loader_path;
-    args[argv_idx] = (long)argv_out;
-    args[env_idx] = (long)env_out;
-
-    ret = do_syscall(sys_no, args);
 
 out:
     execve_scratch_free(scratch);

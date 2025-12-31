@@ -25,7 +25,6 @@
 
 #define MAP_PRIVATE 0x02
 #define MAP_ANON    0x20
-#define MAP_FIXED   0x10
 
 extern long raw_syscall(long sys_no, long a1, long a2, long a3, long a4, long a5, long a6);
 
@@ -101,16 +100,11 @@ static void *alloc_stub_slot(uintptr_t hint_addr)
     if (need_new) {
         uintptr_t hint = (hint_addr + STUB_PAGE_SIZE) & ~(uintptr_t)(STUB_PAGE_SIZE - 1);
         void *page = do_mmap((void *)hint, STUB_PAGE_SIZE,
-                             PROT_READ | PROT_WRITE | PROT_EXEC | PROT_BTI,
-                             MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+                             PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANON, -1, 0);
         if (page == (void *)-1) {
             page = do_mmap(NULL, STUB_PAGE_SIZE,
-                           PROT_READ | PROT_WRITE | PROT_EXEC | PROT_BTI,
-                           MAP_PRIVATE | MAP_ANON, -1, 0);
-        }
-        if (page == (void *)-1) {
-            page = do_mmap(NULL, STUB_PAGE_SIZE,
-                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                           PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANON, -1, 0);
         }
         if (page == (void *)-1)
@@ -131,6 +125,10 @@ static uintptr_t create_stub(uintptr_t near_addr, uintptr_t payload_addr, uintpt
         return 0;
     stub_emit(slot, payload_addr, return_addr);
     sys_flush_cache(slot, STUB_SIZE);
+    do_mprotect((void *)((uintptr_t)slot & ~(uintptr_t)(STUB_PAGE_SIZE - 1)),
+                STUB_PAGE_SIZE, PROT_READ | PROT_EXEC);
+    stub_pool_base = NULL;
+    stub_pool_offset = 0;
     return (uintptr_t)slot;
 }
 

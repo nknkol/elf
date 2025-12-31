@@ -95,10 +95,6 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_utimensat
     b.eq    slow_path
-    cmp     x8, #SYS_exit
-    b.eq    slow_path
-    cmp     x8, #SYS_exit_group
-    b.eq    slow_path
     cmp     x8, #SYS_execve
     b.eq    slow_path
     cmp     x8, #SYS_execveat
@@ -216,7 +212,7 @@ slow_path:
     ldp     x2, x3,   [sp, #16]
     ldp     x0, x1,   [sp, #0]
     add     sp, sp, #CTX_SIZE
-    ret
+    br      x30
 
 reentry_bypass:
     /* Already handling a syscall in this thread: restore state and fall back */
@@ -258,8 +254,8 @@ reentry_bypass:
 
 fast_passthrough:
     svc     #0
-    ret
+    br      x30
 
 fast_path_sigreturn:
     svc     #0
-    ret
+    br      x30

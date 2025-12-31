@@ -28,5 +28,6 @@ int	z_mprotect(void *addr, size_t length, int prot);
 int	*z_perrno(void);
 int	z_prctl(int option, unsigned long arg2, unsigned long arg3);
 int	z_memfd_create(const char *name, unsigned int flags);
+int	z_newfstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 
 #endif /* Z_SYSCALLS_H */

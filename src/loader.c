@@ -364,6 +364,83 @@ static void dbg_dump_bytes(const char *tag, const unsigned char *addr, size_t le
 	}
 }
 
+static int dbg_parse_hex64(const char *s, size_t len, unsigned long *out, size_t *consumed)
+{
+	unsigned long v = 0;
+	size_t i = 0;
+	while (i < len) {
+		char c = s[i];
+		unsigned int d;
+		if (c >= '0' && c <= '9')
+			d = (unsigned int)(c - '0');
+		else if (c >= 'a' && c <= 'f')
+			d = (unsigned int)(c - 'a' + 10);
+		else if (c >= 'A' && c <= 'F')
+			d = (unsigned int)(c - 'A' + 10);
+		else
+			break;
+		v = (v << 4) | d;
+		i++;
+	}
+	if (i == 0)
+		return 0;
+	*out = v;
+	*consumed = i;
+	return 1;
+}
+
+static void dbg_dump_maps_for_addr(const char *tag, unsigned long addr)
+{
+	int fd = z_open("/proc/self/maps", O_RDONLY);
+	if (fd < 0)
+		return;
+
+	char buf[1024];
+	char line[512];
+	size_t line_len = 0;
+	ssize_t n;
+
+	while ((n = z_read(fd, buf, sizeof(buf))) > 0) {
+		for (ssize_t i = 0; i < n; i++) {
+			char c = buf[i];
+			if (line_len + 1 < sizeof(line))
+				line[line_len++] = c;
+			if (c == '\n') {
+				unsigned long start = 0, end = 0;
+				size_t used = 0, used2 = 0;
+				if (dbg_parse_hex64(line, line_len, &start, &used) &&
+				    used + 1 < line_len && line[used] == '-' &&
+				    dbg_parse_hex64(line + used + 1, line_len - used - 1, &end, &used2)) {
+					if (addr >= start && addr < end) {
+						if (tag)
+							dbg_write_cstr(tag);
+						dbg_write_all(line, line_len);
+						z_close(fd);
+						return;
+					}
+				}
+				line_len = 0;
+			}
+		}
+	}
+
+	if (line_len > 0) {
+		unsigned long start = 0, end = 0;
+		size_t used = 0, used2 = 0;
+		if (dbg_parse_hex64(line, line_len, &start, &used) &&
+		    used + 1 < line_len && line[used] == '-' &&
+		    dbg_parse_hex64(line + used + 1, line_len - used - 1, &end, &used2)) {
+			if (addr >= start && addr < end) {
+				if (tag)
+					dbg_write_cstr(tag);
+				dbg_write_all(line, line_len);
+			}
+		}
+	}
+
+	z_close(fd);
+}
+
 static void loader_sigsegv_handler(int sig, siginfo_t *si, void *ucontext)
 {
 	if (g_sigsegv_handling) {
@@ -398,6 +475,7 @@ static void loader_sigsegv_handler(int sig, siginfo_t *si, void *ucontext)
 	const ucontext_t *uc = (const ucontext_t *)ucontext;
 	const unsigned char *pc_bytes = (const unsigned char *)uc->uc_mcontext.pc;
 	if (pc_bytes) {
+		dbg_dump_maps_for_addr("[Debugger] PC map: ", (unsigned long)pc_bytes);
 		unsigned long page = TRUNC_PG((unsigned long)pc_bytes);
 		if (z_mprotect((void *)page, PAGE_SIZE, PROT_READ | PROT_EXEC) < 0) {
 			char msg[128];
@@ -413,6 +491,7 @@ static void loader_sigsegv_handler(int sig, siginfo_t *si, void *ucontext)
 		}
 	}
 	if (si && si->si_addr) {
+		dbg_dump_maps_for_addr("[Debugger] Fault map: ", (unsigned long)si->si_addr);
 		const unsigned char *fa = (const unsigned char *)si->si_addr;
 		unsigned long page = TRUNC_PG((unsigned long)fa);
 		if (z_mprotect((void *)page, PAGE_SIZE, PROT_READ | PROT_EXEC) == 0) {
@@ -731,6 +810,38 @@ err:
 	return -1;
 }
 
+static int create_loader_memfd(void)
+{
+	int src = z_openat(AT_FDCWD, "/proc/self/exe", O_RDONLY);
+	if (src < 0) {
+		z_printf("[Loader] loader memfd open /proc/self/exe failed errno=%d\n", z_errno);
+		return -1;
+	}
+	int fd = z_memfd_create("elfloader", 0);
+	if (fd < 0) {
+		z_printf("[Loader] loader memfd_create failed errno=%d\n", z_errno);
+		z_close(src);
+		return -1;
+	}
+	unsigned char buf[4096];
+	ssize_t n;
+	while ((n = z_read(src, buf, sizeof(buf))) > 0) {
+		if (write_all(fd, buf, (size_t)n) < 0)
+			goto err;
+	}
+	if (n < 0)
+		goto err;
+	if (z_lseek(fd, 0, SEEK_SET) < 0)
+		goto err;
+	z_close(src);
+	z_printf("[Loader] loader memfd prepared (fd=%d)\n", fd);
+	return fd;
+err:
+	z_close(src);
+	z_close(fd);
+	return -1;
+}
+
 /* Parse hook range string "A-B" */
 static int parse_range_str(const char *s, int *min_out, int *max_out)
 {
@@ -885,6 +996,8 @@ static void init_payload_config(payload_config_t *cfg)
 		cfg->hook_max = 0x7fffffff;
 		cfg->hook_min_interp = 0;
 		cfg->hook_max_interp = 0x7fffffff;
+		cfg->loader_norecurse = 1;
+		cfg->loader_fd = -1;
 		apply_mode(cfg, CONFIG_MODE_COMPAT, 0);
 	}
 }
@@ -1472,17 +1585,64 @@ static void log_bind_list(payload_config_t *cfg, const char *tag)
 	}
 }
 
-static void ensure_loader_bind(payload_config_t *cfg)
+static int resolve_self_path(char *out, size_t out_sz, const char *argv0)
 {
-	if (!cfg)
-		return;
-	if (has_loader_bind(cfg))
-		return;
-	if (cfg->bind_count >= CONFIG_MAX_BINDS)
-		return;
-	copy_cstr(cfg->binds[cfg->bind_count].src, CONFIG_MAX_PATH, "/elfloader");
-	copy_cstr(cfg->binds[cfg->bind_count].dst, CONFIG_MAX_PATH, CONFIG_DEFAULT_LOADER_DST);
-	cfg->bind_count++;
+	if (!out || out_sz == 0)
+		return 0;
+	out[0] = '\0';
+
+	const char *candidates[] = {
+		"/proc/self/exe",
+		"/proc/curproc/file",
+		"/proc/self/path/a.out",
+		NULL
+	};
+	for (int i = 0; candidates[i]; i++) {
+		ssize_t n = z_readlink(candidates[i], out, out_sz - 1);
+		if (n > 0) {
+			if ((size_t)n >= out_sz)
+				n = out_sz - 1;
+			out[n] = '\0';
+			return 1;
+		}
+	}
+
+	if (!argv0 || !argv0[0])
+		return 0;
+
+	if (argv0[0] == '/') {
+		copy_cstr(out, out_sz, argv0);
+		return 1;
+	}
+
+	char cwd[CONFIG_MAX_PATH];
+	if (z_getcwd(cwd, sizeof(cwd))) {
+		size_t pos = 0;
+		for (; cwd[pos] && pos + 1 < out_sz; pos++)
+			out[pos] = cwd[pos];
+		if (pos > 0 && out[pos - 1] != '/' && pos + 1 < out_sz)
+			out[pos++] = '/';
+		for (size_t i = 0; argv0[i] && pos + 1 < out_sz; i++)
+			out[pos++] = argv0[i];
+		out[pos] = '\0';
+		return 1;
+	}
+
+	copy_cstr(out, out_sz, argv0);
+	return 1;
+}
+
+static int get_path_stat(const char *path, unsigned long long *dev_out,
+			 unsigned long long *ino_out)
+{
+	if (!path || !dev_out || !ino_out)
+		return 0;
+	struct stat st;
+	if (z_newfstatat(AT_FDCWD, path, &st, 0) < 0)
+		return 0;
+	*dev_out = (unsigned long long)st.st_dev;
+	*ino_out = (unsigned long long)st.st_ino;
+	return 1;
 }
 
 static int has_prefix(const char *path, const char *prefix)
@@ -1695,6 +1855,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	int shell_mode = 0;
 	int init_memfd = -1;
 	int shell_memfd = -1;
+	int loader_memfd = -1;
 
 	void *payload_base = NULL;
 	size_t payload_entry_addr = 0;
@@ -1713,6 +1874,12 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 	(void)env;
 	const char *config_path = CONFIG_DEFAULT_CONFIG_PATH;
+	char loader_path_buf[CONFIG_MAX_PATH];
+	const char *loader_path = NULL;
+	if (resolve_self_path(loader_path_buf, sizeof(loader_path_buf),
+			      (argc > 0) ? argv[0] : NULL)) {
+		loader_path = loader_path_buf;
+	}
 	char payload_path_override[CONFIG_MAX_PATH];
 	z_memset(payload_path_override, 0, sizeof(payload_path_override));
 	payload_config_t bootstrap_cfg;
@@ -1744,6 +1911,17 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		}
 	}
 
+	loader_memfd = create_loader_memfd();
+	bootstrap_cfg.loader_fd = loader_memfd;
+	bootstrap_cfg.loader_norecurse = 1;
+	if (loader_path) {
+		copy_cstr(bootstrap_cfg.loader_path, CONFIG_MAX_PATH, loader_path);
+		unsigned long long dev = 0, ino = 0;
+		if (get_path_stat(loader_path, &dev, &ino)) {
+			bootstrap_cfg.loader_dev = dev;
+			bootstrap_cfg.loader_ino = ino;
+		}
+	}
 	/* Apply hook ranges from config/CLI */
 	g_hook_min_default = bootstrap_cfg.hook_min;
 	g_hook_max_default = bootstrap_cfg.hook_max;
@@ -1926,7 +2104,6 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_memcpy(payload_cfg, &bootstrap_cfg, sizeof(*payload_cfg));
 			if (!payload_path_override[0] && used_embedded)
 				copy_cstr(payload_cfg->payload_path, CONFIG_MAX_PATH, "(embedded)");
-			ensure_loader_bind(payload_cfg);
 			log_bind_list(payload_cfg, "payload config");
 		} else {
 			z_printf("[Loader] Warning: payload config block not found.\n");
@@ -2049,6 +2226,16 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			break;
 	}
 
+	const char *execfn = bootstrap_cfg.use_init ? file : target_argv[0];
+	if (child_loader && child_exec_path)
+		execfn = child_exec_path;
+	if (shell_mode)
+		execfn = target_argv[0];
+	if (shebang_mode && shebang_script[0] && !child_exec_path)
+		execfn = shebang_script;
+
+	int saw_execfn = 0;
+
 #define AVSET(t, v, expr) case (t): (v)->a_un.a_val = (expr); break
 	while (av->a_type != AT_NULL) {
 		switch (av->a_type) {
@@ -2056,20 +2243,20 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		AVSET(AT_PHNUM, av, ehdrs[Z_PROG].e_phnum);
 		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
 		AVSET(AT_ENTRY, av, entry[Z_PROG]);
-		const char *execfn = bootstrap_cfg.use_init ? file : target_argv[0];
-		if (child_loader && child_exec_path)
-			execfn = child_exec_path;
-		if (shell_mode)
-			execfn = target_argv[0];
-		if (shebang_mode && shebang_script[0] && !child_exec_path)
-			execfn = shebang_script;
-		AVSET(AT_EXECFN, av, (unsigned long)execfn);
+		case AT_EXECFN:
+			av->a_un.a_val = (unsigned long)execfn;
+			saw_execfn = 1;
+			z_printf("[Loader] AT_EXECFN=%p \"%s\"\n",
+				 (void *)execfn, execfn ? execfn : "(null)");
+			break;
 		AVSET(AT_BASE, av, elf_interp ?
 				base[Z_INTERP] : av->a_un.a_val);
 		}
 		++av;
 	}
 #undef AVSET
+	if (!saw_execfn)
+		z_printf("[Loader] AT_EXECFN not present in auxv\n");
 	++av;
 
 	if (shebang_mode) {

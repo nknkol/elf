@@ -37,6 +37,11 @@ ret z_##name(t1 a1, t2 a2, t3 a3) \
 { \
 	return (ret)SYSCALL(name, a1, a2, a3); \
 }
+#define DEF_SYSCALL4(ret, name, t1, a1, t2, a2, t3, a3, t4, a4) \
+ret z_##name(t1 a1, t2 a2, t3 a3, t4 a4) \
+{ \
+	return (ret)SYSCALL(name, a1, a2, a3, a4); \
+}
 
 DEF_SYSCALL3(int, openat, int, dirfd, const char *, filename, int, flags)
 DEF_SYSCALL3(ssize_t, read, int, fd, void *, buf, size_t, count)
@@ -50,6 +55,7 @@ DEF_SYSCALL2(int, munmap, void *, addr, size_t, length)
 DEF_SYSCALL3(int, mprotect, void *, addr, size_t, length, int, prot)
 DEF_SYSCALL3(int, prctl, int, option, unsigned long, arg2, unsigned long, arg3)
 DEF_SYSCALL2(char *, getcwd, char *, buf, size_t, size)
+DEF_SYSCALL4(int, newfstatat, int, dirfd, const char *, pathname, struct stat *, statbuf, int, flags)
 
 int z_open(const char * filename, int flags)
 {
