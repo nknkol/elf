@@ -93,6 +93,10 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_newfstatat
     b.eq    slow_path
+    cmp     x8, #SYS_statfs
+    b.eq    slow_path
+    cmp     x8, #SYS_fstatfs
+    b.eq    slow_path
     cmp     x8, #SYS_utimensat
     b.eq    slow_path
     cmp     x8, #SYS_execve

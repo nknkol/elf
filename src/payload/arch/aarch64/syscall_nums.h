@@ -44,6 +44,8 @@
 #define SYS_symlinkat    36
 #define SYS_readlinkat   78
 #define SYS_newfstatat   79
+#define SYS_statfs       43
+#define SYS_fstatfs      44
 #define SYS_utimensat    88
 #define SYS_rt_sigaction 13
 #define SYS_rt_sigreturn 139

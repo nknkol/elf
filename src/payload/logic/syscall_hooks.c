@@ -1475,6 +1475,29 @@ long syscall_handle_common(long sys_no, long args[6]) {
             ret = do_syscall(sys_no, args);
             break;
 
+        case SYS_statfs: {
+            const char *path = (const char *)args[0];
+            if (path) {
+                const char *rw = rewrite_path(path,
+                                              scratch->new_path,
+                                              sizeof(scratch->new_path));
+                if (resolve_symlink_chain(rw,
+                                          scratch->resolved,
+                                          sizeof(scratch->resolved))) {
+                    rw = scratch->resolved;
+                }
+                log_path_pair("[Payload] statfs path ", path, rw);
+                args[0] = (long)rw;
+            }
+            ret = do_syscall(sys_no, args);
+            break;
+        }
+
+        case SYS_fstatfs:
+            log_errno_value("[Payload] fstatfs fd ", args[0]);
+            ret = do_syscall(sys_no, args);
+            break;
+
         case SYS_clone3:
             DEBUG_LOG("[Payload] Mocking clone3(435) -> -ENOSYS to force fallback to clone()\n");
             ret = -38; /* -ENOSYS */
