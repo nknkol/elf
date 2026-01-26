@@ -41,6 +41,7 @@
 #define SYS_close        57
 #define SYS_read         63
 #define SYS_write        64
+#define SYS_getdents64   61
 #define SYS_symlinkat    36
 #define SYS_readlinkat   78
 #define SYS_newfstatat   79

@@ -15,4 +15,9 @@ void log_message(int level, const char *msg);
 
 #define LOG_DEBUG(literal) LOG_CONST(LOG_LEVEL_DEBUG, literal)
 
+int log_debug_enabled(void);
+void log_path(const char *tag, const char *path);
+void log_path_pair(const char *tag, const char *p1, const char *p2);
+void log_errno_value(const char *tag, long err);
+
 #endif /* PAYLOAD_LOG_H */

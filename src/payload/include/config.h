@@ -22,6 +22,7 @@
 #define CONFIG_MAX_PATH     256
 #define CONFIG_MAX_BINDS    8
 #define CONFIG_MAX_ENVS     16
+#define CONFIG_MAX_OVERLAYS 8
 #define CONFIG_DEFAULT_LOADER_DST "/data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/elfloader"
 #ifndef CONFIG_DEFAULT_INIT_PATH
 #define CONFIG_DEFAULT_INIT_PATH "tiny-init" /* 名义路径，仅用于 argv/AT_EXECFN，占位相对路径 */
@@ -43,12 +44,19 @@ struct bind_entry {
     char dst[CONFIG_MAX_PATH];
 };
 
+struct overlay_entry {
+    char mount[CONFIG_MAX_PATH];
+    char lower[CONFIG_MAX_PATH];
+    char upper[CONFIG_MAX_PATH];
+};
+
 typedef struct payload_config {
     int32_t log_level;       /* LOG_LEVEL_* */
     int32_t mode;            /* CONFIG_MODE_* */
     int32_t mode_explicit;   /* 标记是否显式指定模式，避免被 ROOT 推导覆盖 */
     int32_t hook_mask;       /* HOOK_LAYER_* 位图，BASE 必开 */
     int32_t bind_count;
+    int32_t overlay_count;
     int32_t env_count;
     int32_t use_init;
     int32_t detach;
@@ -60,6 +68,7 @@ typedef struct payload_config {
     int32_t hook_max_interp;
     char root[CONFIG_MAX_PATH];
     struct bind_entry binds[CONFIG_MAX_BINDS];
+    struct overlay_entry overlays[CONFIG_MAX_OVERLAYS];
     char workdir[CONFIG_MAX_PATH];
     char log_path[CONFIG_MAX_PATH];
     char config_path[CONFIG_MAX_PATH];
@@ -70,6 +79,8 @@ typedef struct payload_config {
     uint64_t loader_dev;
     uint64_t loader_ino;
     char loader_path[CONFIG_MAX_PATH];
+    char vfs_lower[CONFIG_MAX_PATH];
+    char vfs_upper[CONFIG_MAX_PATH];
 } payload_config_t;
 
 extern payload_config_t g_payload_config;

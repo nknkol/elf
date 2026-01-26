@@ -91,6 +91,8 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_readlinkat
     b.eq    slow_path
+    cmp     x8, #SYS_getdents64
+    b.eq    slow_path
     cmp     x8, #SYS_newfstatat
     b.eq    slow_path
     cmp     x8, #SYS_statfs

@@ -1011,6 +1011,12 @@ static void apply_config_entry(payload_config_t *cfg, const char *entry, char *p
 	} else if (z_strncmp(entry, "PROOT_ROOT=", 11) == 0) {
 		copy_cstr(cfg->root, CONFIG_MAX_PATH, entry + 11);
 		maybe_set_container_mode(cfg);
+	} else if (z_strncmp(entry, "PROOT_LOWER=", 12) == 0) {
+		copy_cstr(cfg->vfs_lower, CONFIG_MAX_PATH, entry + 12);
+		maybe_set_container_mode(cfg);
+	} else if (z_strncmp(entry, "PROOT_UPPER=", 12) == 0) {
+		copy_cstr(cfg->vfs_upper, CONFIG_MAX_PATH, entry + 12);
+		maybe_set_container_mode(cfg);
 	} else if (z_strncmp(entry, "PROOT_BIND=", 11) == 0) {
 		parse_bind_list(cfg, entry + 11);
 	} else if (z_strncmp(entry, "PAYLOAD_PATH=", 13) == 0) {
@@ -1045,6 +1051,21 @@ static int add_bind_entry(payload_config_t *cfg, const char *guest, const char *
 	copy_cstr(cfg->binds[cfg->bind_count].src, CONFIG_MAX_PATH, guest);
 	copy_cstr(cfg->binds[cfg->bind_count].dst, CONFIG_MAX_PATH, host);
 	cfg->bind_count++;
+	return 1;
+}
+
+static int add_overlay_entry(payload_config_t *cfg,
+			     const char *mount, const char *lower, const char *upper)
+{
+	if (!cfg || !mount || !lower || !upper ||
+	    mount[0] == '\0' || lower[0] == '\0' || upper[0] == '\0')
+		return 0;
+	if (cfg->overlay_count >= CONFIG_MAX_OVERLAYS)
+		return 0;
+	copy_cstr(cfg->overlays[cfg->overlay_count].mount, CONFIG_MAX_PATH, mount);
+	copy_cstr(cfg->overlays[cfg->overlay_count].lower, CONFIG_MAX_PATH, lower);
+	copy_cstr(cfg->overlays[cfg->overlay_count].upper, CONFIG_MAX_PATH, upper);
+	cfg->overlay_count++;
 	return 1;
 }
 
@@ -1181,6 +1202,46 @@ static void parse_loader_rc(payload_config_t *cfg, const char *path, char *paylo
 			copy_cstr(cfg->root, CONFIG_MAX_PATH, line + 5);
 			z_printf("[Loader] Host ROOT=\"%s\"\n", cfg->root);
 			maybe_set_container_mode(cfg);
+		} else if (z_strncmp(line, "LOWER ", 6) == 0) {
+			copy_cstr(cfg->vfs_lower, CONFIG_MAX_PATH, line + 6);
+			z_printf("[Loader] Host LOWER=\"%s\"\n", cfg->vfs_lower);
+			maybe_set_container_mode(cfg);
+		} else if (z_strncmp(line, "UPPER ", 6) == 0) {
+			copy_cstr(cfg->vfs_upper, CONFIG_MAX_PATH, line + 6);
+			z_printf("[Loader] Host UPPER=\"%s\"\n", cfg->vfs_upper);
+			maybe_set_container_mode(cfg);
+		} else if (z_strncmp(line, "OVERLAY ", 8) == 0) {
+			const char *val = line + 8;
+			while (*val == ' ' || *val == '\t')
+				val++;
+			const char *p1 = val;
+			while (*val && *val != ' ' && *val != '\t')
+				val++;
+			const char *p2 = val;
+			while (*p2 == ' ' || *p2 == '\t')
+				p2++;
+			const char *p3 = p2;
+			while (*p3 && *p3 != ' ' && *p3 != '\t')
+				p3++;
+			const char *p4 = p3;
+			while (*p4 == ' ' || *p4 == '\t')
+				p4++;
+			const char *p5 = p4;
+			while (*p5 && *p5 != ' ' && *p5 != '\t')
+				p5++;
+
+			char mount[CONFIG_MAX_PATH];
+			char lower[CONFIG_MAX_PATH];
+			char upper[CONFIG_MAX_PATH];
+			if (p1 < val && p2 < p3 && p4 < p5) {
+				copy_substr(mount, sizeof(mount), p1, (size_t)(val - p1));
+				copy_substr(lower, sizeof(lower), p2, (size_t)(p3 - p2));
+				copy_substr(upper, sizeof(upper), p4, (size_t)(p5 - p4));
+				if (add_overlay_entry(cfg, mount, lower, upper)) {
+					z_printf("[Loader] Host OVERLAY %s -> %s (upper=%s)\n",
+						 mount, lower, upper);
+				}
+			}
 		} else if (z_strncmp(line, "BIND ", 5) == 0) {
 			const char *val = line + 5;
 			const char *colon = z_strchr(val, ':');

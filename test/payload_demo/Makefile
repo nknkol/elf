@@ -14,7 +14,7 @@ TARGETS := payload_demo payload_demo_tests
 
 # Pull in payload logic (arch-neutral) + arch-specific mini libc for helpers.
 PAYLOAD_COMMON_SRCS := $(addprefix $(PAYLOAD_BASE)/logic/, \
-                       config.c log.c execve_utils.c path_rewrite.c syscall_hooks.c hook_runtime.c)
+                       config.c log.c utils.c radix_tree.c vfs_core.c execve_utils.c exec_handler.c path_rewrite.c syscall_hooks.c hook_runtime.c)
 PAYLOAD_ARCH_SRCS := $(addprefix $(ARCH_DIR)/, \
                      mini_libc.c reentry_guard.c raw_syscall.S syscall_disp.c stub.c)
 PAYLOAD_SRCS := $(PAYLOAD_COMMON_SRCS) $(PAYLOAD_ARCH_SRCS)
