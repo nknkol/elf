@@ -79,3 +79,34 @@ redesign before hostile-code isolation can be claimed.
 Still needed: concurrent threads and guard exhaustion/TLS reuse, signals during
 blocking calls/lock ownership, FD provenance, complete directory views, dynamic
 brew executable coverage, and performance measurements.
+
+## Filesystem scope and performance direction
+
+The agreed scope is a filesystem view and access-control layer, not a complete
+userspace filesystem. The host kernel should retain responsibility for file
+contents, ordinary I/O, inode operations and storage caching. These are design
+constraints for upcoming work, not claims about optimizations already shipped.
+
+- Path operations translate guest paths and check policy before issuing the
+  host syscall. Preserve symlink, dotdot and dirfd semantics; simple textual
+  prefix substitution is not sufficient.
+- Record necessary mount identity and permissions when acquiring descriptors.
+  Prefer lightweight FD checks followed by native read/write rather than
+  repeated path walks or userspace file-content copies. Account for inherited,
+  duplicated and transferred FDs and writable mappings before relying on this.
+- Pass ordinary directory reads to the kernel. Transform getdents output only
+  where visibility filtering or synthetic mountpoint entries require it.
+- Keep overlay/copy-up and merged-directory processing optional and out of the
+  ordinary bind path.
+- Initialize immutable mapping tables once per configuration. Replace per-call
+  scratch mmap/munmap only with storage whose thread and signal reentry
+  ownership is defined. Distinguish full path handling from lightweight FD
+  handling rather than requiring identical work for every selected syscall.
+- Cache immutable configuration matching where useful. Do not cache filesystem
+  resolution without an invalidation model for rename and symlink changes.
+
+The current prototype still allocates path scratch and constructs bindings per
+call and uses full register save/restore on selected slow calls. Establish
+native-vs-loader benchmarks for path lookup, open/stat, FD I/O and directory
+reads before claiming improvements. Semantics and policy checks must survive
+optimization; broad dispatch alone does not enforce access control.
