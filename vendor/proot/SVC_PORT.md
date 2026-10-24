@@ -206,3 +206,14 @@ header; later loader failures are not guaranteed to return exec errno.
 Dynamic ELF, multithreaded exec, signal/FD lifecycle and complete auxv
 compatibility are not validated by these static tests. No raw target exec
 fallback is used. Logs: svc/build/exec-results.json.
+
+## All-number dispatch and native environment survey
+
+The assembly selector has been replaced with all-number slow dispatch; new and
+unknown calls no longer silently miss C dispatch. rt_sigreturn retains its
+required original-stack path; clone has a preflight stage followed by an
+original-stack syscall. ABI constants now come from target headers, correcting
+rt_sigaction to 134. Ordinary passthrough calls avoid pathname scratch mmap.
+See ../../tools/syscalls/README.md for native probing limits, six measured
+SIGSYS cases, compatibility handling and assembly/runtime regression coverage.
+This expands dispatch coverage, not the set of completed VFS operations.

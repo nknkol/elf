@@ -22,117 +22,10 @@ real_entry:
     cmp     x8, #SYS_rt_sigreturn
     b.eq    fast_path_sigreturn
 
-    /* Quick filter: only instrument syscalls we care about */
-    cmp     x8, #SYS_getcwd
-    b.eq    slow_path
-    cmp     x8, #SYS_rt_sigaction
-    b.eq    slow_path
-    cmp     x8, #SYS_mknodat
-    b.eq    slow_path
-    cmp     x8, #SYS_faccessat
-    b.eq    slow_path
-#ifdef PROOT_PATH
-    cmp     x8, #SYS_fchdir
-    b.eq    slow_path
-#endif
-    cmp     x8, #SYS_chdir
-    b.eq    slow_path
-    cmp     x8, #SYS_mkdirat
-    b.eq    slow_path
-    cmp     x8, #SYS_unlinkat
-    b.eq    slow_path
-    cmp     x8, #SYS_linkat
-    b.eq    slow_path
-#ifdef PROOT_PATH
-    cmp     x8, #SYS_renameat2
-    b.eq    slow_path
-#endif
-    cmp     x8, #SYS_renameat
-    b.eq    slow_path
-    cmp     x8, #SYS_fchmod
-    b.eq    slow_path
-    cmp     x8, #SYS_fchmodat
-    b.eq    slow_path
-    cmp     x8, #SYS_fchownat
-    b.eq    slow_path
-    cmp     x8, #SYS_fchown
-    b.eq    slow_path
-    cmp     x8, #SYS_setuid
-    b.eq    slow_path
-    cmp     x8, #SYS_setgid
-    b.eq    slow_path
-    cmp     x8, #SYS_setreuid
-    b.eq    slow_path
-    cmp     x8, #SYS_setregid
-    b.eq    slow_path
-    cmp     x8, #SYS_setresuid
-    b.eq    slow_path
-    cmp     x8, #SYS_setresgid
-    b.eq    slow_path
-    cmp     x8, #SYS_setfsuid
-    b.eq    slow_path
-    cmp     x8, #SYS_setfsgid
-    b.eq    slow_path
-    cmp     x8, #SYS_setgroups
-    b.eq    slow_path
-    cmp     x8, #SYS_getuid
-    b.eq    slow_path
-    cmp     x8, #SYS_geteuid
-    b.eq    slow_path
-    cmp     x8, #SYS_getgid
-    b.eq    slow_path
-    cmp     x8, #SYS_getegid
-    b.eq    slow_path
-    cmp     x8, #SYS_getresuid
-    b.eq    slow_path
-    cmp     x8, #SYS_getresgid
-    b.eq    slow_path
-    cmp     x8, #SYS_getgroups
-    b.eq    slow_path
-    cmp     x8, #SYS_openat
-    b.eq    slow_path
-    cmp     x8, #SYS_close
-    b.eq    slow_path
-    cmp     x8, #SYS_write
-    b.eq    slow_path
-    cmp     x8, #SYS_symlinkat
-    b.eq    slow_path
-    cmp     x8, #SYS_readlinkat
-    b.eq    slow_path
-    cmp     x8, #SYS_getdents64
-    b.eq    slow_path
-    cmp     x8, #SYS_newfstatat
-    b.eq    slow_path
-    cmp     x8, #SYS_statfs
-    b.eq    slow_path
-    cmp     x8, #SYS_fstatfs
-    b.eq    slow_path
-    cmp     x8, #SYS_utimensat
-    b.eq    slow_path
-    cmp     x8, #SYS_execve
-    b.eq    slow_path
-    cmp     x8, #SYS_execveat
-    b.eq    slow_path
-    cmp     x8, #SYS_mprotect
-    b.eq    slow_path
-    cmp     x8, #SYS_mmap
-    b.eq    slow_path
-    /* Compatibility / debug syscalls */
-    cmp     x8, #SYS_rseq
-    b.eq    slow_path
-    cmp     x8, #SYS_getrandom
-    b.eq    slow_path
-    cmp     x8, #SYS_membarrier
-    b.eq    slow_path
-    cmp     x8, #SYS_prctl
-    b.eq    slow_path
-    cmp     x8, #SYS_faccessat2
-    b.eq    slow_path
-    cmp     x8, #SYS_statx
-    b.eq    slow_path
-    cmp     x8, #SYS_clone3
-    b.eq    slow_path
-    b       fast_passthrough
+    /* Route every number, including unknown/future syscalls, through the C
+     * dispatcher. rt_sigreturn above is the sole original-stack exception.
+     * clone is dispatched for preflight but executed after restoring SP. */
+    b       slow_path
 
 slow_path:
     sub     sp, sp, #CTX_SIZE
@@ -189,8 +82,14 @@ slow_path:
     mov     x0, x19
     bl      reentry_leave
     mov     x0, x20
+    /* clone changes SP in the child. Its dispatcher stage is preflight only;
+     * retain original x0 (flags) for the actual original-stack syscall. */
+    ldr     x9, [sp, #64]
+    cmp     x9, #SYS_clone
+    b.eq    restore_context
     str     x0, [sp, #0]
 
+restore_context:
     /* Restore SIMD/FP */
     ldp     q30, q31, [sp, #SIMD_AREA + 480]
     ldp     q28, q29, [sp, #SIMD_AREA + 448]
@@ -226,6 +125,8 @@ slow_path:
     ldp     x2, x3,   [sp, #16]
     ldp     x0, x1,   [sp, #0]
     add     sp, sp, #CTX_SIZE
+    cmp     x8, #SYS_clone
+    b.eq    fast_passthrough
     br      x30
 
 reentry_bypass:

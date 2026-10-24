@@ -161,9 +161,21 @@ long syscall_handle_common(long sys_no, long args[6]) {
         return proot_syscall(sys_no, args);
 #endif
     long ret;
-    struct syscall_common_scratch *scratch = syscall_common_scratch_alloc();
-    if (!scratch)
-        return -ENOMEM;
+    struct syscall_common_scratch *scratch = NULL;
+    /* Most calls are passthrough. Do not mmap/munmap scratch for every read,
+     * write, futex or unknown syscall now that all numbers reach this layer. */
+    switch (sys_no) {
+    case SYS_getcwd: case SYS_chdir: case SYS_symlinkat: case SYS_linkat:
+    case SYS_mkdirat: case SYS_mknodat: case SYS_unlinkat: case SYS_renameat:
+    case SYS_openat: case SYS_faccessat: case SYS_readlinkat: case SYS_newfstatat:
+    case SYS_fchmodat: case SYS_fchownat: case SYS_utimensat: case SYS_statfs:
+        scratch = syscall_common_scratch_alloc();
+        if (!scratch)
+            return -ENOMEM;
+        break;
+    default:
+        break;
+    }
 
     switch (sys_no) {
         case SYS_getcwd:
@@ -581,6 +593,16 @@ long syscall_handle_common(long sys_no, long args[6]) {
         case SYS_fstatfs:
             log_errno_value("[Payload] fstatfs fd ", args[0]);
             ret = do_syscall(sys_no, args);
+            break;
+
+        /* Native isolated probes on this HarmonyOS sandbox terminate with
+         * SIGSYS for these calls. Preserve passthrough on other platforms.
+         * ENOSYS is explicit lack of support, not filesystem emulation. */
+        case SYS_openat2:
+        case SYS_open_by_handle_at:
+        case SYS_io_uring_enter:
+        case SYS_io_uring_register:
+            ret = is_harmonyos() ? -ENOSYS : do_syscall(sys_no, args);
             break;
 
         case SYS_clone3:

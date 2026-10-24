@@ -1,0 +1,1579 @@
+{
+  "machine": "aarch64",
+  "kernel": "HongMeng Kernel 1.13.0",
+  "scope": "Native Python child processes; each result applies only to listed arguments",
+  "header_syscalls": {
+    "accept": 202,
+    "accept4": 242,
+    "acct": 89,
+    "add_key": 217,
+    "adjtimex": 171,
+    "bind": 200,
+    "bpf": 280,
+    "brk": 214,
+    "capget": 90,
+    "capset": 91,
+    "chdir": 49,
+    "chroot": 51,
+    "clock_adjtime": 266,
+    "clock_getres": 114,
+    "clock_gettime": 113,
+    "clock_nanosleep": 115,
+    "clock_settime": 112,
+    "clone": 220,
+    "clone3": 435,
+    "close": 57,
+    "close_range": 436,
+    "connect": 203,
+    "copy_file_range": 285,
+    "delete_module": 106,
+    "dup": 23,
+    "dup3": 24,
+    "epoll_create1": 20,
+    "epoll_ctl": 21,
+    "epoll_pwait": 22,
+    "eventfd2": 19,
+    "execve": 221,
+    "execveat": 281,
+    "exit": 93,
+    "exit_group": 94,
+    "faccessat": 48,
+    "faccessat2": 439,
+    "fadvise64": 223,
+    "fallocate": 47,
+    "fanotify_init": 262,
+    "fanotify_mark": 263,
+    "fchdir": 50,
+    "fchmod": 52,
+    "fchmodat": 53,
+    "fchown": 55,
+    "fchownat": 54,
+    "fcntl": 25,
+    "fdatasync": 83,
+    "fgetxattr": 10,
+    "finit_module": 273,
+    "flistxattr": 13,
+    "flock": 32,
+    "fremovexattr": 16,
+    "fsconfig": 431,
+    "fsetxattr": 7,
+    "fsmount": 432,
+    "fsopen": 430,
+    "fspick": 433,
+    "fstat": 80,
+    "fstatfs": 44,
+    "fsync": 82,
+    "ftruncate": 46,
+    "futex": 98,
+    "get_mempolicy": 236,
+    "get_robust_list": 100,
+    "getcpu": 168,
+    "getcwd": 17,
+    "getdents64": 61,
+    "getegid": 177,
+    "geteuid": 175,
+    "getgid": 176,
+    "getgroups": 158,
+    "getitimer": 102,
+    "getpeername": 205,
+    "getpgid": 155,
+    "getpid": 172,
+    "getppid": 173,
+    "getpriority": 141,
+    "getrandom": 278,
+    "getresgid": 150,
+    "getresuid": 148,
+    "getrlimit": 163,
+    "getrusage": 165,
+    "getsid": 156,
+    "getsockname": 204,
+    "getsockopt": 209,
+    "gettid": 178,
+    "gettimeofday": 169,
+    "getuid": 174,
+    "getxattr": 8,
+    "init_module": 105,
+    "inotify_add_watch": 27,
+    "inotify_init1": 26,
+    "inotify_rm_watch": 28,
+    "io_cancel": 3,
+    "io_destroy": 1,
+    "io_getevents": 4,
+    "io_pgetevents": 292,
+    "io_setup": 0,
+    "io_submit": 2,
+    "io_uring_enter": 426,
+    "io_uring_register": 427,
+    "io_uring_setup": 425,
+    "ioctl": 29,
+    "ioprio_get": 31,
+    "ioprio_set": 30,
+    "kcmp": 272,
+    "kexec_file_load": 294,
+    "kexec_load": 104,
+    "keyctl": 219,
+    "kill": 129,
+    "lgetxattr": 9,
+    "linkat": 37,
+    "listen": 201,
+    "listxattr": 11,
+    "llistxattr": 12,
+    "lookup_dcookie": 18,
+    "lremovexattr": 15,
+    "lseek": 62,
+    "lsetxattr": 6,
+    "madvise": 233,
+    "mbind": 235,
+    "membarrier": 283,
+    "memfd_create": 279,
+    "migrate_pages": 238,
+    "mincore": 232,
+    "mkdirat": 34,
+    "mknodat": 33,
+    "mlock": 228,
+    "mlock2": 284,
+    "mlockall": 230,
+    "mmap": 222,
+    "mount": 40,
+    "move_mount": 429,
+    "move_pages": 239,
+    "mprotect": 226,
+    "mq_getsetattr": 185,
+    "mq_notify": 184,
+    "mq_open": 180,
+    "mq_timedreceive": 183,
+    "mq_timedsend": 182,
+    "mq_unlink": 181,
+    "mremap": 216,
+    "msgctl": 187,
+    "msgget": 186,
+    "msgrcv": 188,
+    "msgsnd": 189,
+    "msync": 227,
+    "munlock": 229,
+    "munlockall": 231,
+    "munmap": 215,
+    "name_to_handle_at": 264,
+    "nanosleep": 101,
+    "newfstatat": 79,
+    "nfsservctl": 42,
+    "open_by_handle_at": 265,
+    "open_tree": 428,
+    "openat": 56,
+    "openat2": 437,
+    "perf_event_open": 241,
+    "personality": 92,
+    "pidfd_getfd": 438,
+    "pidfd_open": 434,
+    "pidfd_send_signal": 424,
+    "pipe2": 59,
+    "pivot_root": 41,
+    "pkey_alloc": 289,
+    "pkey_free": 290,
+    "pkey_mprotect": 288,
+    "ppoll": 73,
+    "prctl": 167,
+    "pread64": 67,
+    "preadv": 69,
+    "preadv2": 286,
+    "prlimit64": 261,
+    "process_madvise": 440,
+    "process_vm_readv": 270,
+    "process_vm_writev": 271,
+    "pselect6": 72,
+    "ptrace": 117,
+    "pwrite64": 68,
+    "pwritev": 70,
+    "pwritev2": 287,
+    "quotactl": 60,
+    "read": 63,
+    "readahead": 213,
+    "readlinkat": 78,
+    "readv": 65,
+    "reboot": 142,
+    "recvfrom": 207,
+    "recvmmsg": 243,
+    "recvmsg": 212,
+    "remap_file_pages": 234,
+    "removexattr": 14,
+    "renameat": 38,
+    "renameat2": 276,
+    "request_key": 218,
+    "restart_syscall": 128,
+    "rseq": 293,
+    "rt_sigaction": 134,
+    "rt_sigpending": 136,
+    "rt_sigprocmask": 135,
+    "rt_sigqueueinfo": 138,
+    "rt_sigreturn": 139,
+    "rt_sigsuspend": 133,
+    "rt_sigtimedwait": 137,
+    "rt_tgsigqueueinfo": 240,
+    "sched_get_priority_max": 125,
+    "sched_get_priority_min": 126,
+    "sched_getaffinity": 123,
+    "sched_getattr": 275,
+    "sched_getparam": 121,
+    "sched_getscheduler": 120,
+    "sched_rr_get_interval": 127,
+    "sched_setaffinity": 122,
+    "sched_setattr": 274,
+    "sched_setparam": 118,
+    "sched_setscheduler": 119,
+    "sched_yield": 124,
+    "seccomp": 277,
+    "semctl": 191,
+    "semget": 190,
+    "semop": 193,
+    "semtimedop": 192,
+    "sendfile": 71,
+    "sendmmsg": 269,
+    "sendmsg": 211,
+    "sendto": 206,
+    "set_mempolicy": 237,
+    "set_robust_list": 99,
+    "set_tid_address": 96,
+    "setdomainname": 162,
+    "setfsgid": 152,
+    "setfsuid": 151,
+    "setgid": 144,
+    "setgroups": 159,
+    "sethostname": 161,
+    "setitimer": 103,
+    "setns": 268,
+    "setpgid": 154,
+    "setpriority": 140,
+    "setregid": 143,
+    "setresgid": 149,
+    "setresuid": 147,
+    "setreuid": 145,
+    "setrlimit": 164,
+    "setsid": 157,
+    "setsockopt": 208,
+    "settimeofday": 170,
+    "setuid": 146,
+    "setxattr": 5,
+    "shmat": 196,
+    "shmctl": 195,
+    "shmdt": 197,
+    "shmget": 194,
+    "shutdown": 210,
+    "sigaltstack": 132,
+    "signalfd4": 74,
+    "socket": 198,
+    "socketpair": 199,
+    "splice": 76,
+    "statfs": 43,
+    "statx": 291,
+    "swapoff": 225,
+    "swapon": 224,
+    "symlinkat": 36,
+    "sync": 81,
+    "sync_file_range": 84,
+    "syncfs": 267,
+    "sysinfo": 179,
+    "syslog": 116,
+    "tee": 77,
+    "tgkill": 131,
+    "timer_create": 107,
+    "timer_delete": 111,
+    "timer_getoverrun": 109,
+    "timer_gettime": 108,
+    "timer_settime": 110,
+    "timerfd_create": 85,
+    "timerfd_gettime": 87,
+    "timerfd_settime": 86,
+    "times": 153,
+    "tkill": 130,
+    "truncate": 45,
+    "umask": 166,
+    "umount2": 39,
+    "uname": 160,
+    "unlinkat": 35,
+    "unshare": 97,
+    "userfaultfd": 282,
+    "utimensat": 88,
+    "vhangup": 58,
+    "vmsplice": 75,
+    "wait4": 260,
+    "waitid": 95,
+    "write": 64,
+    "writev": 66
+  },
+  "probes": [
+    {
+      "name": "close",
+      "number": 57,
+      "arguments": [
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "dup",
+      "number": 23,
+      "arguments": [
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "dup3",
+      "number": 24,
+      "arguments": [
+        -1,
+        -1,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fcntl",
+      "number": 25,
+      "arguments": [
+        -1,
+        1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fstat",
+      "number": 80,
+      "arguments": [
+        -1,
+        "buf"
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fstatfs",
+      "number": 44,
+      "arguments": [
+        -1,
+        "buf"
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fchdir",
+      "number": 50,
+      "arguments": [
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "read",
+      "number": 63,
+      "arguments": [
+        -1,
+        "buf",
+        1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "write",
+      "number": 64,
+      "arguments": [
+        -1,
+        "buf",
+        1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "pread64",
+      "number": 67,
+      "arguments": [
+        -1,
+        "buf",
+        1,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "pwrite64",
+      "number": 68,
+      "arguments": [
+        -1,
+        "buf",
+        1,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "readv",
+      "number": 65,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "writev",
+      "number": 66,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "preadv",
+      "number": 69,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "pwritev",
+      "number": 70,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "preadv2",
+      "number": 286,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "pwritev2",
+      "number": 287,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "lseek",
+      "number": 62,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "getdents64",
+      "number": 61,
+      "arguments": [
+        -1,
+        "buf",
+        4096
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "ftruncate",
+      "number": 46,
+      "arguments": [
+        -1,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fallocate",
+      "number": 47,
+      "arguments": [
+        -1,
+        0,
+        0,
+        1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fchmod",
+      "number": 52,
+      "arguments": [
+        -1,
+        384
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fchown",
+      "number": 55,
+      "arguments": [
+        -1,
+        -1,
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fsync",
+      "number": 82,
+      "arguments": [
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fdatasync",
+      "number": 83,
+      "arguments": [
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "syncfs",
+      "number": 267,
+      "arguments": [
+        -1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "flock",
+      "number": 32,
+      "arguments": [
+        -1,
+        1
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "ioctl",
+      "number": 29,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "sendfile",
+      "number": 71,
+      "arguments": [
+        -1,
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "copy_file_range",
+      "number": 285,
+      "arguments": [
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "splice",
+      "number": 76,
+      "arguments": [
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "tee",
+      "number": 77,
+      "arguments": [
+        -1,
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "vmsplice",
+      "number": 75,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fgetxattr",
+      "number": 10,
+      "arguments": [
+        -1,
+        "attr",
+        "buf",
+        4096
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "flistxattr",
+      "number": 13,
+      "arguments": [
+        -1,
+        "buf",
+        4096
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fsetxattr",
+      "number": 7,
+      "arguments": [
+        -1,
+        "attr",
+        "buf",
+        1,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "fremovexattr",
+      "number": 16,
+      "arguments": [
+        -1,
+        "attr"
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "bind",
+      "number": 200,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "connect",
+      "number": 203,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "sendmsg",
+      "number": 211,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "recvmsg",
+      "number": 212,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 9
+    },
+    {
+      "name": "io_uring_enter",
+      "number": 426,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "io_uring_register",
+      "number": 427,
+      "arguments": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "open_by_handle_at",
+      "number": 265,
+      "arguments": [
+        -1,
+        0,
+        0
+      ],
+      "recipe": "invalid-fd",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "openat",
+      "number": 56,
+      "arguments": [
+        -100,
+        "file",
+        0,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 4,
+      "errno": 0
+    },
+    {
+      "name": "newfstatat",
+      "number": 79,
+      "arguments": [
+        -100,
+        "file",
+        "buf",
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "fstatat",
+      "status": "absent-from-headers"
+    },
+    {
+      "name": "statx",
+      "number": 291,
+      "arguments": [
+        -100,
+        "file",
+        0,
+        2047,
+        "buf"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "statfs",
+      "number": 43,
+      "arguments": [
+        "file",
+        "buf"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "faccessat",
+      "number": 48,
+      "arguments": [
+        -100,
+        "file",
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "faccessat2",
+      "number": 439,
+      "arguments": [
+        -100,
+        "file",
+        0,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "readlinkat",
+      "number": 78,
+      "arguments": [
+        -100,
+        "link",
+        "buf",
+        4096
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 4,
+      "errno": 0
+    },
+    {
+      "name": "mkdirat",
+      "number": 34,
+      "arguments": [
+        -100,
+        "new",
+        448
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "unlinkat",
+      "number": 35,
+      "arguments": [
+        -100,
+        "file",
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "renameat",
+      "number": 38,
+      "arguments": [
+        -100,
+        "file",
+        -100,
+        "new"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "renameat2",
+      "number": 276,
+      "arguments": [
+        -100,
+        "file",
+        -100,
+        "new",
+        1
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "linkat",
+      "number": 37,
+      "arguments": [
+        -100,
+        "file",
+        -100,
+        "new",
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 13
+    },
+    {
+      "name": "symlinkat",
+      "number": 36,
+      "arguments": [
+        "file",
+        -100,
+        "new"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "mknodat",
+      "number": 33,
+      "arguments": [
+        -100,
+        "new",
+        4480,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "truncate",
+      "number": 45,
+      "arguments": [
+        "file",
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "fchmodat",
+      "number": 53,
+      "arguments": [
+        -100,
+        "file",
+        384
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "fchownat",
+      "number": 54,
+      "arguments": [
+        -100,
+        "file",
+        -1,
+        -1,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "utimensat",
+      "number": 88,
+      "arguments": [
+        -100,
+        "file",
+        0,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "chdir",
+      "number": 49,
+      "arguments": [
+        "directory"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "getcwd",
+      "number": 17,
+      "arguments": [
+        "buf",
+        4096
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 56,
+      "errno": 0
+    },
+    {
+      "name": "getxattr",
+      "number": 8,
+      "arguments": [
+        "file",
+        "attr",
+        "buf",
+        4096
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 61
+    },
+    {
+      "name": "lgetxattr",
+      "number": 9,
+      "arguments": [
+        "file",
+        "attr",
+        "buf",
+        4096
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 61
+    },
+    {
+      "name": "listxattr",
+      "number": 11,
+      "arguments": [
+        "file",
+        "buf",
+        4096
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 34,
+      "errno": 0
+    },
+    {
+      "name": "llistxattr",
+      "number": 12,
+      "arguments": [
+        "file",
+        "buf",
+        4096
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 34,
+      "errno": 0
+    },
+    {
+      "name": "setxattr",
+      "number": 5,
+      "arguments": [
+        "file",
+        "attr",
+        "buf",
+        1,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "lsetxattr",
+      "number": 6,
+      "arguments": [
+        "file",
+        "attr",
+        "buf",
+        1,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "removexattr",
+      "number": 14,
+      "arguments": [
+        "file",
+        "attr"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 61
+    },
+    {
+      "name": "lremovexattr",
+      "number": 15,
+      "arguments": [
+        "file",
+        "attr"
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 61
+    },
+    {
+      "name": "execve",
+      "number": 221,
+      "arguments": [
+        "missing",
+        0,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 2
+    },
+    {
+      "name": "execveat",
+      "number": 281,
+      "arguments": [
+        -100,
+        "missing",
+        0,
+        0,
+        0
+      ],
+      "recipe": "private-fixture",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 2
+    },
+    {
+      "name": "getpid",
+      "number": 172,
+      "arguments": [],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 7800,
+      "errno": 0
+    },
+    {
+      "name": "gettid",
+      "number": 178,
+      "arguments": [],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 7802,
+      "errno": 0
+    },
+    {
+      "name": "getuid",
+      "number": 174,
+      "arguments": [],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 20020085,
+      "errno": 0
+    },
+    {
+      "name": "getgid",
+      "number": 176,
+      "arguments": [],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 20020085,
+      "errno": 0
+    },
+    {
+      "name": "rt_sigaction",
+      "number": 134,
+      "arguments": [
+        10,
+        0,
+        "buf",
+        8
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "rt_sigprocmask",
+      "number": 135,
+      "arguments": [
+        0,
+        0,
+        "buf",
+        8
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "sigaltstack",
+      "number": 132,
+      "arguments": [
+        0,
+        "buf"
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 0,
+      "errno": 0
+    },
+    {
+      "name": "prctl",
+      "number": 167,
+      "arguments": [
+        3,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 1,
+      "errno": 0
+    },
+    {
+      "name": "rseq",
+      "number": 293,
+      "arguments": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "clone3",
+      "number": 435,
+      "arguments": [
+        0,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "io_uring_setup",
+      "number": 425,
+      "arguments": [
+        0,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 14
+    },
+    {
+      "name": "openat2",
+      "number": 437,
+      "arguments": [
+        -100,
+        "file",
+        0,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "mmap",
+      "number": 222,
+      "arguments": [
+        0,
+        4096,
+        3,
+        34,
+        -1,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": 412597862400,
+      "errno": 0
+    },
+    {
+      "name": "mprotect",
+      "number": 226,
+      "arguments": [
+        1,
+        4096,
+        1
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 22
+    },
+    {
+      "name": "munmap",
+      "number": 215,
+      "arguments": [
+        1,
+        4096
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 22
+    },
+    {
+      "name": "mremap",
+      "number": 216,
+      "arguments": [
+        1,
+        4096,
+        4096,
+        0
+      ],
+      "recipe": "bounded-special",
+      "exit_code": 0,
+      "status": "returned",
+      "return_value": -1,
+      "errno": 22
+    }
+  ]
+}

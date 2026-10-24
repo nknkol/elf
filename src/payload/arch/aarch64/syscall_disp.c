@@ -21,10 +21,11 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     args[4] = a[4];
     args[5] = a[5];
 
-    /* Special case: infinite loop prevention */
-    if (sys_no == SYS_write) {
-        return raw_syscall(sys_no, a[0], a[1], a[2], a[3], a[4], a[5]);
-    }
+    /* clone must run on the caller's SP, not a C/guard stack: the child may
+     * receive a different stack. entry.S performs it after guard release and
+     * context restore. No clone lifecycle virtualization is claimed yet. */
+    if (sys_no == SYS_clone)
+        return 0;
 
     return syscall_handle_common(sys_no, args);
 }
