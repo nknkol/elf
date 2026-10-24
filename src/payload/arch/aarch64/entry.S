@@ -31,6 +31,10 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_faccessat
     b.eq    slow_path
+#ifdef PROOT_PATH
+    cmp     x8, #SYS_fchdir
+    b.eq    slow_path
+#endif
     cmp     x8, #SYS_chdir
     b.eq    slow_path
     cmp     x8, #SYS_mkdirat
@@ -39,6 +43,10 @@ real_entry:
     b.eq    slow_path
     cmp     x8, #SYS_linkat
     b.eq    slow_path
+#ifdef PROOT_PATH
+    cmp     x8, #SYS_renameat2
+    b.eq    slow_path
+#endif
     cmp     x8, #SYS_renameat
     b.eq    slow_path
     cmp     x8, #SYS_fchmod

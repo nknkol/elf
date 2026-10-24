@@ -1,6 +1,9 @@
 # make ARCH=i386 SMALL=1 DEBUG=1
 
 ARCH ?= aarch64
+ifeq ($(PROOT_PATH),1)
+CPPFLAGS += -DPROOT_PATH
+endif
 
 ARCHS32 := i386
 ARCHS64 := amd64 aarch64

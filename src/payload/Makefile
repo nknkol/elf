@@ -1,3 +1,4 @@
+.DEFAULT_GOAL := all
 TARGET = payload.bin
 
 ARCH ?= aarch64
@@ -27,13 +28,27 @@ CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin
 CPPFLAGS += $(INCLUDES)
 CFLAGS += $(EXTRA_CFLAGS)
 
+# Explicit opt-in while only a subset of file syscalls is migrated.
+ifeq ($(PROOT_PATH),1)
+PROOT_SRC ?= ../../vendor/proot
+CPPFLAGS += -DPROOT_PATH -D_GNU_SOURCE -I$(PROOT_SRC)/src
+OBJ += logic/proot_bridge.o logic/proot_exec.o $(addprefix proot-build/,path_helpers.o canon_core.o resolve_core.o binding_core.o runtime.o)
+proot-build:
+	mkdir -p $@
+proot-build/%.o: $(PROOT_SRC)/src/path/%.c | proot-build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DNDEBUG -Djoin_paths=proot_join_paths -MMD -MP -c $< -o $@
+proot-build/runtime.o: $(PROOT_SRC)/svc/runtime.c | proot-build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+-include proot-build/*.d
+endif
+
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
 	@echo "Linking payload..."
 	# Note: order matters for entry point, but we use -e _start so entry.o doesn't STRICTLY need to be first,
 	# but it's good practice.
-	$(LD) -shared -Bsymbolic -e _start -o $@ $(OBJ)
+	$(LD) -shared --no-undefined -Bsymbolic -e _start -o $@ $(OBJ)
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -43,3 +58,4 @@ $(TARGET): $(OBJ)
 
 clean:
 	rm -f $(OBJ) *.o $(TARGET)
+	rm -rf proot-build

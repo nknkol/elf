@@ -2035,7 +2035,12 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	}
 	char **final_env_ptrs = clean_env_ptrs;
 	int final_envc = clean_envc;
-	if (compat_mode) {
+	int preserve_exec_env = compat_mode;
+#ifdef PROOT_PATH
+	/* A guest exec supplies its environment explicitly, including empty env. */
+	preserve_exec_env = preserve_exec_env || child_loader;
+#endif
+	if (preserve_exec_env) {
 		/* 兼容模式：保留宿主环境，再追加/覆盖 CLI 或配置注入的环境变量 */
 		int parent_envc = 0;
 		while (env && env[parent_envc])

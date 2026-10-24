@@ -1,0 +1,14 @@
+# Native build outputs
+*.o
+*.d
+__pycache__/
+/src/elfloader
+/src/payload/payload.bin
+/src/payload/proot-build/
+/src/tiny-init/tiny-init
+/src/shell/
+/test/svc_probe/*.log
+/test/svc_probe/*results.json
+/test/svc_probe/host.txt
+/test/svc_probe/mapped.txt
+/test/svc_probe/probe

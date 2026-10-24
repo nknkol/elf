@@ -8,8 +8,10 @@
 #define SYS_unlinkat     35
 #define SYS_linkat       37
 #define SYS_renameat     38
+#define SYS_renameat2    276
 #define SYS_faccessat    48
 #define SYS_chdir        49
+#define SYS_fchdir       50
 #define SYS_fchmod       52
 #define SYS_fchmodat     53
 #define SYS_fchownat     54
