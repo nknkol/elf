@@ -22,10 +22,15 @@ real_entry:
     cmp     x8, #SYS_rt_sigreturn
     b.eq    fast_path_sigreturn
 
-    /* Route every number, including unknown/future syscalls, through the C
-     * dispatcher. rt_sigreturn above is the sole original-stack exception.
-     * clone is dispatched for preflight but executed after restoring SP. */
-    b       slow_path
+    /* The stub bypasses clone before touching SP. Keep the entry bypass too
+     * for direct callers; never execute clone inside the C/guard frames. */
+    cmp     x8, #SYS_clone
+    b.eq    fast_passthrough
+
+#define SLOW_SYSCALL(n) cmp x8, n; b.eq slow_path
+#include "slow_syscalls.inc"
+#undef SLOW_SYSCALL
+    b       fast_passthrough
 
 slow_path:
     sub     sp, sp, #CTX_SIZE
@@ -82,14 +87,8 @@ slow_path:
     mov     x0, x19
     bl      reentry_leave
     mov     x0, x20
-    /* clone changes SP in the child. Its dispatcher stage is preflight only;
-     * retain original x0 (flags) for the actual original-stack syscall. */
-    ldr     x9, [sp, #64]
-    cmp     x9, #SYS_clone
-    b.eq    restore_context
     str     x0, [sp, #0]
 
-restore_context:
     /* Restore SIMD/FP */
     ldp     q30, q31, [sp, #SIMD_AREA + 480]
     ldp     q28, q29, [sp, #SIMD_AREA + 448]
@@ -125,8 +124,6 @@ restore_context:
     ldp     x2, x3,   [sp, #16]
     ldp     x0, x1,   [sp, #0]
     add     sp, sp, #CTX_SIZE
-    cmp     x8, #SYS_clone
-    b.eq    fast_passthrough
     br      x30
 
 reentry_bypass:

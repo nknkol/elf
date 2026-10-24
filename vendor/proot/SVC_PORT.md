@@ -207,13 +207,21 @@ Dynamic ELF, multithreaded exec, signal/FD lifecycle and complete auxv
 compatibility are not validated by these static tests. No raw target exec
 fallback is used. Logs: svc/build/exec-results.json.
 
-## All-number dispatch and native environment survey
+## Selective dispatch and metadata mutation
 
-The assembly selector has been replaced with all-number slow dispatch; new and
-unknown calls no longer silently miss C dispatch. rt_sigreturn retains its
-required original-stack path; clone has a preflight stage followed by an
-original-stack syscall. ABI constants now come from target headers, correcting
-rt_sigaction to 134. Ordinary passthrough calls avoid pathname scratch mmap.
-See ../../tools/syscalls/README.md for native probing limits, six measured
-SIGSYS cases, compatibility handling and assembly/runtime regression coverage.
-This expands dispatch coverage, not the set of completed VFS operations.
+An all-number slow-dispatch experiment was replaced by a shared explicit
+inventory after reviewing original stack and reentry constraints. clone and
+rt_sigreturn bypass in the stub; exit/exit_group remain outside the guard.
+See ../../docs/SYSCALL_ENGINE_LESSONS.md and ../../tools/syscalls/README.md.
+
+The experimental bridge now also handles fchmodat, fchmod, fchownat, fchown,
+utimensat, statfs, fstatfs, mknodat, truncate and ftruncate (27 calls including
+exec). Metadata mutations use kernel results rather than legacy fake success.
+Twenty native-vs-loader tests cover binds, nofollow timestamps, descriptor
+operations, errors, truncation and FIFO creation. This host reports masked
+mode bits (observed 0660 after a successful chmod 0600), so chmod checks compare
+native results; they do not establish full POSIX mode fidelity. Chown uses
+unchanged UID/GID controls, not privileged ownership changes. Descriptor
+permissions/provenance tracking and pathname races remain unresolved.
+
+Run `python3 vendor/proot/port-tests/test_modify.py` from the ELF root.

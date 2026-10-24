@@ -139,6 +139,16 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
 int proot_handles_syscall(long number)
 {
     switch (number) {
+    case SYS_fchmodat:
+    case SYS_fchownat:
+    case SYS_utimensat:
+    case SYS_fchmod:
+    case SYS_fchown:
+    case SYS_statfs:
+    case SYS_fstatfs:
+    case SYS_mknodat:
+    case __NR_truncate:
+    case __NR_ftruncate:
     case SYS_mkdirat:
     case SYS_unlinkat:
     case SYS_symlinkat:
@@ -229,6 +239,32 @@ static long mutate(Bridge *b, long number, long a[6])
 static long dispatch(Bridge *b, long number, long a[6])
 {
     long ret;
+    /* Descriptor operations retain kernel identity; FD policy is a later layer. */
+    if (number == SYS_fchmod || number == SYS_fchown ||
+        number == SYS_fstatfs || number == __NR_ftruncate)
+        return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+    if (number == SYS_statfs || number == __NR_truncate) {
+        if (!a[0]) return -EFAULT;
+        ret = resolve(b, AT_FDCWD, (const char *)a[0], true);
+        if (ret < 0) return ret;
+        return raw_syscall(number, (long)b->host, a[1], a[2], a[3], a[4], a[5]);
+    }
+    if (number == SYS_fchownat || number == SYS_utimensat) {
+        long flags = a[number == SYS_fchownat ? 4 : 3];
+        long allowed = AT_SYMLINK_NOFOLLOW;
+        if (number == SYS_fchownat) allowed |= AT_EMPTY_PATH;
+        if (flags & ~allowed) return -EINVAL;
+        /* Linux utimensat(fd, NULL, ...) is an FD operation. */
+        if (number == SYS_utimensat && !a[1])
+            return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+        if (!a[1]) return -EFAULT;
+        const char *path = (const char *)a[1];
+        if (!*path && number == SYS_fchownat && (flags & AT_EMPTY_PATH))
+            return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+        ret = resolve(b, (int)a[0], path, !(flags & AT_SYMLINK_NOFOLLOW));
+        if (ret < 0) return ret;
+        return raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
+    }
     if (number == SYS_mkdirat || number == SYS_unlinkat || number == SYS_symlinkat ||
         number == SYS_linkat || number == SYS_renameat || number == SYS_renameat2)
         return mutate(b, number, a);
@@ -262,7 +298,9 @@ static long dispatch(Bridge *b, long number, long a[6])
     if (!path)
         return -EFAULT;
     bool follow = true;
-    if (number == SYS_openat) {
+    if (number == SYS_mknodat) {
+        follow = false;
+    } else if (number == SYS_openat) {
         int flags = (int)a[2];
         follow = !(flags & O_NOFOLLOW) && !((flags & O_CREAT) && (flags & O_EXCL));
     } else if (number == SYS_readlinkat) {

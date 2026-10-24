@@ -163,7 +163,7 @@ long syscall_handle_common(long sys_no, long args[6]) {
     long ret;
     struct syscall_common_scratch *scratch = NULL;
     /* Most calls are passthrough. Do not mmap/munmap scratch for every read,
-     * write, futex or unknown syscall now that all numbers reach this layer. */
+     * write or other selected FD syscall reaching this layer. */
     switch (sys_no) {
     case SYS_getcwd: case SYS_chdir: case SYS_symlinkat: case SYS_linkat:
     case SYS_mkdirat: case SYS_mknodat: case SYS_unlinkat: case SYS_renameat:

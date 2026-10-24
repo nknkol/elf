@@ -21,11 +21,5 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     args[4] = a[4];
     args[5] = a[5];
 
-    /* clone must run on the caller's SP, not a C/guard stack: the child may
-     * receive a different stack. entry.S performs it after guard release and
-     * context restore. No clone lifecycle virtualization is claimed yet. */
-    if (sys_no == SYS_clone)
-        return 0;
-
     return syscall_handle_common(sys_no, args);
 }

@@ -42,6 +42,8 @@ proot-build/runtime.o: $(PROOT_SRC)/svc/runtime.c | proot-build
 -include proot-build/*.d
 endif
 
+$(ARCH_DIR)/entry.o: $(ARCH_DIR)/syscall_nums.h $(ARCH_DIR)/slow_syscalls.inc
+
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
