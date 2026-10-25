@@ -57,6 +57,9 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
         (build/'svc-results.json').write_text(json.dumps(results,indent=2))
         assert p.returncode==0,(name,p.stdout)
         assert f'OPEN={expected}\n' in p.stdout,(name,p.stdout)
+        if rename:
+            for operation in ['CWD_RET','FCHDIR_RET','CWD_OPEN']:
+                assert f'{operation}={expected}\n' in p.stdout,(name,p.stdout)
         if data is not None:assert f'DATA={data}\n' in p.stdout,(name,p.stdout)
         print('PASS:',name,flush=True)
     check('guest absolute path','/real/file',data='ROOT')
@@ -69,6 +72,14 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     check('directory fd','file',directory='/real',data='ROOT')
     check('bind directory fd','file',directory='/mnt',data='BOUND')
     check('directory fd survives host rename','file',directory='/old',rename='/renamed',data='RENAMED')
+    # The FD still refers to root/mnt/hidden, but /mnt maps to bound.
+    # Never silently read bound/hidden/file through that old directory FD.
+    (root/'to-hide').mkdir()
+    (root/'to-hide/file').write_text('ORIGINAL\n')
+    (bound/'hidden').mkdir()
+    (bound/'hidden/file').write_text('WRONG-OBJECT\n')
+    check('directory fd renamed behind bind is rejected','file',
+          directory='/to-hide',rename='/mnt/hidden',expected=-errno.EXDEV)
     check('nofollow final symlink','/absolute',flags=os.O_NOFOLLOW,expected=-errno.ELOOP)
     check('exclusive create on symlink','/absolute',flags=os.O_CREAT|os.O_EXCL|os.O_WRONLY,expected=-errno.EEXIST)
     check('create missing final','/created',flags=os.O_CREAT|os.O_WRONLY)

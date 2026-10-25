@@ -245,12 +245,12 @@ shell exec/pipes/background jobs, bind writes and tar roundtrip. A minimal
 source change was required for this milestone. See ../../test/alpine/README.md
 for the reproducible harness, fixture identity and remaining coverage limits.
 
-## Ubuntu glibc rootfs survey
+## Initial Ubuntu glibc rootfs survey
 
 The supplied Ubuntu 26.04.1 arm64 base image reports glibc 2.43. Sixteen of 18
 offline acceptance cases pass, including dash/bash, GNU tools, Perl, NSS local
 passwd and dpkg database reads. Rust coreutils ls/cat fail during rustix auxv
-initialization (shell status 134); the cause remains unresolved. The harness
+initialization (shell status 134); resolved by the guest auxv work below. The harness
 exits nonzero for these failures. Because native hardlinks are forbidden,
 archive hardlinks are explicitly materialized as independent file copies.
 See ../../test/ubuntu/README.md for extraction adaptations and exact scope.
@@ -263,3 +263,21 @@ Buffer size, truncation, EFAULT and reserved-argument checks have dedicated
 coverage in port-tests/test_auxv.py. Ubuntu's Rust ls/cat now pass, bringing
 its offline suite to 18/18. The /proc/self/auxv file interface is not implemented.
 See ../../test/ubuntu/AUXV_DIAGNOSIS.md for limits and the temporary-copy cost.
+
+## Directory FD and cwd visibility
+
+Reverse-mapped directory FD and cwd names must now map forward to the same
+host path. If a host-side rename moves an open directory underneath a guest
+bind overmount, openat relative to that FD, fchdir, getcwd and cwd-relative
+lookup return EXDEV rather than silently addressing the mounted directory.
+The integration test synchronizes a real host rename after guest open/chdir,
+with different file contents behind and above the mount; an ordinary rename
+remains supported. The SVC suite now has 82 cases, exec 15, and both offline
+rootfs suites retain 18/18.
+
+This is a conservative compatibility guard, not retained mount identity or a
+security boundary. Reverse alias selection still follows the existing PRoot
+precedence rules; an ambiguous name that fails the roundtrip is rejected even
+if another alias might be visible. Deleted directories, inherited FD policy,
+and races between path lookup and the final host syscall remain unfinished.
+Actual file reads/writes continue to use kernel FDs without a userspace VFS.

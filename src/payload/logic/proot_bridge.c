@@ -77,6 +77,20 @@ static int proc_link(void *opaque, char *out, const char *path,
     return -EOPNOTSUPP;
 }
 
+/* A reverse name must still denote the same host path after forward mapping.
+ * A directory renamed beneath an overmount otherwise silently switches FD
+ * identity to the mounted directory. Full retained mount/FD identity is not
+ * modeled yet: reject such names rather than traverse a different object. */
+static int visible_guest_path(Bridge *b, const char *host, char *guest)
+{
+    char mapped[PATH_MAX];
+    int rc = binding_table_map(&b->table, HOST, host, guest);
+    if (rc < 0) return rc;
+    rc = binding_table_map(&b->table, GUEST, guest, mapped);
+    if (rc < 0) return rc;
+    return strcmp(host, mapped) ? -EXDEV : 0;
+}
+
 static int host_fd(void *opaque, int fd, char *guest)
 {
     Bridge *b = opaque;
@@ -104,7 +118,7 @@ static int host_fd(void *opaque, int fd, char *guest)
     if (rc >= PATH_MAX)
         return -ENAMETOOLONG;
     host[rc] = 0;
-    return binding_table_map(&b->table, HOST, host, guest);
+    return visible_guest_path(b, host, guest);
 }
 
 static long guest_cwd(Bridge *b)
@@ -112,7 +126,7 @@ static long guest_cwd(Bridge *b)
     long ret = raw_syscall(SYS_getcwd, (long)b->host, sizeof(b->host), 0, 0, 0, 0);
     if (ret < 0)
         return ret;
-    return binding_table_map(&b->table, HOST, b->host, b->cwd);
+    return visible_guest_path(b, b->host, b->cwd);
 }
 
 static int resolve(Bridge *b, int dirfd, const char *path, bool follow)

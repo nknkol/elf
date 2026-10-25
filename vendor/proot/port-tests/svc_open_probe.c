@@ -19,9 +19,16 @@ void run(long *sp)
         dirfd=sc(56,-100,(long)argv[3],0,0,0,0);
         if(dirfd<0){text("DIR_ERROR=");num(dirfd);goto done;}
         if(argc>=5){
+            if(sc(50,dirfd,0,0,0,0,0)<0){text("CHDIR_ERROR\n");goto done;}
             text("READY\n");
             char signal;
             if(sc(63,0,(long)&signal,1,0,0,0)!=1){text("SYNC_ERROR\n");goto done;}
+            char cwd[256];long r=sc(17,(long)cwd,sizeof(cwd),0,0,0,0);
+            text("CWD_RET=");num(r<0?r:0);
+            text("FCHDIR_RET=");num(sc(50,dirfd,0,0,0,0,0));
+            r=sc(56,-100,(long)argv[1],0,0,0,0);
+            text("CWD_OPEN=");num(r<0?r:0);
+            if(r>=0)sc(57,r,0,0,0,0,0);
         }
     }
     long fd=sc(56,dirfd,(long)argv[1],parse(argv[2]),0600,0,0);
