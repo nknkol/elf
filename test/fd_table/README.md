@@ -17,3 +17,15 @@ is connected yet. Range transitions are model-only; native close_range is not
 probed by this test. Kernel events are applied manually by the harness after
 successful syscalls. A future adapter must arrange capacity and synchronization
 before exposing new FDs, and handle Linux close error semantics separately.
+
+The snapshot/transport tests compile `fd_snapshot.c` and `fd_handoff.c` directly.
+They exercise unaligned versioned buffers, CLOEXEC filtering, duplicate and
+conflicting records, short/oversized inputs and atomic failure. The exact
+transport module creates sealed memfds and restores metadata after real exec;
+a libc shim implements its raw_syscall interface. Fault injection verifies
+write/seal failure FD cleanup, read errors, EINTR and partial transfers.
+An inherited transport FD is explicitly closed by its owner after restore.
+
+The test does not accept external snapshots as trusted permissions. Seals are
+immutability, not authentication. Loader integration and live FD identity
+validation remain outstanding. No rootfs runtime behavior changes in this step.

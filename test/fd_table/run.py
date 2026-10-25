@@ -20,3 +20,21 @@ with tempfile.TemporaryDirectory(prefix='fd-table-') as temp:
                     '-I' + str(repo / 'src/payload/include'),
                     str(repo / 'test/fd_table/check.c'), str(obj), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, timeout=20)
+    snapshot_obj = Path(temp) / 'fd_snapshot.o'
+    snapshot_exe = Path(temp) / 'snapshot'
+    subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-O2', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
+                    '-I' + str(repo / 'src/payload/include'), '-c',
+                    str(repo / 'src/payload/logic/fd_snapshot.c'), '-o', str(snapshot_obj)], check=True)
+    undefined = subprocess.check_output(['llvm-nm', '--undefined-only', str(snapshot_obj)], text=True)
+    assert not undefined.strip(), undefined
+    handoff_obj = Path(temp) / 'fd_handoff.o'
+    subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-O2', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
+                    '-I' + str(repo / 'src/payload/include'), '-c',
+                    str(repo / 'src/payload/logic/fd_handoff.c'), '-o', str(handoff_obj)], check=True)
+    subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_table/snapshot.c'), str(obj), str(snapshot_obj), str(handoff_obj),
+                    '-o', str(snapshot_exe)], check=True)
+    subprocess.run([str(snapshot_exe)], check=True, timeout=20)

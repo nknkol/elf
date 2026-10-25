@@ -67,6 +67,7 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 | `src/payload/logic/proot_exec.c` | 保留配置的 exec 链 |
 | `src/payload/logic/proot_auxv.c` | guest PR_GET_AUXV |
 | `src/payload/logic/fd_table.c` | FD 元数据核心，尚未接入运行时 |
+| `src/payload/logic/fd_snapshot.c`、`fd_handoff.c` | exec 元数据快照与封存 memfd 传输，尚未接入 loader |
 | `test/fd_table/` | 元数据模型与本机内核生命周期对照 |
 | `vendor/proot/src/path/` | 从原版 PRoot 提取的共享路径核心 |
 | `vendor/proot/port-tests/` | 核心与 ELF 集成回归 |
