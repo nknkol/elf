@@ -244,3 +244,13 @@ shell exec/pipes/background jobs, bind writes and tar roundtrip. A minimal
 /dev/null bind is necessary for ash background stdin redirection. No backend
 source change was required for this milestone. See ../../test/alpine/README.md
 for the reproducible harness, fixture identity and remaining coverage limits.
+
+## Ubuntu glibc rootfs survey
+
+The supplied Ubuntu 26.04.1 arm64 base image reports glibc 2.43. Sixteen of 18
+offline acceptance cases pass, including dash/bash, GNU tools, Perl, NSS local
+passwd and dpkg database reads. Rust coreutils ls/cat fail during rustix auxv
+initialization (shell status 134); the cause remains unresolved. The harness
+exits nonzero for these failures. Because native hardlinks are forbidden,
+archive hardlinks are explicitly materialized as independent file copies.
+See ../../test/ubuntu/README.md for extraction adaptations and exact scope.

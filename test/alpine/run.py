@@ -13,7 +13,7 @@ REPO=Path(__file__).resolve().parents[2]
 BUILD=REPO/'vendor/proot/svc/build'
 
 
-def extract_root(archive, root):
+def extract_root(archive, root, *, materialize_hardlinks=False):
     # Rootfs absolute symlinks are guest paths, so tarfile's data filter rejects
     # valid BusyBox applets. Validate all member paths and create links LAST.
     # No archive member may be written through a symlink, even a later one.
@@ -25,7 +25,7 @@ def extract_root(archive, root):
             if path.is_absolute() or '..' in path.parts or path in seen:
                 raise ValueError(f'Unsafe or duplicate archive member: {member.name}')
             seen.add(path)
-            if not (member.isdir() or member.isfile() or member.issym()):
+            if not (member.isdir() or member.isfile() or member.issym() or (materialize_hardlinks and member.islnk())):
                 raise ValueError(f'Unsupported archive member type: {member.name}')
             if member.issym(): links.add(path)
             total+=member.size
@@ -34,6 +34,15 @@ def extract_root(archive, root):
             path=PurePosixPath(member.name)
             if any(parent in links for parent in path.parents):
                 raise ValueError(f'Archive member beneath a symlink: {member.name}')
+        regular={PurePosixPath(m.name):m for m in members if m.isfile()}
+        hardlinks=[m for m in members if m.islnk()]
+        expanded=total
+        for member in hardlinks:
+            target=PurePosixPath(member.linkname)
+            if target.is_absolute() or '..' in target.parts or target not in regular:
+                raise ValueError(f'Hardlink must target an archive regular file: {member.name}')
+            expanded+=regular[target].size
+        if expanded>2*1024*1024*1024:raise ValueError('Expanded hardlink fixture exceeds 2 GiB')
         for member in members:
             dest=root/PurePosixPath(member.name)
             if member.isdir():dest.mkdir(parents=True,exist_ok=True)
@@ -42,6 +51,15 @@ def extract_root(archive, root):
                 with tar.extractfile(member) as src,dest.open('xb') as out:
                     shutil.copyfileobj(src,out)
                 dest.chmod(member.mode & 0o777)
+        # The host denies hardlink creation. Explicit opt-in materializes file
+        # bytes; this fixture cannot validate shared-inode/hardlink semantics.
+        for member in hardlinks:
+            target=PurePosixPath(member.linkname)
+            dest=root/PurePosixPath(member.name)
+            dest.parent.mkdir(parents=True,exist_ok=True)
+            with (root/target).open('rb') as src,dest.open('xb') as out:
+                shutil.copyfileobj(src,out)
+            dest.chmod(regular[target].mode & 0o777)
         for member in members:
             if member.issym():
                 dest=root/PurePosixPath(member.name)

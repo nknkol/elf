@@ -23,6 +23,22 @@ class ExtractionTests(unittest.TestCase):
             extract_root(archive,dest)
             self.assertEqual((dest/'bin/sh').readlink(),Path('/bin/busybox'))
             self.assertEqual((dest/'bin/busybox').read_text(),'fixture')
+    def test_opt_in_hardlink_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);dest=root/'root';dest.mkdir()
+            archive=self.archive(root,[('alias','hard','original'),('original','file','bytes')])
+            extract_root(archive,dest,materialize_hardlinks=True)
+            self.assertEqual((dest/'alias').read_bytes(),b'bytes')
+            self.assertFalse((dest/'alias').is_symlink())
+
+    def test_hardlink_target_must_be_archive_regular_file(self):
+        for target in ('../escape','/etc/passwd','absent','symlink'):
+            with self.subTest(target=target),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);dest=root/'root';dest.mkdir()
+                archive=self.archive(root,[('alias','hard',target),('symlink','link','original'),('original','file','x')])
+                with self.assertRaises(ValueError):extract_root(archive,dest,materialize_hardlinks=True)
+                self.assertEqual(list(dest.iterdir()),[])
+
     def test_reject_unsafe_archives_before_writing(self):
         cases=[ [('../escape','file','x')], [('/absolute','file','x')],
                [('dir','link','/tmp'),('dir/escape','file','x')],
