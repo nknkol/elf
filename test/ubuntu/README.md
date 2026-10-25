@@ -28,10 +28,11 @@ compatibility or a multithreaded glibc validation.
 
 Both `/usr/bin/ls` and `/usr/bin/cat` resolve to this image's Rust coreutils.
 They panic at rustix `backend/linux_raw/param/auxv.rs:269`, with Result::unwrap
-receiving Err(()), and the shell reports status 134. Root cause is unresolved:
-the message identifies auxv initialization but does not alone distinguish a
-missing proc interface from incompatible auxiliary-vector contents or another
-loader issue. Do not label all glibc programs unsupported or hide these failures.
+receiving Err(()), and the shell reports status 134. Targeted probes now show
+PR_GET_AUXV returns EINVAL and /proc/self/auxv is absent. A diagnostic host-auxv
+binding removes the panic but exposes loader identity, so it is not a valid
+fix. See [auxv diagnosis](AUXV_DIAGNOSIS.md) for faultlogger correlation and
+controlled results. Guest auxv virtualization remains unimplemented.
 
 ## Extraction adaptation
 
