@@ -248,3 +248,19 @@ transaction, preparation rejection, kernel failure, child-first return, live
 callback retention, abandoned parent/child and unknown-child retention. Separate
 fixtures pause cleanup while filling the pool, reenter from cleanup, and kill a
 finalizer; the last case retains capacity rather than retrying destruction.
+
+
+## FD clone snapshot integration fixture
+
+The new `fd_clone.c` transaction prepares a copied table or explicit shared
+reference before clone and publishes a single child identity idempotently from
+either return. Real callbacks test six native host modes in both publication
+orders against actual CLOEXEC and close effects. Source stability, arena storage,
+registry ownership, TID reuse and arbitrary concurrent mutations remain caller
+responsibilities; the module is not enabled in the default payload.
+
+Extending the register fixture to CLONE_THREAD exposed child x29=0 on this host.
+A separate libc-free native clone probe reproduces it without the ELF engine.
+The FD clone fixture checks that native behavior before expecting zero only for
+thread children. Existing non-thread register tests remain unchanged, and the
+production trampoline still restores the kernel-returned context.

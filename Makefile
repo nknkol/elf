@@ -17,6 +17,7 @@ check: build
 	$(PYTHON) test/fd_table/run.py
 	$(PYTHON) test/fd_table/check_clone.py
 	$(PYTHON) test/fd_table/check_notify.py
+	$(PYTHON) test/fd_table/check_fd_clone.py
 	$(PYTHON) test/fd_table/check_payload_abi.py
 	$(MAKE) -C vendor/proot/svc check
 	$(PYTHON) vendor/proot/port-tests/test_svc.py

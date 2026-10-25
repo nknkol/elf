@@ -63,3 +63,12 @@ Dedicated modes pause cleanup while exhausting capacity, reenter cleanup, and
 exit inside cleanup to verify that destruction is not retried. They do not
 establish process-local FD cleanup or recovery of abandoned initialization,
 reaper pins or finalizers.
+
+`check_fd_clone.py` connects `fd_clone.c` and `fd_table.c` to the real clone
+notification assembly in a dedicated harness. Six host modes each run parent-
+and child-first publication. Actual CLOEXEC/close effects are compared with
+snapshot/shared metadata; capacity errors, identity conflicts, failed clones and
+rejected preparation are covered. A native SVC probe verifies this host's child
+thread x29 reset before enabling that fixture expectation. This test is host-
+specific, not a portable inference of CLONE_FILES semantics. It does not enable
+payload FD interception, global task registration or concurrent FD mutations.

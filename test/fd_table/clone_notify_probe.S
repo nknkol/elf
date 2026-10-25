@@ -13,6 +13,9 @@ notify_clone:
     stp x26, x27, [sp, #64]
     stp x28, x29, [sp, #80]
     str x30, [sp, #96]
+#ifdef HOST_THREAD_FP_ZERO
+    str x0, [sp, #104]
+#endif
     stp q8, q9, [sp, #112]
     stp q10, q11, [sp, #144]
     stp q12, q13, [sp, #176]
@@ -154,8 +157,19 @@ verify:
     b.ne failure
     cmp x28, #128
     b.ne failure
+#ifdef HOST_THREAD_FP_ZERO
+    cbnz x0, parent_fp
+    ldr x9, [x20, #104]
+    tbz x9, #16, parent_fp
+    cbnz x29, failure
+    b checked_fp
+parent_fp:
+#endif
     cmp x29, #129
     b.ne failure
+#ifdef HOST_THREAD_FP_ZERO
+checked_fp:
+#endif
     cmp x30, #130
     b.ne failure
     mrs x9, fpcr

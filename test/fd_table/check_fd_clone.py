@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Real notification callbacks with FD snapshots; not payload FD interception."""
+import subprocess
+import tempfile
+from pathlib import Path
+repo = Path(__file__).resolve().parents[2]
+with tempfile.TemporaryDirectory(prefix='fd-clone-') as temp:
+    exe = Path(temp) / 'probe'
+    native = Path(temp) / 'native-fp'
+    subprocess.run(['clang', '-nostdlib', '-static', str(repo / 'test/fd_table/thread_fp.S'),
+                    '-o', str(native)], check=True)
+    subprocess.run([str(native)], check=True, timeout=5)
+    files = ['test/fd_table/clone_fd_test.c', 'test/fd_table/clone_notify_probe.S',
+             'src/payload/arch/aarch64/clone_entry.S', 'src/payload/logic/clone_notify.c',
+             'src/payload/logic/fd_table.c', 'src/payload/logic/fd_clone.c']
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror', '-Wl,-no-pie', '-DHOST_THREAD_FP_ZERO',
+                    '-I' + str(repo / 'src/payload/include'),
+                    *[str(repo / f) for f in files], '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True, timeout=30)

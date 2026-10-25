@@ -118,6 +118,25 @@ cleanup 可在任意继承进程运行，因此 cookie 必须指向继承后仍�
 这完成了共享元数据的退役接口；FD 表快照的实际分配、登记和进程资源管理仍未接入。
 详见 [syscall 经验](SYSCALL_ENGINE_LESSONS.md#dedicated-clone-notification-path-proot-payload-abi-3)。
 
+## 已完成：clone 前 FD 快照与单事务身份发布
+
+`fd_clone.c` 提供无分配的事务模块：prepare 在 clone 前按明确 COPY/SHARE 模式
+复制元数据或引用同一张表；父子用同一子 TID 幂等发布，身份冲突返回 EEXIST，
+未发布或身份不匹配的查找返回空。复制容量不足时不发布事务、不修改目的表。
+它不根据 CLONE_FILES 猜测本机共享行为，也不提供全局 PID/TID 登记表。
+
+`check_fd_clone.py` 将该模块、FD 表和生产 clone 通知汇编接在真实回调中测试。
+六种本机 clone 组合各覆盖父先/子先登记：父在内核 clone 返回后修改 CLOEXEC，
+子核对克隆前快照或共享表，并实际关闭 FD；父核对内核状态和元数据可见性。
+准备拒绝、内核失败、身份冲突、容量不足和 cookie 清理后的已接管表也有覆盖。
+线程 fixture 的 x29 清零预期由独立原生 SVC 探针先验证，不改变生产寄存器恢复逻辑。
+
+模块尚未链接到默认 payload：这是实际 clone 回调中的集成验证，不是已启用的
+FD syscall 跟踪。事务仅覆盖单次 clone，TID 不构成持久身份。还需共享 arena 的
+容量/所有权管理、全局任务登记与退出/TID 复用、FD 操作同步和 exec 交接。
+源码表在 prepare 复制时必须稳定；该测试用显式握手串行化操作，没有解决任意
+并发 close/open 与 clone 的一致性。清理 cookie 不得释放已被子任务接管的表。
+
 ## 下一阶段：运行时身份与生命周期接入
 
 引入单独的描述符元数据模块，保存 guest 挂载 ID、访问权限、FD 代次与共享打开描述身份。
