@@ -14,6 +14,7 @@ help:
 build:
 	$(PYTHON) vendor/proot/svc/build_elf.py
 check: build
+	$(PYTHON) test/fd_table/run.py
 	$(MAKE) -C vendor/proot/svc check
 	$(PYTHON) vendor/proot/port-tests/test_svc.py
 	$(PYTHON) vendor/proot/port-tests/test_modify.py

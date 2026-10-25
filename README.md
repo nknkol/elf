@@ -31,7 +31,7 @@ Clang、ld.lld、llvm-objcopy、llvm-ar、llvm-nm 及本地 Linux ABI 头文件�
 - `vendor/proot/svc/build/elf-build.log`：编译日志。
 
 `make check` 先构建，再运行路径核心、SVC 文件操作、exec、auxv、路由、重入保护、
-运行时 syscall 和配置/解包测试。测试失败会使 make 返回非零。
+运行时 syscall、FD 元数据核心和配置/解包测试。测试失败会使 make 返回非零。
 不要同时在不同终端构建两种后端，它们共用 `src/` 下的中间产物。
 
 ## 运行已有 rootfs
@@ -66,6 +66,8 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 | `src/payload/logic/proot_bridge.c` | syscall 参数适配、路径和目录 FD 解析 |
 | `src/payload/logic/proot_exec.c` | 保留配置的 exec 链 |
 | `src/payload/logic/proot_auxv.c` | guest PR_GET_AUXV |
+| `src/payload/logic/fd_table.c` | FD 元数据核心，尚未接入运行时 |
+| `test/fd_table/` | 元数据模型与本机内核生命周期对照 |
 | `vendor/proot/src/path/` | 从原版 PRoot 提取的共享路径核心 |
 | `vendor/proot/port-tests/` | 核心与 ELF 集成回归 |
 | `test/syscalls/` | 沙盒 syscall 行为、分流和重入验证 |
