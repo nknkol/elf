@@ -210,8 +210,9 @@ fallback is used. Logs: svc/build/exec-results.json.
 ## Selective dispatch and metadata mutation
 
 An all-number slow-dispatch experiment was replaced by a shared explicit
-inventory after reviewing original stack and reentry constraints. clone and
-rt_sigreturn bypass in the stub; exit/exit_group remain outside the guard.
+inventory after reviewing original stack and reentry constraints. rt_sigreturn
+bypasses in the stub; exit/exit_group remain outside the guard. PRoot clone now
+uses a dedicated notification path that restores original SP before SVC (below).
 See ../../docs/SYSCALL_ENGINE_LESSONS.md and ../../tools/syscalls/README.md.
 
 The experimental bridge now also handles fchmodat, fchmod, fchownat, fchown,
@@ -281,3 +282,19 @@ precedence rules; an ambiguous name that fails the roundtrip is rejected even
 if another alias might be visible. Deleted directories, inherited FD policy,
 and races between path lookup and the final host syscall remain unfinished.
 Actual file reads/writes continue to use kernel FDs without a userspace VFS.
+
+## Clone notification foundation
+
+The generated PRoot stub now enters a separate clone trampoline. It invokes
+before/finish observer seams while executing clone itself on the original SP,
+with the original flags and child stack. Parent and child finish on their own
+stacks; shared-VM context cleanup is atomic. Current observers are no-ops: FD
+metadata and permission enforcement are not connected. Payload ABI 3 is required
+and mismatched custom payloads are rejected before guest startup.
+
+`test/fd_table/check_notify.py` covers real callbacks, register/stack/FP state,
+NULL and new stacks, vfork, child-first order, failures and concurrent calls.
+`check_clone.py` retains all six native/loader comparisons, reporting three
+host FD-sharing deviations separately. Alpine and Ubuntu retain 18/18 offline
+acceptance. See ../../docs/SYSCALL_ENGINE_LESSONS.md for stack requirements,
+per-clone allocation cost and abnormal-exit reclamation limits.

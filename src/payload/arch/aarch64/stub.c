@@ -1,6 +1,11 @@
 #include <stddef.h>
 #include "stub.h"
 
+#ifdef PROOT_PATH
+_Static_assert(PAYLOAD_CLONE_ENTRY_OFFSET == 16 && STUB_CLONE_RESUME_OFFSET == 100 &&
+               STUB_DATA_OFFSET == 160, "update clone stub instruction encoding");
+#endif
+
 static uint32_t make_branch(uintptr_t src, uintptr_t dest)
 {
 	int64_t offset = (int64_t)dest - (int64_t)src;
@@ -61,6 +66,22 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
 	uint32_t *code = (uint32_t *)slot;
 	for (size_t i = 0; i < sizeof(tmpl) / sizeof(tmpl[0]); i++)
 		code[i] = tmpl[i];
+
+#ifdef PROOT_PATH
+    /* Separate clone entry restores the original SP before SVC and returns
+     * through a stack-independent continuation on either parent/child stack. */
+    code[4] = 0x540001c0; /* b.eq clone path at word 18 */
+    code[18] = 0xd10083ff; /* sub sp, sp, #32 */
+    code[19] = 0xa90047f0; /* stp x16, x17, [sp] */
+    code[20] = 0xf9000bfe; /* str x30, [sp, #16] */
+    code[21] = 0x10000270; /* adr x16, data at word 40 */
+    code[22] = 0xf9400211; /* ldr x17, [x16] */
+    code[23] = 0x91004231; /* add x17, x17, #16 (payload clone entry) */
+    code[24] = 0xd61f0220; /* br x17, preserving original LR */
+    code[25] = 0xd503249f; /* bti j */
+    code[26] = 0xa8c147f0; /* ldp x16, x17, [sp], #16 */
+    code[27] = make_branch((uintptr_t)slot + 27 * 4, return_addr);
+#endif
 
 	uint32_t branch = make_branch((uintptr_t)slot + 15 * 4, return_addr);
 	if (branch)

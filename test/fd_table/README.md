@@ -42,3 +42,12 @@ these three host deviations explicitly while requiring native/loader parity.
 Use `--strict-linux` to fail on the deviations. The default passing result is
 compatibility parity, not full Linux clone conformance or metadata integration.
 The report is `vendor/proot/svc/build/clone-fd-results.json` (ignored by Git).
+
+`check_notify.py` links the production clone assembly and transaction manager
+with observable callbacks. It uses real clone, separate and inherited stacks,
+vfork, forced child-first notification, kernel errors, observer rejection,
+allocation failure and 64 clones from four concurrent callers. Register, SP,
+SIMD and FP state preservation are checked in assembly. This validates the
+runtime notification seam; it does not validate an FD metadata manager.
+`check_payload_abi.py` checks v3 custom payload startup and rejects v2/invalid
+versions before guest execution. Both checks are included in `make check`.

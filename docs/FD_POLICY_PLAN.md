@@ -34,7 +34,7 @@ fork 与 exec，与模型事件对照。它不是 loader/SVC 集成测试，尚�
 真实 close_range（仅有范围状态转换测试）。`make check` 已纳入这个测试入口。
 
 核心暂不链接到 payload，不存在已启用的权限或 FD 跟踪开关。运行时接入的阻塞点是：
-clone 当前在不碰栈的快速路径执行，没有复制/共享 FD 表通知；exec 元数据交接模块尚未连接到 loader；
+clone 专用通知入口已接通，但尚未连接 FD 快照/登记；exec 元数据交接模块尚未连接到 loader；
 内嵌 loader 和 payload 内部 FD 也需要区分。不能直接挂一张全局表或简单照搬重入表的
 共享映射，否则 fork 独立 FD 表会相互污染。
 
@@ -57,7 +57,7 @@ CLOEXEC 排除、失败 exec 原表保持和传输 FD 清理。注入 write/seal
 
 这两个模块尚未链接到 loader/payload，CLI 没有新增可接受权限快照的选项。
 实际 exec 链还需接入可信交接通道、内部 FD 管理、同步及所有错误出口清理；clone
-复制/共享通知也仍待实现。测试通过不表示这些运行时环节已经接通。
+通知已运行，但复制/共享 FD 表登记仍待实现。测试通过不表示这些运行时环节已经接通。
 
 ## 本机 clone 语义实测（2026-10-25）
 
@@ -88,7 +88,21 @@ CLOEXEC 排除、失败 exec 原表保持和传输 FD 清理。注入 write/seal
 CLONE_VM 共享的全局指针。本机观察更接近按进程共享 FD 表，但仅按 PID 惰性复制也不
 充分：父进程可能在子进程首次进入 hook 前修改表。仍需要 clone 前快照/登记、结果通知、
 目标环境的明确能力策略及同步协议。对不支持的组合，未来权限模式应明确拒绝或完整适配，
-不能让元数据共享关系与实际 FD 表不同。尚未实现这些通知，不启用权限执行。
+不能让元数据共享关系与实际 FD 表不同。专用通知入口已实现，FD 状态交接尚未连接，不启用权限执行。
+
+## 已完成：运行时 clone 通知入口
+
+PRoot 的生成 stub 已接到 `clone_entry.S` / `clone_notify.c`，在 clone 前准备独立上下文，
+恢复原始 SP 后执行 syscall，再由父子各自在自己的栈上执行 finish。回调提供 flags、
+父 PID/TID、cookie 和内核结果，允许子进程先返回；内核失败只有父侧 finish。
+当前默认回调为空，未改变 FD 表归属或权限。before 失败不执行 clone，调用方自行回收
+其未发布的 cookie；未来 finish 必须使用事前保留的资源，不依赖可失败的事后分配。
+
+载荷 ABI 升为 3；loader 在启动 guest 前拒绝版本不匹配的自定义 payload。
+`check_notify.py` 验证真实 clone 通知、寄存器/栈恢复、失败清理和并发调用，
+`check_payload_abi.py` 验证版本匹配与拒绝。六种原生/loader 对照与两套 rootfs 回归仍通过。
+共享 VM 的子任务在通知前异常死亡可能留下上下文映射，非局部跳转/退出与事件回收仍需处理。
+详见 [syscall 经验](SYSCALL_ENGINE_LESSONS.md#dedicated-clone-notification-path-proot-payload-abi-3)。
 
 ## 下一阶段：运行时身份与生命周期接入
 

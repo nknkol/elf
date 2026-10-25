@@ -4,6 +4,7 @@
     .extern g_payload_config
 
 #include "syscall_nums.h"
+#include "stub.h"
 
 /* Stack layout */
 .equ    CTX_SIZE,       768     /* GPRs (0..255) + SIMD (256..767) */
@@ -15,15 +16,20 @@ _start:
     /* Payload Header: used by loader to find config block */
     .word   0x484F4F4B          /* Magic: "HOOK" */
     .word   g_payload_config - _start /* Offset to config struct */
-    .word   0x2                 /* Version: 2 (multi-point / stub-based) */
+    .word   PAYLOAD_ABI_VERSION /* PRoot v3 adds a fixed clone gate at +16. */
 
+#ifdef PROOT_PATH
+    /* Fixed offset 16, used only by the dedicated clone stub. */
+    b clone_entry
+#endif
 real_entry:
     /* rt_sigreturn must see the original user stack; bypass */
     cmp     x8, #SYS_rt_sigreturn
     b.eq    fast_path_sigreturn
 
-    /* The stub bypasses clone before touching SP. Keep the entry bypass too
-     * for direct callers; never execute clone inside the C/guard frames. */
+    /* Direct entry callers keep raw clone. PRoot generated stubs use the
+     * separate notification gate; legacy stubs bypass before touching SP.
+     * Never execute clone inside the ordinary dispatcher/guard C frames. */
     cmp     x8, #SYS_clone
     b.eq    fast_passthrough
 

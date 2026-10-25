@@ -27,7 +27,7 @@ for name in ('openat', 'read', 'write', 'fchmodat', 'io_uring_enter', 'openat2')
 with tempfile.TemporaryDirectory() as temp:
     obj = Path(temp)/'entry.o'
     exe = Path(temp)/'probe'
-    subprocess.run(['clang', '-c', '-D_start=hook_entry', '-I'+str(arch), str(arch/'entry.S'), '-o', str(obj)], check=True)
+    subprocess.run(['clang', '-c', '-D_start=hook_entry', '-I'+str(root/'src/payload/include'), '-I'+str(arch), str(arch/'entry.S'), '-o', str(obj)], check=True)
     subprocess.run(['clang', '-nostdlib', '-static', '-Wl,-e,_start', '-I'+str(arch), str(obj), str(root/'test/syscalls/dispatch_probe.S'), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, timeout=10)
 print(f'PASS: ABI constants, {len(selected)} selected slow calls, fast getpid/unknown and exit routing')

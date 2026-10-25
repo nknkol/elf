@@ -24,6 +24,7 @@ make check
 Clang、ld.lld、llvm-objcopy、llvm-ar、llvm-nm 及本地 Linux ABI 头文件；构建会使用
 `/bin/sh`。未验证其他架构，也不自动安装依赖。
 
+当前 PRoot payload ABI 为 3，自定义 payload 必须与 loader 匹配，否则启动时拒绝。
 构建入口强制重编译 loader/payload，通过临时文件替换可执行文件，生成：
 
 - `vendor/proot/svc/build/elfloader-proot`：运行工具。
@@ -64,7 +65,7 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 | 位置 | 职责 |
 | --- | --- |
 | `src/loader.c` | ELF 加载、配置、guest 启动栈 |
-| `src/payload/arch/aarch64/` | SVC 补丁、分流和重入保护 |
+| `src/payload/arch/aarch64/` | SVC 补丁、分流、重入保护和 clone 专用通知入口 |
 | `src/payload/logic/proot_bridge.c` | syscall 参数适配、路径和目录 FD 解析 |
 | `src/payload/logic/proot_exec.c` | 保留配置的 exec 链 |
 | `src/payload/logic/proot_auxv.c` | guest PR_GET_AUXV |

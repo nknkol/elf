@@ -33,9 +33,11 @@ Native/loader clone success validated the existing stub bypass instead.
 
 The replacement keeps an explicit `slow_syscalls.inc` inventory. Existing
 handled calls and filesystem/FD/mapping/namespace interfaces enter the C layer;
-ordinary unrelated calls and unknown numbers remain fast passthrough. clone
-and rt_sigreturn retain the original-stack stub paths. exit/exit_group remain
-outside the guard. There is no clone policy preflight at present.
+ordinary unrelated calls and unknown numbers remain fast passthrough. rt_sigreturn
+retains its original-stack bypass; exit/exit_group remain outside the guard.
+PRoot clone now uses a dedicated original-SP notification path (see below),
+not the ordinary C dispatcher. Legacy clone retains its original stub bypass.
+No FD permission policy is enabled by these notifications.
 
 The inventory is routing, not a support or security allowlist. Adding read,
 write or other blocking FD calls also lengthens the period with depth=1;
@@ -163,3 +165,42 @@ in surviving processes. SIGKILL, nonlocal signal exits and safe dead-owner
 reclamation are unresolved; no liveness guarantee is made for those cases.
 The mapping lives until all inheritors unmap it or exit; exec installs a new
 payload and guard. Performance and full CLONE_VM lifecycle remain unbenchmarked.
+
+## Dedicated clone notification path (PRoot payload ABI 3)
+
+The generated PRoot clone stub enters a separate gate at payload entry +16.
+`clone_entry.S` saves GPR/SIMD/FP state, prepares a per-call shared transaction,
+then restores registers and the original guest SP BEFORE executing clone SVC.
+Only x9 temporarily carries the transaction pointer across the kernel call;
+it is restored before the guest continues. Clone arguments, including child SP,
+flags, TLS and TID pointers, are not rewritten.
+
+After SVC, each returning task uses its own current stack for notification.
+It never returns through a parent's saved C frames on the child's new stack.
+The stub-local direct branch restores x16/x17 and original SP without sacrificing
+a register for the guest return address. rt_sigreturn still bypasses all frames.
+Direct payload-entry clone callers and legacy stubs retain their old bypass;
+only generated PRoot stubs use the notification gate.
+
+`clone_notify.c` supplies before/finish observer seams. They are no-ops in the
+current runtime, not FD snapshot publication or permission checks. Before may
+reject with negative errno, without executing clone. A successful clone may
+notify child first; a kernel error only notifies the original caller. Shared
+VMs release the transaction with an atomic count; copied VMs each unmap their
+own inherited mapping. Do not infer FD sharing from this VM cleanup rule.
+
+Tests execute the real assembly and observers with NULL/new child stacks,
+vfork, intentional child-first notification, kernel error, preparation rejection,
+allocation failure and four simultaneous callers (64 clones). They verify SP,
+x2-x19/x22-x30, preserved child-SP and parent-SP values, every SIMD lane, FPCR
+and FPSR; raw syscall return x0 is checked by the caller. The generated stub
+is separately covered by the six native/loader clone scenarios. ABI tests
+accept a v3 custom payload and reject v2/invalid versions before guest startup.
+
+Costs/limits: one shared page per in-flight clone, no pooling or benchmark yet.
+Notifications use about 800 bytes of assembly context plus C stack on each
+returning task, requiring an ABI-aligned usable stack; arbitrary tiny/unaligned
+raw-clone stacks are not validated. A task dying or escaping nonlocally before
+its shared-VM notification can strand a transaction. Abnormal-exit reclamation,
+FD snapshot consistency, process registration and exec handoff remain required
+before enabling FD policy. This is not a security-boundary fix.

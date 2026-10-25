@@ -21,6 +21,7 @@
 #include "arch.h"
 #include "hook.h"
 #include "config.h"
+#include "stub.h"
 
 #ifndef AT_FDCWD
 #define AT_FDCWD (-100)
@@ -904,6 +905,8 @@ static payload_config_t *locate_payload_config(void *payload_entry)
 	payload_header_t *hdr = (payload_header_t *)(base + 4); /* skip branch */
 	if (hdr->magic != CONFIG_MAGIC || hdr->config_off == 0)
 		return NULL;
+	if (hdr->version != PAYLOAD_ABI_VERSION)
+		z_errx(1, "payload ABI mismatch; rebuild loader and payload together");
 	return (payload_config_t *)(base + hdr->config_off);
 }
 
