@@ -29,3 +29,16 @@ An inherited transport FD is explicitly closed by its owner after restore.
 The test does not accept external snapshots as trusted permissions. Seals are
 immutability, not authentication. Loader integration and live FD identity
 validation remain outstanding. No rootfs runtime behavior changes in this step.
+
+`python3 test/fd_table/check_clone.py` separately runs a freestanding SVC probe
+both natively and through the built ELF loader. Six VM/FILES/THREAD combinations
+check close, CLOEXEC, new descriptors, shared file offsets, PID and memory.
+Parent/child synchronization checks visibility before child exit. Ordinary
+processes are reaped; threads use CHILD_CLEARTID and exit rather than exit_group.
+
+On the tested terminal sandbox, non-thread CLONE_FILES requests still copy the
+FD table, and threads without CLONE_FILES still share it. Default mode reports
+these three host deviations explicitly while requiring native/loader parity.
+Use `--strict-linux` to fail on the deviations. The default passing result is
+compatibility parity, not full Linux clone conformance or metadata integration.
+The report is `vendor/proot/svc/build/clone-fd-results.json` (ignored by Git).

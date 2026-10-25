@@ -39,7 +39,8 @@ void fd_table_close(struct fd_table *, int fd);
 int fd_table_range(struct fd_table *, unsigned first, unsigned last, int cloexec);
 void fd_table_exec(struct fd_table *);
 /* Snapshot into an initialized, empty table with disjoint storage. Used for
- * copied FD tables; CLONE_FILES requires the SAME table instead. IDs are local
+ * copied kernel FD tables; actual shared kernel tables require the SAME table.
+ * Do not infer sharing solely from clone flags on this host. IDs are local
  * to a table lineage, not globally unique between independent fork branches. */
 int fd_table_copy(struct fd_table *destination, const struct fd_table *source);
 #endif

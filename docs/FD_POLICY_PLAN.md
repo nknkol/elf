@@ -26,7 +26,8 @@ bind 打开，已打开的 FD 也可能在重命名、删除后继续有效。
 容量不足返回 ENOSPC、代次溢出返回 EOVERFLOW，错误不修改原状态。
 返回记录指针只在调用方保持独占访问且没有修改表时有效；代次只描述 FD 分配生命周期，
 不替代同步。跨 fork 分支的身份编号不是全局唯一，不可合并独立表。
-复制目标必须是初始化后未使用的独立存储；CLONE_FILES 必须共享同一张表，而不是复制。
+复制目标必须是初始化后未使用的独立存储；实际共享内核 FD 表时应使用同一张表，而不是复制。
+不能仅按 CLONE_FILES 推断本机行为，见下方 clone 实测。
 
 `python3 test/fd_table/run.py` 测试模型边界，并实际运行内核 dup/dup3/fcntl、共享偏移、
 fork 与 exec，与模型事件对照。它不是 loader/SVC 集成测试，尚未验证并发操作或
@@ -57,6 +58,37 @@ CLOEXEC 排除、失败 exec 原表保持和传输 FD 清理。注入 write/seal
 这两个模块尚未链接到 loader/payload，CLI 没有新增可接受权限快照的选项。
 实际 exec 链还需接入可信交接通道、内部 FD 管理、同步及所有错误出口清理；clone
 复制/共享通知也仍待实现。测试通过不表示这些运行时环节已经接通。
+
+## 本机 clone 语义实测（2026-10-25）
+
+`test/fd_table/check_clone.py` 通过普通 SVC，分别直接运行和经 ELF loader 运行六种组合。
+子线程/进程修改 FD 后通过共享内存和 futex 握手，在它退出之前检查关闭、F_SETFD 和
+新增 FD 是否可见；同时检查共享打开描述的偏移、VM 标记和 PID。子任务使用独立栈，
+线程用 exit 而不是 exit_group，并通过 CHILD_CLEARTID 等待退出。
+
+| 请求 | 本机观察的 FD 表 | VM | 与 CLONE_FILES 预期一致 |
+| --- | --- | --- | --- |
+| 普通 fork 式 clone | 复制 | 复制 | 是 |
+| CLONE_FILES，无 CLONE_VM/THREAD | 复制 | 复制 | 否 |
+| CLONE_VM，无 CLONE_FILES/THREAD | 复制 | 共享 | 是 |
+| CLONE_VM + CLONE_FILES，无 THREAD | 复制 | 共享 | 否 |
+| CLONE_THREAD + VM + SIGHAND + FILES | 共享 | 共享 | 是 |
+| CLONE_THREAD + VM + SIGHAND，无 FILES | 共享 | 共享 | 否 |
+
+六种情况下 loader 均与 native 输出一致，且复制 FD 表时打开描述的文件偏移仍共享。
+这仅描述当前终端沙盒上的实测，不将差异归因于某个尚未定位的内核/沙盒组件，也不能
+推广为所有 HarmonyOS 或 Linux 系统的规则。没有因此修改 guest clone 标志。
+
+默认测试检查 loader 与 native 一致，并将上述已知 host deviation 单独报告；
+`python3 test/fd_table/check_clone.py --strict-linux` 会对三种语义差异返回非零。
+`make check` 使用兼容性对照模式，不能把其成功解释为全部 Linux clone 语义通过。
+完整即时输出写入忽略的 `vendor/proot/svc/build/clone-fd-results.json`。
+
+运行时设计需调整：不能仅根据 CLONE_FILES 决定元数据表归属，也不能使用一个随
+CLONE_VM 共享的全局指针。本机观察更接近按进程共享 FD 表，但仅按 PID 惰性复制也不
+充分：父进程可能在子进程首次进入 hook 前修改表。仍需要 clone 前快照/登记、结果通知、
+目标环境的明确能力策略及同步协议。对不支持的组合，未来权限模式应明确拒绝或完整适配，
+不能让元数据共享关系与实际 FD 表不同。尚未实现这些通知，不启用权限执行。
 
 ## 下一阶段：运行时身份与生命周期接入
 
