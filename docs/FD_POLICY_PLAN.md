@@ -95,16 +95,27 @@ CLONE_VM 共享的全局指针。本机观察更接近按进程共享 FD 表，�
 PRoot 的生成 stub 已接到 `clone_entry.S` / `clone_notify.c`，在 clone 前准备独立上下文，
 恢复原始 SP 后执行 syscall，再由父子各自在自己的栈上执行 finish。回调提供 flags、
 父 PID/TID、cookie 和内核结果，允许子进程先返回；内核失败只有父侧 finish。
-当前默认回调为空，未改变 FD 表归属或权限。before 失败不执行 clone，调用方自行回收
-其未发布的 cookie；未来 finish 必须使用事前保留的资源，不依赖可失败的事后分配。
+当前默认回调为空，未改变 FD 表归属或权限。before 返回后 cookie 由事务持有，
+before 拒绝时也由 cleanup 统一清理；finish 不得自行释放。未来 finish 必须使用
+事前保留的资源，不依赖可失败的事后分配。before 内部非局部退出仍需单独处理。
 
 载荷 ABI 升为 3；loader 在启动 guest 前拒绝版本不匹配的自定义 payload。
 `check_notify.py` 验证真实 clone 通知、寄存器/栈恢复、失败清理和并发调用，
 `check_payload_abi.py` 验证版本匹配与拒绝。六种原生/loader 对照与两套 rootfs 回归仍通过。
 上下文改为继承共享的 64 槽池；容量不足时用 tgkill 的 ESRCH 结果回收已知死亡任务，
 仍无槽位则返回 EAGAIN。未知子身份、初始化中退出及遗留回收 pin 仍可能占用槽位；
-非局部跳转或 exec 后任务仍存活也不能据此回收。回收不处理 cookie，接入 FD 资源前
-必须先实现其取消与清理协议。
+非局部跳转或 exec 后任务仍存活也不能据此回收。
+
+`clone_observer_cleanup` 已提供共享资源退役协议：父子角色完成且所有回收 pin 释放后，
+唯一 finalizer 调用 cleanup，返回后才复用槽位。回调接收准备拒绝、父/子遗弃标记；
+正常完成与内核 clone 失败不标记遗弃。回收与正常 finish 竞争时只标记实际补齐的角色。
+同一事务不会重复调用 cleanup；清理中死亡或跳出会保留槽位，不能盲目重试副作用。
+未知子身份不触发提前清理。测试以预先映射的共享资源池验证正常、失败、异常退出、
+并发回收、清理重入、清理暂停和清理者死亡，检查资源没有提前释放或重复释放。
+
+cleanup 可在任意继承进程运行，因此 cookie 必须指向继承后仍有效的共享 arena 或稳定句柄。
+不能将任意私有指针、fork 后才建立的映射或进程局部 FD 当成可由它统一释放的资源。
+这完成了共享元数据的退役接口；FD 表快照的实际分配、登记和进程资源管理仍未接入。
 详见 [syscall 经验](SYSCALL_ENGINE_LESSONS.md#dedicated-clone-notification-path-proot-payload-abi-3)。
 
 ## 下一阶段：运行时身份与生命周期接入

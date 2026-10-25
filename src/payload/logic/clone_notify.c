@@ -10,15 +10,17 @@ extern long raw_syscall(long, long, long, long, long, long, long);
 /* A pin prevents reuse while a reaper inspects immutable fields. Completing
  * either task is lock-free; no lock may strand a live task behind a dead reaper.
  * INIT is unpublished and cannot be reclaimed without knowing its full state. */
-#define PARENT_DONE 1u
-#define CHILD_DONE 2u
+#define PARENT_DONE CLONE_CLEANUP_PARENT_ABANDONED
+#define CHILD_DONE CLONE_CLEANUP_CHILD_ABANDONED
 #define ACTIVE 4u
 #define PIN 8u
 #define INIT 1u
+#define FINALIZING 2u
 struct clone_transaction {
     uint64_t state;
     struct clone_return saved;
     struct clone_event event;
+    unsigned abandoned;
     long child_tid; /* 0 unknown, -1 no child (kernel error), positive known */
 };
 struct clone_pool { struct clone_transaction slots[CLONE_NOTIFY_CAPACITY]; };
@@ -28,6 +30,9 @@ __attribute__((weak)) int clone_observer_before(struct clone_event *event)
 { (void)event; return 0; }
 __attribute__((weak)) void clone_observer_finish(const struct clone_event *event, long result)
 { (void)event; (void)result; }
+
+__attribute__((weak)) void clone_observer_cleanup(const struct clone_event *event, unsigned reasons)
+{ (void)event; (void)reasons; }
 
 static struct clone_pool *get_pool(void)
 {
@@ -74,11 +79,19 @@ static unsigned release(struct clone_transaction *t, unsigned done, unsigned dro
     uint64_t old = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
     for (;;) {
         uint64_t next = (old | done) - drop_pin;
-        if (next == (ACTIVE | PARENT_DONE | CHILD_DONE)) next = 0;
+        if (next == (ACTIVE | PARENT_DONE | CHILD_DONE)) next = FINALIZING;
         unsigned added = done & ~(unsigned)old;
         if (__atomic_compare_exchange_n(&t->state, &old, next, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            if (next == FINALIZING) {
+                /* Exclusive finalizer: no task role or reaper can still use
+                 * the event, and reserve cannot reuse it until cleanup returns. */
+                clone_observer_cleanup(&t->event,
+                    __atomic_load_n(&t->abandoned, __ATOMIC_ACQUIRE));
+                __atomic_store_n(&t->state, 0, __ATOMIC_RELEASE);
+            }
             return added;
+        }
     }
 }
 
@@ -107,7 +120,13 @@ unsigned clone_notify_reap(void)
             long pid = (t->event.flags & CLONE_THREAD) ? t->event.parent_pid : child;
             if (child < 0 || gone(pid, child)) done |= CHILD_DONE;
         }
-        unsigned added = release(t, done, PIN);
+        /* Retain our pin while publishing reasons. Only newly completed roles
+         * count as abandoned: a stale liveness check can race normal finish. */
+        unsigned added = release(t, done, 0);
+        /* A kernel error means no child existed; this is not abandonment. */
+        __atomic_fetch_or(&t->abandoned, child < 0 ? added & ~CHILD_DONE : added,
+                          __ATOMIC_RELAXED);
+        release(t, 0, PIN);
         reaped += !!(added & PARENT_DONE) + !!(added & CHILD_DONE);
     }
     return reaped;
@@ -134,9 +153,11 @@ long clone_notify_prepare(unsigned long saved_x9, unsigned long continuation,
         return error < 0 ? error : -EIO;
     }
     t->event.cookie = 0;
+    __atomic_store_n(&t->abandoned, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&t->child_tid, 0, __ATOMIC_RELAXED);
     int rc = clone_observer_before(&t->event);
     if (rc) {
+        clone_observer_cleanup(&t->event, CLONE_CLEANUP_REJECTED);
         __atomic_store_n(&t->state, 0, __ATOMIC_RELEASE);
         return rc < 0 ? rc : -EINVAL;
     }

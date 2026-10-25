@@ -3,6 +3,9 @@
 #define ELF_CLONE_NOTIFY_H
 #include <stdint.h>
 #define CLONE_NOTIFY_CAPACITY 64
+#define CLONE_CLEANUP_PARENT_ABANDONED 1u
+#define CLONE_CLEANUP_CHILD_ABANDONED 2u
+#define CLONE_CLEANUP_REJECTED 4u
 struct clone_event {
     unsigned long flags;
     long parent_pid, parent_tid;
@@ -13,10 +16,21 @@ struct clone_event {
  * A child may notify first. No libc/TLS dependencies or locks spanning clone.
  * Event storage survives fork and is valid only within these callbacks.
  * before may set cookie only; flags and parent identity remain immutable.
- * No cookie ownership or abandonment cleanup is provided yet: FD resources
- * must not be attached until their cancellation protocol is implemented. */
+ * Once before returns (including rejection), cookie ownership passes to the
+ * transaction until cleanup. finish must not free it. Partial allocation before
+ * a nonlocal exit from before remains the observer's responsibility. */
 int clone_observer_before(struct clone_event *event);
 void clone_observer_finish(const struct clone_event *event, long result);
+/* Exactly one invocation after both roles and all readers complete, or after
+ * before rejects. reasons is a CLONE_CLEANUP_* mask (zero for normal completion
+ * and kernel failure). Reaper cleanup may run in any inheriting task/VM: cookie
+ * must reference inherited shared storage or a stable arena handle, never a
+ * private allocation or an address mapped only after fork. This callback retires
+ * shared metadata, not process-local FDs/mappings. It must be nonblocking and
+ * reentrant, with no libc/TLS dependency. A finalizer that dies/escapes strands
+ * its slot; cleanup is never retried because its side effects may have occurred.
+ * Unknown-child transactions are retained, not cleaned speculatively. */
+void clone_observer_cleanup(const struct clone_event *event, unsigned reasons);
 /* Reclaim missing returns only when kernel tgkill(..., 0) confirms ESRCH.
  * Returns number of abandoned parent/child roles completed. Unknown child
  * identity, interrupted initialization and abandoned reaper pins cannot yet

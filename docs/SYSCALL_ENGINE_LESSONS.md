@@ -205,12 +205,13 @@ raw-clone stacks are not validated. On exhaustion, a reaper uses tgkill(pid, tid
 on ESRCH, then retries allocation; otherwise prepare returns EAGAIN. Pins prevent
 slot reuse while concurrent reapers inspect identities. EPERM and other errors
 never establish death. This reclaims known dead parents/children even when they
-exit inside the observer. No callbacks or cookie cleanup run during reclamation.
+exit inside the observer. Final retirement now invokes the cleanup seam below.
 
 Unknown child identity, interrupted initialization, abandoned reaper pins and
 nonlocal escapes/exec in still-live tasks can still strand slots. PID reuse may
 delay reclamation. The pool is bounded, not a guarantee of eventual progress.
-FD resources must not be attached to cookies until cancellation is implemented.
+Only inherited shared metadata may use the cleanup seam; process-local FD
+resources still need their own ownership/cancellation protocol.
 FD snapshot consistency, process registration and exec handoff remain required
 before enabling FD policy. This is not a security-boundary fix.
 
@@ -220,3 +221,30 @@ liveness errors, unknown-child retention, capacity exhaustion/reuse and repeated
 child abandonment beyond capacity. pthread_join on this host can return before
 tgkill observes ESRCH; the unknown-child fixture waits for kernel disappearance
 before asserting reclamation, rather than weakening the runtime death check.
+
+
+## Clone cookie retirement
+
+`clone_observer_cleanup(event, reasons)` takes over a cookie once before returns,
+including rejection. Finish never frees it. A CAS elects a unique finalizer only
+after both roles and all reaper pins finish; the slot stays unavailable throughout
+cleanup. The finalizer may run in parent, child or another inheriting reaper.
+Reapers retain their pin while recording only newly abandoned roles, so stale
+liveness checks cannot label an already normally completed role as abandoned.
+A negative kernel result establishes no child, not an abandoned child.
+
+Cookies must reference storage inherited and accessible across this clone family
+(e.g. a preallocated shared arena). One callback in one VM cannot unmap every
+fork-inherited mapping or close another process's descriptor. Do not use private
+heap pointers or later-created mappings as globally finalizable cookies.
+The callback must return without blocking and tolerate reentry. Its death or
+nonlocal escape strands the slot: retrying potentially completed side effects
+would risk duplicate destruction. Unknown-child and interrupted-before cases
+still cannot be safely finalized. This is shared metadata retirement, not a
+complete FD lifecycle implementation or stronger isolation.
+
+The real-clone harness uses a shared resource arena and checks one retirement per
+transaction, preparation rejection, kernel failure, child-first return, live
+callback retention, abandoned parent/child and unknown-child retention. Separate
+fixtures pause cleanup while filling the pool, reenter from cleanup, and kill a
+finalizer; the last case retains capacity rather than retrying destruction.

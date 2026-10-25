@@ -57,5 +57,9 @@ parent and child callbacks via real task exit, inject uncertain tgkill errors,
 and verify unknown-child retention. They exhaust/reuse the 64-slot shared pool
 and abandon more than 64 children to exercise automatic reclamation. Reentrant
 first initialization verifies losing-mapping cleanup. Kernel task disappearance
-is awaited separately from pthread_join. These checks do not establish cookie
-resource cleanup or recovery of abandoned initialization/reaper pins.
+is awaited separately from pthread_join. A shared resource arena now checks exactly one cookie retirement after both
+roles and all readers finish, including rejected preparation and kernel errors.
+Dedicated modes pause cleanup while exhausting capacity, reenter cleanup, and
+exit inside cleanup to verify that destruction is not retried. They do not
+establish process-local FD cleanup or recovery of abandoned initialization,
+reaper pins or finalizers.

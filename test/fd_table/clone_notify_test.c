@@ -13,10 +13,12 @@
 #include <unistd.h>
 #include "clone_notify.h"
 extern long notify_clone(unsigned long flags,void *stack);
-struct stats {long before, parent, child, errors, maps, unmaps; int entered, proceed, stop; long orphan_pid;};
+struct resource { int live; };
+struct stats {long cleaned, rejected, abandoned_parent, abandoned_child; struct resource resources[128]; long before, parent, child, errors, maps, unmaps; int entered, proceed, stop; long orphan_pid;};
 static struct stats *stats;
 static int reject, fail_mapping, nested_init, probe_error, abort_child, pause_child, abort_parent;
 static long pid, wait_for_child, unpublished_tid;
+static int cleanup_pause, cleanup_entered, cleanup_proceed, cleanup_exit, cleanup_nested;
 long raw_syscall(long n,long a,long b,long c,long d,long e,long f)
 {
     if(n==SYS_mmap && fail_mapping){fail_mapping=0;return -ENOMEM;}
@@ -40,13 +42,22 @@ static void clobber(void)
 int clone_observer_before(struct clone_event *event)
 {
     assert(event->parent_pid==pid && event->parent_tid==syscall(SYS_gettid));
-    event->cookie=stats;
+    event->cookie=NULL;
+    for(unsigned i=0;i<128;i++) {
+        int empty=0;
+        if(__atomic_compare_exchange_n(&stats->resources[i].live,&empty,1,0,
+                                      __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+            event->cookie=&stats->resources[i];break;
+        }
+    }
+    assert(event->cookie);
     __atomic_add_fetch(&stats->before,1,__ATOMIC_RELAXED);
     clobber();return reject?-EACCES:0;
 }
 void clone_observer_finish(const struct clone_event *event,long result)
 {
-    assert(event->cookie==stats && event->parent_pid==pid);
+    assert(event->cookie && event->parent_pid==pid);
+    assert(__atomic_load_n(&((struct resource*)event->cookie)->live,__ATOMIC_ACQUIRE)==1);
     if(result<0)__atomic_add_fetch(&stats->errors,1,__ATOMIC_RELAXED);
     else if(result) {
         if(abort_parent) {
@@ -65,6 +76,28 @@ void clone_observer_finish(const struct clone_event *event,long result)
         if(abort_child)syscall(SYS_exit,42); /* die before releasing child role */
         __atomic_add_fetch(&stats->child,1,__ATOMIC_RELAXED);
     }
+    clobber();
+}
+void clone_observer_cleanup(const struct clone_event *event,unsigned reasons)
+{
+    assert(event->cookie && event->parent_pid==pid);
+    if(__atomic_exchange_n(&cleanup_pause,0,__ATOMIC_ACQ_REL)) {
+        __atomic_store_n(&cleanup_entered,1,__ATOMIC_RELEASE);
+        while(!__atomic_load_n(&cleanup_proceed,__ATOMIC_ACQUIRE))syscall(SYS_sched_yield);
+    }
+    if(cleanup_exit)pthread_exit(NULL);
+    if(cleanup_nested) {
+        cleanup_nested=0;
+        long nested=clone_notify_prepare(3,4,SIGCHLD);assert(nested>0);
+        clone_notify_finish((void*)nested,-EINVAL);
+    }
+    assert(!(reasons & ~(CLONE_CLEANUP_PARENT_ABANDONED |
+                        CLONE_CLEANUP_CHILD_ABANDONED | CLONE_CLEANUP_REJECTED)));
+    assert(__atomic_exchange_n(&((struct resource*)event->cookie)->live,0,__ATOMIC_ACQ_REL)==1);
+    __atomic_add_fetch(&stats->cleaned,1,__ATOMIC_RELAXED);
+    if(reasons & CLONE_CLEANUP_REJECTED)__atomic_add_fetch(&stats->rejected,1,__ATOMIC_RELAXED);
+    if(reasons & CLONE_CLEANUP_PARENT_ABANDONED)__atomic_add_fetch(&stats->abandoned_parent,1,__ATOMIC_RELAXED);
+    if(reasons & CLONE_CLEANUP_CHILD_ABANDONED)__atomic_add_fetch(&stats->abandoned_child,1,__ATOMIC_RELAXED);
     clobber();
 }
 static void successful(unsigned long flags,void *stack)
@@ -102,6 +135,40 @@ static void *unpublished_child_worker(void *unused)
     long t=clone_notify_prepare(11,22,SIGCHLD);assert(t>0);
     return (void*)t; /* caller disappears without a kernel result */
 }
+static void *cleanup_worker(void *unused)
+{
+    (void)unused;
+    long t=clone_notify_prepare(1,2,SIGCHLD);assert(t>0);
+    clone_notify_finish((void*)t,-EINVAL);
+    return NULL;
+}
+static void cleanup_checks(int die)
+{
+    pthread_t worker;
+    cleanup_exit=die;cleanup_pause=!die;
+    assert(pthread_create(&worker,NULL,cleanup_worker,NULL)==0);
+    if(die)assert(pthread_join(worker,NULL)==0);
+    else while(!__atomic_load_n(&cleanup_entered,__ATOMIC_ACQUIRE))syscall(SYS_sched_yield);
+    assert(stats->cleaned==0);
+    assert(clone_notify_reap()==0);
+    long pending[CLONE_NOTIFY_CAPACITY-1];
+    for(unsigned i=0;i<CLONE_NOTIFY_CAPACITY-1;i++) {
+        pending[i]=clone_notify_prepare(i,0,SIGCHLD);assert(pending[i]>0);
+    }
+    assert(clone_notify_prepare(0,0,SIGCHLD)==-EAGAIN); /* finalizer still owns one */
+    if(!die) {
+        __atomic_store_n(&cleanup_proceed,1,__ATOMIC_RELEASE);
+        assert(pthread_join(worker,NULL)==0);
+    }
+    cleanup_exit=0;
+    for(unsigned i=0;i<CLONE_NOTIFY_CAPACITY-1;i++)clone_notify_finish((void*)pending[i],-EINVAL);
+    cleanup_nested=1;
+    cleanup_worker(NULL); /* cleanup can reenter without reusing its own slot */
+    assert(stats->before==stats->cleaned+die);
+    assert(clone_notify_reap()==0); /* abandoned cleanup is not retried */
+    puts(die?"PASS: abandoned finalizer retained without duplicate cleanup":
+             "PASS: exclusive finalizer, deferred slot reuse and reentrant cleanup");
+}
 static void capacity_check(void)
 {
     long pending[CLONE_NOTIFY_CAPACITY];
@@ -124,11 +191,15 @@ int main(int argc,char **argv)
     assert(stats!=MAP_FAILED);pid=getpid();
     void *stack=mmap(NULL,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     assert(stack!=MAP_FAILED);
+    if(argc>1 && (!strcmp(argv[1],"--cleanup-exit") || !strcmp(argv[1],"--cleanup-pause"))) {
+        cleanup_checks(!strcmp(argv[1],"--cleanup-exit"));return 0;
+    }
     if(argc>1 && !strcmp(argv[1],"--nested-init")) {
         nested_init=1;
         successful(SIGCHLD,NULL);
         assert(stats->maps==2 && stats->unmaps==1 && stats->before==2 && stats->errors==1);
         assert(stats->parent==1 && stats->child==1);
+        assert(stats->cleaned==2);
         puts("PASS: reentrant pool initialization loser cleanup");return 0;
     }
     fail_mapping=1;assert(notify_clone(SIGCHLD,(char*)stack+65536)==-ENOMEM);
@@ -145,6 +216,7 @@ int main(int argc,char **argv)
     assert(notify_clone(CLONE_THREAD,(char*)stack+65536)==-EINVAL);
     assert(stats->errors==1 && stats->maps==1 && stats->unmaps==0);
     reject=1;assert(notify_clone(SIGCHLD,(char*)stack+65536)==-EACCES);reject=0;
+    assert(stats->cleaned==7 && stats->rejected==1);
     assert(stats->before==7 && stats->parent==5 && stats->child==5 && stats->errors==1);
     assert(stats->maps==1 && stats->unmaps==0);
     pthread_t threads[4], reaper;
@@ -155,10 +227,12 @@ int main(int argc,char **argv)
     __atomic_store_n(&stats->stop,1,__ATOMIC_RELEASE);
     assert(pthread_join(reaper,NULL)==0);
     assert(stats->maps==1 && stats->unmaps==0);
+    assert(stats->cleaned==stats->before);
     pause_child=1;
     long child=notify_clone(CLONE_VM|SIGCHLD,(char*)stack+65536);assert(child>0);
     while(!__atomic_load_n(&stats->entered,__ATOMIC_ACQUIRE))syscall(SYS_sched_yield);
     assert(clone_notify_reap()==0); /* live task inside observer */
+    assert(stats->cleaned==stats->before-1);
     __atomic_store_n(&stats->proceed,1,__ATOMIC_RELEASE);
     int status;assert(waitpid((pid_t)child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==42);
     pause_child=0;
@@ -198,11 +272,15 @@ int main(int argc,char **argv)
     }
     assert(syscall(SYS_tgkill,pid,unpublished_tid,0)==-1 && errno==ESRCH);
     assert(clone_notify_reap()==1 && clone_notify_reap()==0); /* only dead parent, child unknown */
+    assert(stats->cleaned==stats->before-1); /* unknown child keeps cookie alive */
     long another=clone_notify_prepare(0,0,SIGCHLD);assert(another>0 && (void*)another!=unknown);
     clone_notify_finish((void*)another,-EINVAL);
     /* Test knows no actual child was created; production cannot make this inference. */
     clone_notify_finish(unknown,-EINVAL);
     capacity_check();
+    assert(stats->cleaned==stats->before && stats->rejected==1);
+    assert(stats->abandoned_parent==2 && stats->abandoned_child==CLONE_NOTIFY_CAPACITY+6);
+    for(unsigned i=0;i<128;i++)assert(stats->resources[i].live==0);
     assert(stats->maps==1 && stats->unmaps==0);
     assert(munmap(stack,65536)==0 && munmap(stats,4096)==0);
     puts("PASS: clone notifications, SP/GPR/SIMD/FP state, fork/vfork, bounded pool, orphan reclamation and concurrent reaping");

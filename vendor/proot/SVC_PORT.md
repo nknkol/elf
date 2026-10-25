@@ -298,3 +298,10 @@ NULL and new stacks, vfork, child-first order, failures and concurrent calls.
 host FD-sharing deviations separately. Alpine and Ubuntu retain 18/18 offline
 acceptance. See ../../docs/SYSCALL_ENGINE_LESSONS.md for stack requirements,
 shared-pool capacity and conservative dead-task reclamation limits.
+
+Clone observers also expose a cleanup seam for inherited shared metadata. It
+runs once after all returning/dead roles and readers finish (also on preparation
+rejection); a finalizer owns the slot until the callback returns. Abandoned
+finalizers are retained without retrying side effects. This does not close
+process-local descriptors or activate FD metadata tracking. See the clone cookie
+retirement section of ../../docs/SYSCALL_ENGINE_LESSONS.md for storage constraints.
