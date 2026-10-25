@@ -231,4 +231,7 @@ Run `python3 vendor/proot/port-tests/test_modify.py` from the ELF root.
 The ELF guard now uses atomic kernel-TID ownership and releases slots on normal
 return. Capacity failure returns EAGAIN instead of bypassing dispatch. Thread,
 signal and routing tests are described in ../../docs/SYSCALL_ENGINE_LESSONS.md.
-Same-thread bypass and fork/nonlocal-exit lifecycle limits remain explicit.
+Same-thread bypass and abnormal-exit lifecycle limits remain explicit.
+The active table now uses a lazily initialized shared mapping so parent slot
+releases remain visible after fork. A real fork regression covers stale-owner
+recovery. Inheriting processes share the 32-slot capacity.

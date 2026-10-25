@@ -119,7 +119,7 @@ releases the slot after each returning slow call, has no global spinlock and
 never reads guest TLS. Same-thread recursion still returns NULL and follows
 the existing reentry bypass. Capacity exhaustion returns -EAGAIN through the
 assembly error path, without issuing the guest syscall. There are still 32
-simultaneous slots; no allocation or unbounded wait is introduced. A failed
+simultaneous slots; ordinary entry performs no allocation or unbounded wait. A failed
 claim can conservatively return EAGAIN even if another slot becomes free.
 
 `test/syscalls/check_guard.py` covers 1024 sequential owner identities, nested
@@ -132,9 +132,34 @@ filesystem regressions also pass. This adds a gettid syscall per slow entry;
 no performance improvement is claimed without measurements.
 
 Remaining lifecycle limitations: nonlocal exits from signal handlers can
-abandon slots; fork can inherit active owners from other threads; TID reuse
+abandon slots; abnormal thread/process termination can leave owners behind; TID reuse
 can matter after an abandoned owner. A guest signal during an active hook
 still bypasses through the same-thread recursion rule. These require explicit
 signal/fork/lifecycle handling, not more slots or a silent fallback. The new
 stress test does not prove arbitrary signal-handler safety or hostile-code
 isolation.
+
+
+## Fork ownership update
+
+A real fork regression reproduced stale copied owners: with 32 active slots,
+the parent released all owners after fork but the child kept returning EAGAIN.
+The active table now resides in one MAP_SHARED|MAP_ANONYMOUS mapping, lazily
+published by atomic CAS. Parent releases therefore reach the child's view.
+Shared-address-space clone users share the same table without PID-based resets
+that could erase another live owner's slot. No per-call mapping is added.
+
+Initialization failures return errno and remain retryable. Competing or nested
+initializers unmap the losing candidate. Tests cover mapping failure/retry,
+deterministic nested initialization, concurrent first use, and actual fork
+with parent-held owners (synthetic owner IDs provide deterministic full-table
+setup). The original implementation fails the fork fixture with child exit 13;
+the shared table passes it along with existing guard and loader regressions.
+
+The 32-slot budget is now shared across processes inheriting that mapping, not
+32 independent slots per fork child. Slow calls may return EAGAIN under that
+combined load. An active owner that exits abnormally can still consume capacity
+in surviving processes. SIGKILL, nonlocal signal exits and safe dead-owner
+reclamation are unresolved; no liveness guarantee is made for those cases.
+The mapping lives until all inheritors unmap it or exit; exec installs a new
+payload and guard. Performance and full CLONE_VM lifecycle remain unbenchmarked.
