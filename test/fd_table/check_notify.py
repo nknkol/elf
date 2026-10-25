@@ -18,4 +18,5 @@ with tempfile.TemporaryDirectory(prefix='clone-notify-') as temp:
                  re.findall(r'^([0-9a-f]+) [a-zA-Z] (\w+)$', symbols, re.M)}
     assert addresses['test_data'] - addresses['test_stub'] == 160
     assert addresses['test_resume'] - addresses['test_stub'] == 100
+    subprocess.run([str(exe), "--nested-init"], check=True, timeout=30)
     subprocess.run([str(exe)], check=True, timeout=30)

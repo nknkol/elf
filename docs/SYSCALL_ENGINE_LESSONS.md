@@ -186,8 +186,8 @@ only generated PRoot stubs use the notification gate.
 current runtime, not FD snapshot publication or permission checks. Before may
 reject with negative errno, without executing clone. A successful clone may
 notify child first; a kernel error only notifies the original caller. Shared
-VMs release the transaction with an atomic count; copied VMs each unmap their
-own inherited mapping. Do not infer FD sharing from this VM cleanup rule.
+VMs and copied VMs complete roles in the same inherited shared pool. Do not
+infer FD sharing from this context storage rule.
 
 Tests execute the real assembly and observers with NULL/new child stacks,
 vfork, intentional child-first notification, kernel error, preparation rejection,
@@ -197,10 +197,26 @@ and FPSR; raw syscall return x0 is checked by the caller. The generated stub
 is separately covered by the six native/loader clone scenarios. ABI tests
 accept a v3 custom payload and reject v2/invalid versions before guest startup.
 
-Costs/limits: one shared page per in-flight clone, no pooling or benchmark yet.
+Costs/limits: one lazily published shared pool with 64 concurrent transactions
+across the inheriting clone family; no per-clone mmap/munmap. No benchmark yet.
 Notifications use about 800 bytes of assembly context plus C stack on each
 returning task, requiring an ABI-aligned usable stack; arbitrary tiny/unaligned
-raw-clone stacks are not validated. A task dying or escaping nonlocally before
-its shared-VM notification can strand a transaction. Abnormal-exit reclamation,
+raw-clone stacks are not validated. On exhaustion, a reaper uses tgkill(pid, tid, 0) and completes missing roles only
+on ESRCH, then retries allocation; otherwise prepare returns EAGAIN. Pins prevent
+slot reuse while concurrent reapers inspect identities. EPERM and other errors
+never establish death. This reclaims known dead parents/children even when they
+exit inside the observer. No callbacks or cookie cleanup run during reclamation.
+
+Unknown child identity, interrupted initialization, abandoned reaper pins and
+nonlocal escapes/exec in still-live tasks can still strand slots. PID reuse may
+delay reclamation. The pool is bounded, not a guarantee of eventual progress.
+FD resources must not be attached to cookies until cancellation is implemented.
 FD snapshot consistency, process registration and exec handoff remain required
 before enabling FD policy. This is not a security-boundary fix.
+
+Tests also cover reentrant pool initialization, concurrent sweeps, a live child
+paused inside its callback, known dead parent/child callbacks, injected uncertain
+liveness errors, unknown-child retention, capacity exhaustion/reuse and repeated
+child abandonment beyond capacity. pthread_join on this host can return before
+tgkill observes ESRCH; the unknown-child fixture waits for kernel disappearance
+before asserting reclamation, rather than weakening the runtime death check.

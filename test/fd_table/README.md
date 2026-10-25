@@ -51,3 +51,11 @@ SIMD and FP state preservation are checked in assembly. This validates the
 runtime notification seam; it does not validate an FD metadata manager.
 `check_payload_abi.py` checks v3 custom payload startup and rejects v2/invalid
 versions before guest execution. Both checks are included in `make check`.
+
+The notification tests also sweep concurrently, pause a live callback, abandon
+parent and child callbacks via real task exit, inject uncertain tgkill errors,
+and verify unknown-child retention. They exhaust/reuse the 64-slot shared pool
+and abandon more than 64 children to exercise automatic reclamation. Reentrant
+first initialization verifies losing-mapping cleanup. Kernel task disappearance
+is awaited separately from pthread_join. These checks do not establish cookie
+resource cleanup or recovery of abandoned initialization/reaper pins.

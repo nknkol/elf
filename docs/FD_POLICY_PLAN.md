@@ -101,7 +101,10 @@ PRoot 的生成 stub 已接到 `clone_entry.S` / `clone_notify.c`，在 clone �
 载荷 ABI 升为 3；loader 在启动 guest 前拒绝版本不匹配的自定义 payload。
 `check_notify.py` 验证真实 clone 通知、寄存器/栈恢复、失败清理和并发调用，
 `check_payload_abi.py` 验证版本匹配与拒绝。六种原生/loader 对照与两套 rootfs 回归仍通过。
-共享 VM 的子任务在通知前异常死亡可能留下上下文映射，非局部跳转/退出与事件回收仍需处理。
+上下文改为继承共享的 64 槽池；容量不足时用 tgkill 的 ESRCH 结果回收已知死亡任务，
+仍无槽位则返回 EAGAIN。未知子身份、初始化中退出及遗留回收 pin 仍可能占用槽位；
+非局部跳转或 exec 后任务仍存活也不能据此回收。回收不处理 cookie，接入 FD 资源前
+必须先实现其取消与清理协议。
 详见 [syscall 经验](SYSCALL_ENGINE_LESSONS.md#dedicated-clone-notification-path-proot-payload-abi-3)。
 
 ## 下一阶段：运行时身份与生命周期接入

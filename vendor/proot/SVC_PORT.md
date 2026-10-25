@@ -288,7 +288,7 @@ Actual file reads/writes continue to use kernel FDs without a userspace VFS.
 The generated PRoot stub now enters a separate clone trampoline. It invokes
 before/finish observer seams while executing clone itself on the original SP,
 with the original flags and child stack. Parent and child finish on their own
-stacks; shared-VM context cleanup is atomic. Current observers are no-ops: FD
+stacks; context completion uses a bounded shared pool and atomic roles. Current observers are no-ops: FD
 metadata and permission enforcement are not connected. Payload ABI 3 is required
 and mismatched custom payloads are rejected before guest startup.
 
@@ -297,4 +297,4 @@ NULL and new stacks, vfork, child-first order, failures and concurrent calls.
 `check_clone.py` retains all six native/loader comparisons, reporting three
 host FD-sharing deviations separately. Alpine and Ubuntu retain 18/18 offline
 acceptance. See ../../docs/SYSCALL_ENGINE_LESSONS.md for stack requirements,
-per-clone allocation cost and abnormal-exit reclamation limits.
+shared-pool capacity and conservative dead-task reclamation limits.
