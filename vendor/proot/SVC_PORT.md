@@ -235,3 +235,12 @@ Same-thread bypass and abnormal-exit lifecycle limits remain explicit.
 The active table now uses a lazily initialized shared mapping so parent slot
 releases remain visible after fork. A real fork regression covers stale-owner
 recovery. Inheriting processes share the 32-slot capacity.
+
+## Alpine dynamic-rootfs acceptance
+
+The supplied Alpine 3.24.3 AArch64 minirootfs now passes 18 offline acceptance
+checks on the existing backend, including musl/BusyBox, apk dynamic libraries,
+shell exec/pipes/background jobs, bind writes and tar roundtrip. A minimal
+/dev/null bind is necessary for ash background stdin redirection. No backend
+source change was required for this milestone. See ../../test/alpine/README.md
+for the reproducible harness, fixture identity and remaining coverage limits.

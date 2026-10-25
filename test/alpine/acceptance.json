@@ -1,0 +1,26 @@
+{
+  "archive": "alpine-minirootfs-3.24.3-aarch64.tar.gz",
+  "archive_sha256": "4d3f80afaebd447c5591a63a73bde380a149fe8b2d85488cafabb2ff97551f50",
+  "release": "3.24.3",
+  "backend_commit": "e49f60c",
+  "passed": [
+    "musl dynamic BusyBox",
+    "shell cwd and release",
+    "absolute applet symlink exec",
+    "PATH lookup exec",
+    "pipe",
+    "command substitution",
+    "background child and wait",
+    "nested shell and exit status",
+    "script interpreter and environment",
+    "bind across exec",
+    "bind writes and rename",
+    "cwd survives exec",
+    "directory traversal",
+    "symlink target guest root",
+    "archive roundtrip",
+    "truncate through shell redirect",
+    "apk dynamic dependencies",
+    "apk local database"
+  ]
+}
