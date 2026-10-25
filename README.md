@@ -1,60 +1,85 @@
-# ELF loader / payload
+# ELF / PRoot 文件系统运行后端
 
-自举 ELF loader + 静态 PIE payload，用于在目标程序内做 syscall 级 hook（路径重写/链式 loader 等）。loader 不依赖宿主 libc，直接走 `z_syscall.c`。
+在系统沙盒内，通过 AArch64 ELF 加载与 SVC 拦截接入 PRoot 路径语义。
+不依赖 ptrace、namespace 或 bubblewrap 运行时。主要目标是给 agent 提供系统/brew
+文件视图与访问控制，其次是运行 Linux rootfs。
 
-## 设计约束
-- 面向受限设备：假设无法启用 namespace/`chroot`/`pivot_root` 等内核特性，也不依赖容器运行时。
-- 纯用户态方案：通过内存 hook + syscall 拦截模拟 PROOT 行为（路径改写、绑定覆盖、链式 loader），不改变内核全局状态。
-- 兼容只读/noexec 挂载：payload/loader 内嵌，执行时从内存 memfd 映射，避免对宿主文件系统的可执行依赖。
+**当前是可运行的兼容性后端，尚未完成 agent 文件隔离。** root/bind、动态 ELF、
+链式 exec 已有测试；只读绑定、默认拒绝、完整 FD 生命周期和 `/proc` 尚未完成。
+已知直接进入 raw syscall 和同线程重入绕过仍存在，不能作为恶意代码的独立隔离边界。
+`container` 模式名称也不代表这些隔离能力已完成。
 
-## 容器/兼容模式拆分与 Hook 层次（实现方案）
-- 模式定义与开关
-  - 兼容模式：面向“在宿主机跑得更顺滑”，保留宿主身份/权限，开放 bind 映射与 env 追加，仍保留 execve 链式、mmap/mprotect hook 以维持受控环境。
-  - 容器模式：面向隔离，启用 root/bind 虚拟化 + fakeroot 身份伪装，默认最小化对宿主可见信息。
-  - 配置入口：CLI/配置文件暴露 `--mode container|compat` 或 `RUN_MODE=container|compat`，未显式指定时“存在 PROOT_ROOT → container，否则 compat”。`g_payload_config` 增加 `mode` 与 `hook_mask` 位图（BASE/COMPAT/ISOLATION）。
-- Hook 三层职责
-  - 地基 Hook（BASE，始终开启，两模式共用）：execve 链式 loader（含 argv/env 复制、PATH/LD_LIBRARY_PATH 列表重写、shebang 解析）、PT_INTERP 重写、路径改写（root/bind + 软链展开）覆盖 openat/faccessat/fstatat/readlinkat/symlinkat/linkat/renameat/mkdirat/mknodat/chdir/getcwd/unlinkat、mmap/mprotect 执行段 hook（用于后续动态库补钩与 noexec 绕过）。
-  - 兼容性补全（COMPAT，两模式均可开，兼容模式默认开、容器模式可选）：bind 映射表/环境变量追加、readlink 回填 guest 路径、argv/env 里绝对路径替换、PATH 拼接工作目录、宿主 cwd 透传等，保证“非隔离”场景下也能跑起来。
-  - 隔离/Fakeroot Hook（ISOLATION，仅容器模式）：getuid/geteuid/getgid/getegid/getgroups 返回 0/空组，set*uid/gid/setgroups/clearenv 等伪成功、屏蔽泄露；auxv 中 AT_UID/AT_GID 归零；必要时拦截 prctl/seccomp 替换/拒绝敏感操作；后续可在此层挂载元数据虚拟化（stat uid/gid/ctime 伪装）。
-- 运行时流程拆分
-  1) loader 解析 CLI/配置 → 生成 `mode` 与 `hook_mask`，写入 payload_config；链式 exec 进入子进程时继承该配置。
-  2) payload 安装 hook 时根据 `hook_mask` 决定是否 patch 对应 syscall（BASE 无条件，COMPAT/ISOLATION 按位判断）；单个 hook 内也可用掩码做早退，避免无谓开销。
-  3) execve 路径：先做 argv/env 路径重写 → 确保跳转到 `/elfloader` 链式 → 重新写入目标 argv/env（兼容层插入额外 env/bind），容器模式下附带身份伪装。
-  4) mmap/mprotect 路径：拦截可执行映射后立即调用 install_hook 对新段补钩，确保动态库同样受 BASE/COMPAT/ISOLATION 控制。
-  5) get*uid/gid/grouplist 等在容器模式返回伪造值，兼容模式透传原始结果；set* 系列容器模式直接返回 0（或记录日志），兼容模式透传。
-  6) readlink/stat 系列返回宿主路径时，兼容层负责回填 guest 路径，容器层可附加权限/uid/gid 伪装；路径重写始终走 BASE。
+## 从哪里开始
 
-## 目录结构
-- `src/`: loader 通用代码（`loader.c`、`utils/` 等），架构相关的启动/辅助在 `src/arch/<arch>/`。
-- `src/payload/`: payload 通用逻辑在 `logic/`，架构特定实现（入口、raw_syscall、mini_libc、reentry_guard、syscall_disp）在 `arch/<arch>/`，头文件集中在 `include/`。
-- `test/payload_demo`: 复用 payload 逻辑的最小示例/单元测试。
+此目录是独立 Git 仓库 `nknkol/elf`，开发分支为 `feat/proot-svc-bridge`。
+如果外层目录叫 `bubblewrap`，请先进入 `opt/elf`；外层源码不参与当前后端构建。
 
-## 构建
-- 默认架构：`make`（默认为 `ARCH=aarch64`）。
-- 指定架构：`make ARCH=amd64` 或 `make ARCH=i386`（需有对应 arch 源）。
-- 精简模式：`make SMALL=1`（去掉 printf/err）。
-- 默认 payload 路径可在构建时覆盖：`make DEFAULT_PAYLOAD_PATH=/path/to/payload.bin`。
+```sh
+make help
+make build
+make check
+```
 
-payload 会在顶层构建时自动生成：`src/payload/payload.bin`（并嵌入到 elfloader）。
+当前构建和运行验证环境为 HarmonyOS AArch64 终端沙盒。需要 Python 3、GNU make、
+Clang、ld.lld、llvm-objcopy、llvm-ar、llvm-nm 及本地 Linux ABI 头文件；构建会使用
+`/bin/sh`。未验证其他架构，也不自动安装依赖。
 
-## 运行
-- 基本用法：`./elfloader [OPTIONS] -- <target> [args]`
-- 配置文件（可选）：`-c /path/to/loader.rc`（分层样式，样板见 `src/config/loader.rc.sample`）；若不指定则不读配置文件。
-- 启用内嵌 init：`--init`（会用嵌入的 tiny-init，Guest 配置通过 `INIT_CONFIG_FD` 传递）。
-- 环境注入：`-e KEY=VAL` 多次；默认不透传宿主环境。
-- 主要选项速览：
-  - `-c/--config <path>`：指定 loader.rc 配置。
-  - `--root <path>`：容器根（Host 层）。
-  - `-v/--volume host:guest`：绑定挂载，可多次。
-  - `-e/--env KEY=VAL`：注入 env，可多次。
-  - `-w/--workdir <path>`：容器内工作目录（记录）。
-  - `--init`：使用内嵌 tiny-init（需配合配置或目标，至少其一存在）。
-  - `--hook-range min-max`：控制目标的 SVC 扫描范围。
-  - `--hook-range-interp min-max`：控制解释器（如 musl）的 SVC 扫描范围，便于调试崩点。
-  - `-d/--detach`、`--log <path>`：仅解析，行为待实现。
+构建入口强制重编译 loader/payload，通过临时文件替换可执行文件，生成：
 
-## 测试
-- payload_demo 测试：`cd elf/test/payload_demo && make ARCH=aarch64`
+- `vendor/proot/svc/build/elfloader-proot`：运行工具。
+- `vendor/proot/svc/build/elf-build.json`：用于测试校验的构建摘要。
+- `vendor/proot/svc/build/elf-build.log`：编译日志。
 
-## 维护提示
-- 架构新增：在 `src/arch/<arch>/` 放置汇编启动/辅助，在 `src/payload/arch/<arch>/` 放 `entry.S`、`raw_syscall.S`、`syscall_nums.h`、`syscall_disp.c`、`mini_libc.c`、`reentry_guard.c`。
+`make check` 先构建，再运行路径核心、SVC 文件操作、exec、auxv、路由、重入保护、
+运行时 syscall 和配置/解包测试。测试失败会使 make 返回非零。
+不要同时在不同终端构建两种后端，它们共用 `src/` 下的中间产物。
+
+## 运行已有 rootfs
+
+以下路径需替换为已解包 rootfs 和真实工作目录；所有 `-v` 当前均为可写映射。
+首个目标使用 rootfs 内的相对路径，后续 guest exec 可以使用绝对路径。
+
+```sh
+vendor/proot/svc/build/elfloader-proot \
+  --mode container --root /absolute/path/to/alpine-rootfs \
+  -v /absolute/path/to/workspace:/workspace \
+  -v /dev/null:/dev/null -- ./bin/busybox sh
+```
+
+Ubuntu 对应入口可用 `./usr/bin/dash`。已验证两套镜像各 18 项离线用例，
+不包含联网安装、完整容器或安全隔离验收。可用自备压缩包重跑：
+
+```sh
+make check-alpine ALPINE_ARCHIVE=../alpine-minirootfs-3.24.3-aarch64.tar.gz
+make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
+```
+
+测试临时解包后清理；Ubuntu 硬链接因宿主限制被复制成独立文件，不代表硬链接语义通过。
+镜像和构建产物不提交 Git。
+
+## 代码地图
+
+| 位置 | 职责 |
+| --- | --- |
+| `src/loader.c` | ELF 加载、配置、guest 启动栈 |
+| `src/payload/arch/aarch64/` | SVC 补丁、分流和重入保护 |
+| `src/payload/logic/proot_bridge.c` | syscall 参数适配、路径和目录 FD 解析 |
+| `src/payload/logic/proot_exec.c` | 保留配置的 exec 链 |
+| `src/payload/logic/proot_auxv.c` | guest PR_GET_AUXV |
+| `vendor/proot/src/path/` | 从原版 PRoot 提取的共享路径核心 |
+| `vendor/proot/port-tests/` | 核心与 ELF 集成回归 |
+| `test/syscalls/` | 沙盒 syscall 行为、分流和重入验证 |
+| `test/alpine/`、`test/ubuntu/` | rootfs 离线验收 |
+| `tools/agent_sandbox/`、`profiles/` | agent 策略规划原型，尚未连接执行层 |
+
+## 实现状态与下一步
+
+- [底层约束和历史经验](docs/SYSCALL_ENGINE_LESSONS.md)
+- [FD 身份与只读策略实施顺序](docs/FD_POLICY_PLAN.md)
+- [PRoot 移植记录](vendor/proot/SVC_PORT.md)
+- [agent 配置规划器](tools/agent_sandbox/README.md)
+- [Ubuntu auxv 故障与修复](test/ubuntu/AUXV_DIAGNOSIS.md)
+- [旧后端设计记录](docs/LEGACY_BACKEND.md)：历史材料，不是当前能力说明。
+
+保持路径翻译与访问策略轻量化；文件内容、FD 读写和文件偏移继续由内核管理，
+不构造一套完整的用户态 VFS。
