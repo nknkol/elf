@@ -10,8 +10,8 @@ through patched SVC sites; it does not provide kernel namespace isolation.
   context and acquiring a global lock on every syscall is nevertheless a
   concrete cost; any claimed speedup still needs measurement.
 - `fd91d2f` introduced reentry protection to prevent recursive hooks. It is
-  keyed by TPIDR_EL0, with 32 slots and a global spinlock. A full table or
-  nonzero depth causes passthrough. Slots are not reclaimed on thread exit.
+  originally keyed by TPIDR_EL0, with 32 slots and a global spinlock. A full table or
+  nonzero depth caused passthrough. Slots were not reclaimed on thread exit.
 - `f1cde57` explicitly fixed new-thread SIGSEGV by moving stub register saves
   from colliding TLS slots to the stack.
 - `e1c7902` added clone passthrough in the stub, before changing SP.
@@ -110,3 +110,31 @@ call and uses full register save/restore on selected slow calls. Establish
 native-vs-loader benchmarks for path lookup, open/stat, FD I/O and directory
 reads before claiming improvements. Semantics and policy checks must survive
 optimization; broad dispatch alone does not enforce access control.
+
+
+## Active-call guard update
+
+The guard now uses raw gettid and atomically claimed active-call slots. It
+releases the slot after each returning slow call, has no global spinlock and
+never reads guest TLS. Same-thread recursion still returns NULL and follows
+the existing reentry bypass. Capacity exhaustion returns -EAGAIN through the
+assembly error path, without issuing the guest syscall. There are still 32
+simultaneous slots; no allocation or unbounded wait is introduced. A failed
+claim can conservatively return EAGAIN even if another slot becomes free.
+
+`test/syscalls/check_guard.py` covers 1024 sequential owner identities, nested
+entry, full capacity and recovery, an occupied owner after a free hole, eight
+real concurrent threads and asynchronous signals during entry/leave. Owner
+identity/capacity cases use a test raw-gettid adapter; thread/signal tests use
+real kernel TIDs. The assembly selector test injects a guard error to prove
+that exhaustion is returned rather than passed through. The runtime and full
+filesystem regressions also pass. This adds a gettid syscall per slow entry;
+no performance improvement is claimed without measurements.
+
+Remaining lifecycle limitations: nonlocal exits from signal handlers can
+abandon slots; fork can inherit active owners from other threads; TID reuse
+can matter after an abandoned owner. A guest signal during an active hook
+still bypasses through the same-thread recursion rule. These require explicit
+signal/fork/lifecycle handling, not more slots or a silent fallback. The new
+stress test does not prove arbitrary signal-handler safety or hostile-code
+isolation.

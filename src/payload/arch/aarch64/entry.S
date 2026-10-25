@@ -72,6 +72,7 @@ slow_path:
     /* Reentry guard: bail out if this thread is already inside the hook */
     bl      reentry_try_enter
     cbz     x0, reentry_bypass
+    tbnz    x0, #63, guard_error
     mov     x19, x0
 
     /* Restore syscall number after C call clobbered caller-saved x8 */
@@ -87,6 +88,8 @@ slow_path:
     mov     x0, x19
     bl      reentry_leave
     mov     x0, x20
+guard_error:
+    /* Errors return to the guest without executing its syscall. */
     str     x0, [sp, #0]
 
     /* Restore SIMD/FP */

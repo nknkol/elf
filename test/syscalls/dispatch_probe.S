@@ -17,6 +17,14 @@ _start:
     b.ne fail
     b 1b
 2:
+    adr x23, fail_guard
+    mov x0, #1
+    str x0, [x23]
+    mov x8, #SYS_openat
+    bl hook_entry
+    cmn x0, #11
+    b.ne fail
+    str xzr, [x23]
     mov x8, #SYS_getpid
     bl hook_entry
     mov x20, x0
@@ -42,6 +50,12 @@ syscall_dispatcher:
     ret
 .global reentry_try_enter
 reentry_try_enter:
+    adr x0, fail_guard
+    ldr x0, [x0]
+    cbz x0, 3f
+    mov x0, #-11
+    ret
+3:
     mov x0, #1
     ret
 .global reentry_leave
@@ -50,6 +64,8 @@ reentry_leave:
 .data
 .global g_payload_config
 g_payload_config:
+    .quad 0
+fail_guard:
     .quad 0
 selected:
 #define SLOW_SYSCALL(n) .word n
