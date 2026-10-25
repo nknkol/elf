@@ -2,8 +2,7 @@
 
 The supplied `ubuntu-base-26.04.1-base-arm64.tar.gz` runs glibc 2.43 on the
 HarmonyOS host through the experimental ELF/PRoot backend. The current result
-is **16 of 18 acceptance cases passing**, with two unresolved Rust coreutils
-startup failures. See `acceptance.json` for fixture SHA-256 and per-case results.
+is **18 of 18 acceptance cases passing** after implementing guest PR_GET_AUXV. See `acceptance.json` for fixture SHA-256 and per-case results.
 The archive identity is recorded locally, not authenticated against upstream.
 
 Run from the ELF repository root:
@@ -27,12 +26,11 @@ substitution. This is concrete dynamic glibc coverage, not full container
 compatibility or a multithreaded glibc validation.
 
 Both `/usr/bin/ls` and `/usr/bin/cat` resolve to this image's Rust coreutils.
-They panic at rustix `backend/linux_raw/param/auxv.rs:269`, with Result::unwrap
-receiving Err(()), and the shell reports status 134. Targeted probes now show
-PR_GET_AUXV returns EINVAL and /proc/self/auxv is absent. A diagnostic host-auxv
-binding removes the panic but exposes loader identity, so it is not a valid
-fix. See [auxv diagnosis](AUXV_DIAGNOSIS.md) for faultlogger correlation and
-controlled results. Guest auxv virtualization remains unimplemented.
+They previously aborted during rustix auxv initialization. The backend now
+returns a snapshot of the guest startup auxv through PR_GET_AUXV; both commands
+pass without binding host /proc. See [auxv diagnosis](AUXV_DIAGNOSIS.md) for the
+original failure and the implemented fix. /proc/self/auxv file emulation is
+still absent; callers must use the supported prctl route.
 
 ## Extraction adaptation
 
@@ -51,5 +49,5 @@ may be placed beneath a symlink. Absolute guest symlinks and merged-/usr layout
 are preserved, and symlinks are created last. The default Alpine extraction
 continues to reject hardlinks. Expanded extraction is capped at 2 GiB.
 
-The next investigation is the Rust coreutils auxv startup failure, followed by
-real pthread/clone workloads, proc/dev interfaces and package operations.
+Remaining work includes real pthread/clone workloads, proc/dev interfaces and
+package operations.

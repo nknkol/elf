@@ -3,7 +3,7 @@
   "archive_sha256": "5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd",
   "os_release": "PRETTY_NAME=\"Ubuntu 26.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\nVERSION=\"26.04.1 LTS (Resolute Raccoon)\"\nVERSION_CODENAME=resolute\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=resolute\nLOGO=ubuntu-logo\n",
   "hardlinks": "materialized as regular copies; inode identity not tested",
-  "backend_commit": "e49f60c",
+  "backend_change": "guest PR_GET_AUXV snapshot",
   "glibc": "glibc 2.43",
   "results": [
     {
@@ -88,15 +88,13 @@
     },
     {
       "name": "Rust coreutils ls",
-      "status": "failed",
-      "returncode": 134,
-      "failure_signature": "rustix auxv initialization panic; root cause unresolved"
+      "status": "passed",
+      "returncode": 0
     },
     {
       "name": "Rust coreutils cat",
-      "status": "failed",
-      "returncode": 134,
-      "failure_signature": "rustix auxv initialization panic; root cause unresolved"
+      "status": "passed",
+      "returncode": 0
     }
   ]
 }

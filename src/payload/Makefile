@@ -32,7 +32,7 @@ CFLAGS += $(EXTRA_CFLAGS)
 ifeq ($(PROOT_PATH),1)
 PROOT_SRC ?= ../../vendor/proot
 CPPFLAGS += -DPROOT_PATH -D_GNU_SOURCE -I$(PROOT_SRC)/src
-OBJ += logic/proot_bridge.o logic/proot_exec.o $(addprefix proot-build/,path_helpers.o canon_core.o resolve_core.o binding_core.o runtime.o)
+OBJ += logic/proot_bridge.o logic/proot_exec.o logic/proot_auxv.o $(addprefix proot-build/,path_helpers.o canon_core.o resolve_core.o binding_core.o runtime.o)
 proot-build:
 	mkdir -p $@
 proot-build/%.o: $(PROOT_SRC)/src/path/%.c | proot-build

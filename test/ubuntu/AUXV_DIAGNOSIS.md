@@ -1,7 +1,8 @@
 # Ubuntu Rust coreutils auxv failure diagnosis
 
 Observed on 2026-10-25 in the `com.huawei.hmos.hishell` terminal sandbox.
-This is diagnosis only; the backend has not yet implemented guest auxv access.
+The original diagnosis is retained below. The implemented fix is described at
+the end; guest PR_GET_AUXV now works.
 
 ## Faultlogger correlation
 
@@ -64,3 +65,35 @@ missing interface. Add Rust ls/cat and guest-vs-host identity checks when the
 implementation is ready.
 
 No system crash logs, hardware fingerprints or full memory maps are committed.
+
+
+## Implemented fix and validation
+
+The loader snapshots its rewritten auxv, including AT_NULL, before compacting
+argv/env on the guest stack. The PROOT_PATH payload configuration carries up to
+64 pairs; larger vectors stop loader startup explicitly. Every exec reconstructs
+this snapshot. Static executables now receive AT_BASE=0 instead of retaining
+the loader's interpreter base. These changes require a matching rebuilt loader
+and payload; the experimental config extension is compiled only with PROOT_PATH.
+
+PR_GET_AUXV returns this guest snapshot, including guest AT_EXECFN and guest
+program/interpreter pointers. Zero-length queries return the snapshot length;
+short buffers receive only their requested prefix while the result reports the
+full length. Nonzero reserved arguments return EINVAL. An ephemeral CLOEXEC
+memfd plus kernel pread copies to the caller, so invalid buffers return EFAULT
+rather than faulting in payload memcpy. The FD is closed before returning.
+This uncommon initialization interface has extra syscalls and can fail with
+resource errors such as EMFILE; it is not the final performance design.
+
+The return-length/truncation/error convention follows Linux's
+[prctl_get_auxv implementation](https://github.com/torvalds/linux/blob/v6.6/kernel/sys.c).
+The emulated saved vector ends at AT_NULL rather than reproducing the kernel's
+fixed-sized storage padding. /proc/self/auxv is still not virtualized; the
+working route is PR_GET_AUXV, used by this image's rustix implementation.
+
+`vendor/proot/port-tests/test_auxv.py` checks the snapshot word-for-word against
+the startup stack, executable identity, static AT_BASE, zero/short buffers,
+invalid pointers and reserved flags. Both compat/container and exec chaining
+are covered. Ubuntu now passes all 18 cases, including Rust ls/cat; Alpine's
+18 cases and the existing filesystem, exec, metadata, guard, dispatch and SVC
+regressions also pass. No diagnostic host-auxv bind is used in those tests.

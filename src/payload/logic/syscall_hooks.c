@@ -155,6 +155,8 @@ static void syscall_common_scratch_free(struct syscall_common_scratch *scratch)
 
 long syscall_handle_common(long sys_no, long args[6]) {
 #ifdef PROOT_PATH
+    if (sys_no == SYS_prctl && args[0] == 0x41555856)
+        return proot_get_auxv(args);
     if (sys_no == SYS_execve || sys_no == SYS_execveat)
         return proot_execve(sys_no, args);
     if (proot_handles_syscall(sys_no))

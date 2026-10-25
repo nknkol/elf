@@ -20,6 +20,9 @@
 #define HOOK_LAYER_ISOLATION  (1 << 2)
 
 #define CONFIG_MAX_PATH     256
+#ifdef PROOT_PATH
+#define CONFIG_AUXV_PAIRS 64
+#endif
 #define CONFIG_MAX_BINDS    8
 #define CONFIG_MAX_ENVS     16
 #define CONFIG_MAX_OVERLAYS 8
@@ -81,6 +84,10 @@ typedef struct payload_config {
     char loader_path[CONFIG_MAX_PATH];
     char vfs_lower[CONFIG_MAX_PATH];
     char vfs_upper[CONFIG_MAX_PATH];
+#ifdef PROOT_PATH
+    uint64_t guest_auxv_bytes;
+    uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
+#endif
 } payload_config_t;
 
 extern payload_config_t g_payload_config;

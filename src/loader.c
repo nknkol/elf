@@ -2316,11 +2316,23 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 				 (void *)execfn, execfn ? execfn : "(null)");
 			break;
 		AVSET(AT_BASE, av, elf_interp ?
-				base[Z_INTERP] : av->a_un.a_val);
+				base[Z_INTERP] : 0);
 		}
 		++av;
 	}
 #undef AVSET
+#ifdef PROOT_PATH
+    /* Snapshot the rewritten guest vector BEFORE argv/env stack compaction.
+     * Pointer-valued entries refer to guest mappings or preserved stack strings.
+     * Each loader exec constructs a fresh snapshot; never read kernel loader auxv. */
+    if (payload_cfg) {
+        size_t pairs = (size_t)(av - av_start) + 1;
+        if (pairs > CONFIG_AUXV_PAIRS)
+            z_errx(1, "guest auxv exceeds payload capacity");
+        z_memcpy(payload_cfg->guest_auxv, av_start, pairs * sizeof(*av_start));
+        payload_cfg->guest_auxv_bytes = pairs * sizeof(*av_start);
+    }
+#endif
 	if (!saw_execfn)
 		z_printf("[Loader] AT_EXECFN not present in auxv\n");
 	++av;

@@ -254,3 +254,12 @@ initialization (shell status 134); the cause remains unresolved. The harness
 exits nonzero for these failures. Because native hardlinks are forbidden,
 archive hardlinks are explicitly materialized as independent file copies.
 See ../../test/ubuntu/README.md for extraction adaptations and exact scope.
+
+## Guest auxiliary vector
+
+PR_GET_AUXV now exposes the loader's rewritten guest startup vector, rebuilt
+across exec, rather than the kernel loader vector. Static AT_BASE is zero.
+Buffer size, truncation, EFAULT and reserved-argument checks have dedicated
+coverage in port-tests/test_auxv.py. Ubuntu's Rust ls/cat now pass, bringing
+its offline suite to 18/18. The /proc/self/auxv file interface is not implemented.
+See ../../test/ubuntu/AUXV_DIAGNOSIS.md for limits and the temporary-copy cost.
