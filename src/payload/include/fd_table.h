@@ -35,6 +35,16 @@ int fd_table_open(struct fd_table *, int fd, struct fd_origin, int cloexec);
 int fd_table_dup(struct fd_table *, int source, int target, int cloexec);
 int fd_table_set_cloexec(struct fd_table *, int fd, int cloexec);
 void fd_table_close(struct fd_table *, int fd);
+/* Delayed removal after a separately established close/reconciliation outcome.
+ * Capture the generation under exclusion before kernel entry (0 if untracked),
+ * then reenter exclusion to commit. Matching records are removed; absent records
+ * are already reconciled; a newer record returns ESTALE and is left unchanged.
+ * This is metadata ordering protection, NOT an atomic check-and-close: callers
+ * must separately prevent/reconcile reuse BEFORE the kernel close, retain the
+ * same table incarnation, and classify kernel errors. Never retry kernel close
+ * merely because metadata commit was delayed. ESTALE is bookkeeping status,
+ * not a replacement for the kernel return value. Unknown provenance is no grant. */
+int fd_table_close_generation(struct fd_table *, int fd, uint64_t generation);
 /* Call only for a successfully applied range; UNSHARE is adapter-owned. */
 int fd_table_range(struct fd_table *, unsigned first, unsigned last, int cloexec);
 void fd_table_exec(struct fd_table *);

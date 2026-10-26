@@ -80,6 +80,19 @@ void fd_table_close(struct fd_table *t, int fd)
         if (t->slots[i].fd == fd) t->slots[i] = (struct fd_record){.fd = -1};
 }
 
+int fd_table_close_generation(struct fd_table *t, int fd, uint64_t generation)
+{
+    if (!t || fd < 0) return -EINVAL;
+    for (size_t i = 0; i < t->capacity; i++) {
+        struct fd_record *slot = &t->slots[i];
+        if (slot->fd != fd) continue;
+        if (!generation || slot->generation != generation) return -ESTALE;
+        *slot = (struct fd_record){.fd = -1};
+        return 0;
+    }
+    return 0;
+}
+
 int fd_table_range(struct fd_table *t, unsigned first, unsigned last, int cloexec)
 {
     if (first > last || (cloexec != 0 && cloexec != 1)) return -EINVAL;

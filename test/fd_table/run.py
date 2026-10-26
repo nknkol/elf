@@ -38,3 +38,10 @@ with tempfile.TemporaryDirectory(prefix='fd-table-') as temp:
                     str(repo / 'test/fd_table/snapshot.c'), str(obj), str(snapshot_obj), str(handoff_obj),
                     '-o', str(snapshot_exe)], check=True)
     subprocess.run([str(snapshot_exe)], check=True, timeout=20)
+
+    close_exe = Path(temp) / 'close-commit'
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
+                    '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_table/close_commit.c'), str(obj),
+                    '-o', str(close_exe)], check=True)
+    subprocess.run([str(close_exe)], check=True, timeout=15)

@@ -303,3 +303,22 @@ operations creates a different issue: a successful close/open cannot be undone
 by returning EAGAIN on later bookkeeping. Runtime integration needs reservations,
 operation identity and a result-commit protocol. The new module is not linked to
 the default payload, and existing reentry bypass behavior remains unchanged.
+
+
+## Close completion must not delete a later FD incarnation
+
+A close may succeed, then another thread can reuse its descriptor number and
+publish new metadata before the first thread commits removal. Unconditional
+`fd_table_close` would erase the new provenance. The new generation-checked
+variant leaves a newer record unchanged and reports ESTALE; absent records are
+already reconciled, and a captured unknown generation cannot delete a newly
+tracked descriptor. A pthread fixture uses actual close/dup3 and verifies that
+the replacement /dev/zero FD remains readable after delayed bookkeeping.
+
+This protects only metadata completion ordering. A generation snapshot is not a
+kernel FD pin: reuse before kernel entry is a separate race. The same table
+incarnation must remain alive, and every lookup/commit requires exclusion.
+ESTALE must not overwrite the kernel result or trigger a retry of kernel close.
+Kernel error classification and reliable commit after guard contention remain
+unimplemented. Existing unconditional model operations remain for fully ordered
+events; neither API is enabled in default payload interception yet.

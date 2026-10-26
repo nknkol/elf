@@ -88,3 +88,10 @@ are checked. A freestanding object check requires no undefined symbols. Test
 retries and deliberate fork/exit while holding a lease are harness coordination
 and fault injection, not supported production usage. The guard must not span
 syscalls or callbacks; these tests do not solve syscall/bookkeeping atomicity.
+
+`close_commit.c` (run by `run.py`) orders real pthread close/dup3 operations so a
+new descriptor and provenance are published before the old close is committed.
+The generation-checked commit rejects stale removal and actual read verifies the
+replacement FD survives. Matching, absent and initially unknown generations are
+also covered. This does not test reuse before syscall entry, close EINTR/error
+classification, table-instance reuse or a runtime commit queue.
