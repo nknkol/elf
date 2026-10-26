@@ -103,3 +103,11 @@ publication, stale tickets, same-table overlap, capacity, cancellation and token
 exhaustion are checked. Blocking inside the guard is deliberate test coordination,
 not supported production usage. Kernel error classification and unknown-outcome
 recovery are outside this test; the queue is not enabled in the default payload.
+
+`close_exec.c` executes the production `fd_close_execute` orchestration with a
+raw-syscall shim: actual successful close and EBADF are checked against metadata.
+Injected post-kernel guard contention preserves the kernel return and queues
+bookkeeping without retrying close. Identity mismatch/gettid failure stop before
+close; injected EINTR/EACCES/EIO retain pending reservations and owner pins.
+These injected errors are not evidence of native close error effects. Default
+payload interception and automatic unknown-result recovery remain disabled.

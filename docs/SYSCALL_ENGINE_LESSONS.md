@@ -345,3 +345,20 @@ Drain errors may occur after earlier slots committed, and nonlocal death while
 mutating metadata must not be followed by blindly clearing its guard. No default
 payload interception, pre-kernel reuse prevention across uncooperative callers,
 close error adaptation or automatic abandoned-operation recovery is enabled.
+
+
+## Executable close adapter and conservative outcome handling
+
+`fd_close_execute` ties actual TID/handle validation, guarded preflight, queue
+reservation, one raw close, lock-free publication and best-effort drain together.
+Metadata status is separate from the kernel return after invocation. A later
+entry may drain earlier results but never re-executes those close syscalls.
+Native success and EBADF are checked in the integration fixture. Both permit
+removing matching old metadata; EBADF must not leave stale authorization alive.
+All other kernel results remain pending with EINPROGRESS bookkeeping status.
+
+The harness injects guard contention and uncertain EINTR/EACCES/EIO outcomes;
+these validate control flow, not native error semantics. Unknown outcomes keep
+pins and can exhaust capacity. No passthrough/retry fallback is provided. This
+adapter still runs only in the harness, not the default dispatcher: registry
+startup and all cooperating FD/clone/exec adapters must precede activation.
