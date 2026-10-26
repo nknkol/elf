@@ -28,6 +28,14 @@ CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin
 CPPFLAGS += $(INCLUDES)
 CFLAGS += $(EXTRA_CFLAGS)
 
+ifeq ($(FD_EXPERIMENT),1)
+ifneq ($(PROOT_PATH),1)
+$(error FD_EXPERIMENT requires PROOT_PATH=1)
+endif
+CPPFLAGS += -DFD_EXPERIMENT
+OBJ += $(addprefix logic/,fd_experiment.o fd_table.o fd_clone.o fd_registry.o fd_guard.o fd_close_queue.o fd_close_exec.o)
+endif
+
 # Explicit opt-in while only a subset of file syscalls is migrated.
 ifeq ($(PROOT_PATH),1)
 PROOT_SRC ?= ../../vendor/proot
@@ -42,7 +50,7 @@ proot-build/runtime.o: $(PROOT_SRC)/svc/runtime.c | proot-build
 -include proot-build/*.d
 endif
 
-$(ARCH_DIR)/entry.o: $(ARCH_DIR)/syscall_nums.h $(ARCH_DIR)/slow_syscalls.inc
+$(ARCH_DIR)/entry.o: $(ARCH_DIR)/syscall_nums.h $(ARCH_DIR)/slow_syscalls.inc $(ARCH_DIR)/fd_experiment_syscalls.inc
 
 all: $(TARGET)
 

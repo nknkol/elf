@@ -31,9 +31,16 @@ real_entry:
      * separate notification gate; legacy stubs bypass before touching SP.
      * Never execute clone inside the ordinary dispatcher/guard C frames. */
     cmp     x8, #SYS_clone
+#ifdef FD_EXPERIMENT
+    b.eq    slow_path
+#else
     b.eq    fast_passthrough
+#endif
 
 #define SLOW_SYSCALL(n) cmp x8, n; b.eq slow_path
+#ifdef FD_EXPERIMENT
+#include "fd_experiment_syscalls.inc"
+#endif
 #include "slow_syscalls.inc"
 #undef SLOW_SYSCALL
     b       fast_passthrough
@@ -77,7 +84,14 @@ slow_path:
 
     /* Reentry guard: bail out if this thread is already inside the hook */
     bl      reentry_try_enter
+#ifdef FD_EXPERIMENT
+    cbnz    x0, 1f
+    mov     x0, #-35 /* EDEADLK; never bypass nested metadata mutations */
+    b       guard_error
+1:
+#else
     cbz     x0, reentry_bypass
+#endif
     tbnz    x0, #63, guard_error
     mov     x19, x0
 

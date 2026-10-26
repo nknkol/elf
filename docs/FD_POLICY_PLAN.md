@@ -1,6 +1,6 @@
 # FD 身份与只读策略实施顺序
 
-状态：FD 元数据核心已实现并独立测试，运行时接入及权限执行仍未实现。先解决对象身份，再连接策略；
+状态：独立实验构建已接入单任务 openat/dup/fcntl/close 跟踪；默认运行时与权限执行仍未启用。
 当前 root/bind 只提供路径映射，agent JSON 只生成计划。
 
 ## 当前实现与缺口
@@ -320,3 +320,19 @@ clone/rt_sigreturn 等入口约束，并对未知接口采用经过设计的策�
 路径解析到最终宿主 syscall 仍有竞争窗口；raw syscall 直接入口和同线程重入绕过
 仍未解决。完成上述策略功能也不自动解决这些问题。系统沙盒继续作为部署边界，
 在绕过和竞争问题闭环前，不宣称可隔离恶意 guest。
+
+
+## 首条运行时闭环（FD_EXPERIMENT）
+
+`make check-fd-runtime` 构建独立 `elfloader-proot-fd-experiment`。真实 dispatcher
+现在可初始化单任务登记、跟踪 openat/dup/dup3/fcntl 和调用已有 close 执行流程；
+所有来源仍标记 UNKNOWN，不执行只读或默认拒绝策略。普通构建不启用这些入口。
+
+实验模式拒绝 clone/exec/close_range 等生命周期变更，额外分流 pipe/socket 等部分
+原本快路径的创建接口后拒绝；同线程嵌套慢调用返回 EDEADLK，不再旁路执行。
+端到端 guest 通过专用诊断 prctl 核对真实 payload 的记录、复制身份、CLOEXEC、关闭、
+失败保持及 128 条容量边界。已有 Alpine BusyBox 和 Ubuntu cat 均完成文件读取烟测。
+
+这替代了“只有独立 harness”的状态，但不是多任务完整跟踪，更不是权限隔离完成。
+使用方式、拒绝范围、诊断接口和共享构建目录限制见 ../test/fd_runtime/README.md。
+前文各独立模块阶段的“未接入默认 payload”仍然成立；实验构建按明确限制先形成闭环。

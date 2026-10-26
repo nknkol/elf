@@ -89,3 +89,9 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 
 保持路径翻译与访问策略轻量化；文件内容、FD 读写和文件偏移继续由内核管理，
 不构造一套完整的用户态 VFS。
+
+
+单任务 FD 跟踪实验：`make check-fd-runtime` 构建独立的
+`vendor/proot/svc/build/elfloader-proot-fd-experiment`，实际接通 openat、dup/fcntl
+和 close 元数据跟踪。它拒绝 clone/exec 等尚未支持的操作，不提供权限隔离。
+详见 [实验使用说明](test/fd_runtime/README.md)。普通构建保持原行为。

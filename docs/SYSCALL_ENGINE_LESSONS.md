@@ -398,3 +398,22 @@ close followed by an injected error, verifying metadata removal, unchanged kerne
 state during reconciliation and restored capacity. Native EINTR/EIO effects are
 not claimed. State encoding now reserves three bits (61-bit slot generation);
 there is no persisted format or default payload ABI change.
+
+## First actual FD runtime loop
+
+The separate FD_EXPERIMENT build now routes real guest openat/dup/dup3/fcntl and
+close through a single-task registry. Its guest fixture links no metadata code:
+prctl diagnostics inspect the payload's table after actual syscalls. Missing fast
+routes matter: the first end-to-end test found pipe2 still bypassed the dispatcher,
+so experimental deny routes are explicitly added without changing normal routing.
+Clone/exec and selected unsupported lifecycle/FD creators are refused; same-TID
+nested slow calls return EDEADLK. This restricted execution model stabilizes
+preflight capacity across kernel operations without holding a metadata guard.
+
+An independent named loader/manifest keeps the experiment separate from default
+container behavior. Real Alpine BusyBox and Ubuntu cat smoke tests pass, and the
+normal build retains both 18/18 suites. This is actual runtime metadata tracking,
+not readonly/default-deny enforcement: origins remain UNKNOWN, alternate paths
+and raw-entry bypasses are not an adversarial boundary. See test/fd_runtime for
+commands, diagnostic ABI and limitations. Build variants share intermediate files
+and must not be built concurrently.

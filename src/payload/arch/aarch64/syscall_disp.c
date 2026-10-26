@@ -1,4 +1,7 @@
 #include "syscall_hooks.h"
+#ifdef FD_EXPERIMENT
+#include "fd_experiment.h"
+#endif
 
 typedef struct {
     unsigned long regs[30]; // x0 - x29
@@ -21,5 +24,9 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     args[4] = a[4];
     args[5] = a[5];
 
+#ifdef FD_EXPERIMENT
+    return fd_experiment_dispatch(sys_no, args);
+#else
     return syscall_handle_common(sys_no, args);
+#endif
 }

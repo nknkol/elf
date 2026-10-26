@@ -4,10 +4,11 @@
 PYTHON ?= python3
 ALPINE_ARCHIVE ?=
 UBUNTU_ARCHIVE ?=
-.PHONY: help build check check-alpine check-ubuntu
+.PHONY: help build check check-alpine check-ubuntu check-fd-runtime
 help:
 	@echo 'make build        Build the AArch64 ELF/PRoot backend'
 	@echo 'make check        Build and run core/backend regressions'
+	@echo 'make check-fd-runtime Build and test single-task FD tracking experiment'
 	@echo 'make check-alpine ALPINE_ARCHIVE=/path/to/rootfs.tar.gz'
 	@echo 'make check-ubuntu UBUNTU_ARCHIVE=/path/to/rootfs.tar.gz'
 	@echo 'Output: vendor/proot/svc/build/elfloader-proot'
@@ -38,3 +39,7 @@ check-ubuntu:
 	@test -n "$(UBUNTU_ARCHIVE)" && test -f "$(UBUNTU_ARCHIVE)" || { echo 'Set UBUNTU_ARCHIVE to an existing rootfs archive' >&2; exit 2; }
 	$(MAKE) build
 	$(PYTHON) test/ubuntu/run.py "$(UBUNTU_ARCHIVE)"
+
+check-fd-runtime:
+	$(PYTHON) vendor/proot/svc/build_elf.py --fd-experiment
+	$(PYTHON) test/fd_runtime/run.py
