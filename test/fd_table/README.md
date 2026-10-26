@@ -72,3 +72,11 @@ rejected preparation are covered. A native SVC probe verifies this host's child
 thread x29 reset before enabling that fixture expectation. This test is host-
 specific, not a portable inference of CLONE_FILES semantics. It does not enable
 payload FD interception, global task registration or concurrent FD mutations.
+
+The real FD clone harness now reserves/publishes through `fd_registry.c` and
+retires handles after kernel task exit. Failed/rejected clones cancel their
+reservation from cookie cleanup. Registry storage is preallocated MAP_SHARED;
+handshakes serialize operations, so this is not a concurrent registry test.
+`registry.c` separately checks task/table capacity, copied snapshots, shared
+ownership, cancellation, last-owner recycling, stale handles after slot/TID
+reuse and generation overflow. No default payload FD interception is enabled.

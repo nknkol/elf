@@ -12,8 +12,18 @@ with tempfile.TemporaryDirectory(prefix='fd-clone-') as temp:
     subprocess.run([str(native)], check=True, timeout=5)
     files = ['test/fd_table/clone_fd_test.c', 'test/fd_table/clone_notify_probe.S',
              'src/payload/arch/aarch64/clone_entry.S', 'src/payload/logic/clone_notify.c',
-             'src/payload/logic/fd_table.c', 'src/payload/logic/fd_clone.c']
+             'src/payload/logic/fd_table.c', 'src/payload/logic/fd_clone.c',
+             'src/payload/logic/fd_registry.c']
     subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror', '-Wl,-no-pie', '-DHOST_THREAD_FP_ZERO',
                     '-I' + str(repo / 'src/payload/include'),
                     *[str(repo / f) for f in files], '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, timeout=30)
+
+    registry = Path(temp) / 'registry'
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_table/registry.c'),
+                    *[str(repo / ('src/payload/logic/' + name + '.c'))
+                      for name in ('fd_table', 'fd_clone', 'fd_registry')],
+                    '-o', str(registry)], check=True)
+    subprocess.run([str(registry)], check=True, timeout=10)

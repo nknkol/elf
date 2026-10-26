@@ -264,3 +264,19 @@ A separate libc-free native clone probe reproduces it without the ELF engine.
 The FD clone fixture checks that native behavior before expecting zero only for
 thread children. Existing non-thread register tests remain unchanged, and the
 production trampoline still restores the kernel-returned context.
+
+
+## Registry ownership before runtime synchronization
+
+`fd_registry.c` reserves task/table capacity before clone, maintains explicit
+copied/shared ownership, and identifies owners by slot plus generation. Task
+exit retirement requires the matching handle, confirmed exit and no remaining
+notification/readers; a TID lookup alone is not authorization to free storage.
+Last-owner recycling clears old provenance on reuse. A child's cookie cleanup
+cancels unpublished reservations, but must not free an adopted live table.
+
+The caller supplies inherited storage and serialized access. The module has no
+lock across clone and no implicit claim of reentrant or concurrent safety.
+Real-clone tests use handshake ordering, then wait for kernel task disappearance
+before retiring a handle. Arbitrary signal reentry, concurrent FD operations,
+unknown exits and exec still require a runtime synchronization/lifecycle layer.
