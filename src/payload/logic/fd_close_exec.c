@@ -27,7 +27,8 @@ long fd_close_execute(struct fd_close_queue *q,struct fd_registry *r,struct fd_g
     /* EBADF proves this descriptor absent at kernel close, not an unchanged
      * stale metadata entry. Generation checks still protect later adoption. */
     if (result && result!=-EBADF) {
-        *bookkeeping=-EINPROGRESS;
+        rc=fd_close_publish(q,ticket,FD_CLOSE_UNKNOWN);
+        *bookkeeping=rc?rc:-EINPROGRESS;
         return result;
     }
     rc=fd_close_publish(q,ticket,FD_CLOSE_REMOVE);

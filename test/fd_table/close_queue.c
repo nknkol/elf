@@ -45,7 +45,8 @@ int main(void)
     fd=open("/dev/null",O_RDONLY);assert(fd>=0);
     assert(fd_table_open(table,fd,(struct fd_origin){7,FD_ACCESS_RO},0)==0);
     assert(fd_close_prepare(&queue,&registry,owner,fd,&operation)==0);
-    assert(fd_close_drain(&queue,&registry)==0); /* unknown outcome stays pinned */
+    assert(fd_close_drain(&queue,&registry)==0); /* no returned outcome yet */
+    assert(fd_close_forget_unknown(&queue,table,fd)==-EINPROGRESS);
     assert(fd_registry_retire(&registry,owner)==-EBUSY);
     assert(pthread_barrier_init(&held,NULL,2)==0 && pthread_barrier_init(&published,NULL,2)==0);
     pthread_t thread;assert(pthread_create(&thread,NULL,drainer,NULL)==0);
@@ -88,8 +89,8 @@ int main(void)
     assert(fd_close_drain(&queue,&registry)==1);
     assert(fd_table_get(table,fd)->origin.mount_id==9);
     /* No fresh token can wrap and become equal to a stale operation. */
-    slots[0].state=UINT64_MAX & ~UINT64_C(3);
-    slots[1].state=UINT64_MAX & ~UINT64_C(3);
+    slots[0].state=UINT64_MAX & ~UINT64_C(7);
+    slots[1].state=UINT64_MAX & ~UINT64_C(7);
     assert(fd_close_prepare(&queue,&registry,owner,fd,&untouched)==-EOVERFLOW);
     assert(tasks[owner.slot].pending==0);
     assert(fd_registry_retire(&registry,owner)==0);

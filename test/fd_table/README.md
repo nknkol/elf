@@ -118,3 +118,11 @@ can still share and unpin restores progress. Close execution tests fill metadata
 capacity and close a real untracked FD without changing existing records; unknown
 outcomes also block registry clone preparation. Default clone/close interception
 remains unchanged.
+
+Unknown close outcomes now have a distinct published state. Tests reject
+reconciliation of in-flight RESERVED slots and explicitly withdraw provenance
+from returned UNKNOWN outcomes, checking duplicate/missing requests and pin
+release. Injected errors cover both an actually closed FD and a surviving native
+FD; read/fcntl and close counters verify no kernel retry/probe during recovery.
+These are injected outcome scenarios, not native EINTR/EIO classification. The
+explicit recovery leaves live FDs untracked and is not enabled automatically.

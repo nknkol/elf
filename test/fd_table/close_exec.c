@@ -9,13 +9,16 @@
 #include "fd_close_exec.h"
 static struct fd_guard guard;
 static struct fd_guard_lease blocker;
-static int calls,inject_error,block_after,gettid_error;
+static int calls,inject_error,block_after,gettid_error,close_before_error;
 long raw_syscall(long n,long a,long b,long c,long d,long e,long f)
 {
     if(n==SYS_gettid && gettid_error)return -gettid_error;
     if(n==SYS_close) {
         calls++;
-        if(inject_error)return -inject_error; /* injected uncertainty, no native claim */
+        if(inject_error) {
+            if(close_before_error)assert(syscall(SYS_close,a)==0);
+            return -inject_error;
+        } /* injected uncertainty, no native claim */
     }
     long result=syscall(n,a,b,c,d,e,f);if(result==-1)result=-errno;
     if(n==SYS_close && block_after) {
@@ -86,6 +89,35 @@ int main(void)
     assert(fd_registry_clone(&r,owner,FD_CLONE_COPY,&untouched)==-EBUSY);
     assert(fd_registry_clone(&r,owner,FD_CLONE_SHARE,&untouched)==-EBUSY);
     assert(untouched.slot==99 && untouched.generation==123);
+    /* A returned error is distinguishable from an in-flight close. Explicit
+     * reconciliation drops provenance without attempting another kernel close. */
+    for(int i=0;i<3;i++) {
+        assert(fd_close_forget_unknown(&q,t,100+i)==0);
+        assert(fd_close_forget_unknown(&q,t,100+i)==-EALREADY);
+    }
+    assert(fd_close_drain(&q,&r)==3 && tasks[owner.slot].pending==0 && calls==8);
+    assert(fd_registry_clone(&r,owner,FD_CLONE_SHARE,&untouched)==0);
+    assert(fd_registry_cancel(&r,untouched)==0);
+    fd_table_close(t,1000); /* make room for the native surviving descriptor */
+    fd=open("/dev/zero",O_RDONLY);assert(fd>=0);
+    assert(fd_table_open(t,fd,(struct fd_origin){77,FD_ACCESS_RW},0)==0);
+    inject_error=EINTR;
+    assert(fd_close_execute(&q,&r,&guard,owner,fd,&bookkeeping)==-EINTR);
+    assert(calls==9 && bookkeeping==-EINPROGRESS && fd_table_get(t,fd));
+    assert(fd_close_forget_unknown(&q,t,fd)==0);
+    assert(fd_close_drain(&q,&r)==1 && !fd_table_get(t,fd));
+    char byte=1;assert(read(fd,&byte,1)==1 && byte==0); /* still open, now unknown */
+    assert(calls==9 && tasks[owner.slot].pending==0);
+    assert(fd_close_forget_unknown(&q,t,fd)==-ENOENT);
+    assert(close(fd)==0);
+    fd=open("/dev/null",O_RDONLY);assert(fd>=0);
+    assert(fd_table_open(t,fd,(struct fd_origin){78,FD_ACCESS_RO},0)==0);
+    inject_error=EIO;close_before_error=1;
+    assert(fd_close_execute(&q,&r,&guard,owner,fd,&bookkeeping)==-EIO);
+    assert(calls==10 && bookkeeping==-EINPROGRESS);
+    assert(fd_close_forget_unknown(&q,t,fd)==0 && fd_close_drain(&q,&r)==1);
+    assert(!fd_table_get(t,fd) && fcntl(fd,F_GETFD)==-1 && errno==EBADF);
+    assert(calls==10 && tasks[owner.slot].pending==0);
     puts("PASS: close execution preserves native results, defers bookkeeping without syscall retry, and quarantines injected uncertain errors");
     return 0;
 }

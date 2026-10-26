@@ -379,3 +379,22 @@ A real close test fills metadata capacity first, then closes an untracked FD and
 checks EBADF natively while all existing metadata remains intact. Uncertain
 outcomes continue to block clone preparation/retirement and consume queue space;
 no unknown-result recovery or passthrough was introduced.
+
+
+## Separate in-flight reservations from returned uncertainty
+
+Queue state now distinguishes RESERVED from UNKNOWN. Only an actual returned
+uncertain close outcome publishes UNKNOWN; an interrupted/dead caller that never
+published remains reserved. Ordinary drain skips both. Under metadata exclusion,
+`fd_close_forget_unknown` explicitly converts UNKNOWN to generation-checked
+provenance removal; drain then releases its owner pin. RESERVED is rejected with
+EINPROGRESS, and completed/missing entries cannot be retired twice.
+
+This is conservative deauthorization, not an inference about whether the kernel
+closed an FD. It performs no probe or close retry. A surviving descriptor becomes
+untracked and requires unknown-provenance policy; existence alone cannot prove
+its old object identity. Fault injection covers both a still-live FD and a real
+close followed by an injected error, verifying metadata removal, unchanged kernel
+state during reconciliation and restored capacity. Native EINTR/EIO effects are
+not claimed. State encoding now reserves three bits (61-bit slot generation);
+there is no persisted format or default payload ABI change.

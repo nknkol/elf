@@ -12,7 +12,8 @@
  * publication, EINPROGRESS unknown kernel effect (all stored as negative errno).
  * Other negative bookkeeping errors require reconciliation, not kernel retry.
  * Only 0 and EBADF establish removal here. No assumptions about EINTR or other
- * host errors; their reservations stay pinned. This is NOT default interception
+ * host errors; they publish UNKNOWN and stay pinned until explicit provenance
+ * withdrawal/reconciliation. This is NOT default interception
  * or permission enforcement, and does not bypass registry on any error. */
 long fd_close_execute(struct fd_close_queue *,struct fd_registry *,struct fd_guard *,
                       struct fd_task_handle,int fd,int *bookkeeping);

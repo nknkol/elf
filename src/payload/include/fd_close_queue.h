@@ -23,12 +23,21 @@ int fd_close_prepare(struct fd_close_queue *,struct fd_registry *,
                      struct fd_task_handle,int fd,struct fd_close_ticket *);
 /* Negative fd queries any pending operation on this table. */
 int fd_close_pending(const struct fd_close_queue *,const struct fd_table *,int fd);
-enum fd_close_effect { FD_CLOSE_KEEP, FD_CLOSE_REMOVE };
+enum fd_close_effect { FD_CLOSE_KEEP, FD_CLOSE_REMOVE, FD_CLOSE_UNKNOWN };
 /* Does NOT infer close semantics from errno. Caller classifies the established
  * kernel effect; cancellation BEFORE kernel entry publishes KEEP. Uncertain or
- * interrupted results must remain reserved pending an explicit reconciliation.
+ * returned uncertain results publish UNKNOWN; in-flight/interrupted callers
+ * that have not returned remain RESERVED. Neither is drained automatically.
  * No kernel syscall/retry, allocation or lock acquisition occurs here. */
 int fd_close_publish(struct fd_close_queue *,struct fd_close_ticket,enum fd_close_effect);
+/* Under registry exclusion, withdraw old provenance for a returned UNKNOWN
+ * result. Turns it into a REMOVE completion; drain then releases the owner pin.
+ * No syscall/probe/retry is performed. A surviving FD becomes untracked, NEVER
+ * implicitly authorized. Returns EINPROGRESS for a still-running reservation,
+ * EALREADY for an established completion, ENOENT if no matching operation.
+ * Caller must retain valid table storage and enforce unknown-provenance policy.
+ * This does not recover a dead caller that never published a kernel result. */
+int fd_close_forget_unknown(struct fd_close_queue *,const struct fd_table *,int fd);
 /* Returns number drained; stale generations preserve the newer record. Keep
  * kernel return value unchanged. Table pin released only after metadata commit.
  * Unknown outcomes/abandoned reservations stay pinned; no automatic recovery.
