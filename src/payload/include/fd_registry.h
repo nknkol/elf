@@ -25,6 +25,8 @@ struct fd_registry {
 int fd_registry_init(struct fd_registry *, struct fd_task_slot *, size_t,
                      struct fd_table_slot *, size_t, struct fd_record *, size_t);
 int fd_registry_create(struct fd_registry *, struct fd_task_handle *);
+/* Any outstanding pin on the parent table (including a sibling owner) blocks
+ * both COPY and SHARE preparation with EBUSY until results are reconciled. */
 int fd_registry_clone(struct fd_registry *, struct fd_task_handle parent,
                       enum fd_clone_mode, struct fd_task_handle *);
 int fd_registry_publish(struct fd_registry *, struct fd_task_handle, long tid);

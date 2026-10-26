@@ -65,6 +65,12 @@ int fd_registry_clone(struct fd_registry *r, struct fd_task_handle h,
     if (mode!=FD_CLONE_COPY && mode!=FD_CLONE_SHARE) return -EINVAL;
     struct fd_task_slot *parent=resolve(r,h);
     if (!parent || parent->state!=LIVE) return -ESTALE;
+    /* Pending kernel outcomes belong to the table, not merely this caller.
+     * Another sharing task may hold the pin. Never snapshot unresolved state
+     * or introduce a new owner while that table's lifecycle is unsettled. */
+    for (size_t i=0;i<r->task_count;i++)
+        if (r->tasks[i].state && r->tasks[i].table_slot==parent->table_slot &&
+            r->tasks[i].pending) return -EBUSY;
     return reserve(r,parent,mode,out);
 }
 int fd_registry_publish(struct fd_registry *r, struct fd_task_handle h,long tid)

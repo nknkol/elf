@@ -362,3 +362,20 @@ these validate control flow, not native error semantics. Unknown outcomes keep
 pins and can exhaust capacity. No passthrough/retry fallback is provided. This
 adapter still runs only in the harness, not the default dispatcher: registry
 startup and all cooperating FD/clone/exec adapters must precede activation.
+
+
+## Pending outcomes are table-wide clone barriers
+
+Registry clone preparation previously relied on callers to check close pending
+state. It now rejects both COPY and SHARE when any owner of the source table has
+an outstanding pin. Checking only the requesting task would let another sharing
+thread snapshot unresolved metadata. Tests pin one sibling and request clones
+from another, verify no output/capacity mutation, and confirm an independent copy
+remains usable and preparation resumes after unpin. This core check is not yet
+connected to default clone interception.
+
+An untracked close needs a queue reservation, not a free provenance record.
+A real close test fills metadata capacity first, then closes an untracked FD and
+checks EBADF natively while all existing metadata remains intact. Uncertain
+outcomes continue to block clone preparation/retirement and consume queue space;
+no unknown-result recovery or passthrough was introduced.

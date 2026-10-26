@@ -34,6 +34,15 @@ int main(void)
     assert(fd_registry_clone(&r,root,FD_CLONE_SHARE,&share)==0);
     assert(fd_registry_table(&r,share)==source);
     assert(fd_registry_publish(&r,share,102)==0);
+    assert(fd_registry_pin(&r,share)==0);
+    assert(fd_registry_clone(&r,root,FD_CLONE_COPY,&unchanged)==-EBUSY);
+    assert(fd_registry_clone(&r,root,FD_CLONE_SHARE,&unchanged)==-EBUSY);
+    assert(fd_registry_clone(&r,share,FD_CLONE_SHARE,&unchanged)==-EBUSY);
+    assert(unchanged.slot==99 && unchanged.generation==123);
+    /* A separate copied table is unaffected by the shared family's pin. */
+    assert(fd_registry_clone(&r,copy,FD_CLONE_SHARE,&spare)==0);
+    assert(fd_registry_cancel(&r,spare)==0);
+    assert(fd_registry_unpin(&r,share)==0);
     assert(fd_registry_clone(&r,root,FD_CLONE_SHARE,&spare)==0);
     assert(fd_registry_clone(&r,root,FD_CLONE_SHARE,&unchanged)==-ENOSPC); /* tasks full */
     assert(fd_registry_cancel(&r,spare)==0);

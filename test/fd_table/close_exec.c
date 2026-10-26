@@ -64,6 +64,13 @@ int main(void)
     assert(fd_table_open(t,fd,(struct fd_origin){19,FD_ACCESS_RO},0)==0);
     assert(fd_close_execute(&q,&r,&guard,owner,fd,&bookkeeping)==0);
     assert(calls==4 && bookkeeping==0 && !fd_table_get(t,fd));
+    /* Closing an untracked inherited FD must work even with a full metadata
+     * table; removal requires a queue slot, not a new provenance entry. */
+    for(int i=0;i<4;i++)assert(fd_table_open(t,1000+i,(struct fd_origin){20,FD_ACCESS_RO},0)==0);
+    fd=open("/dev/null",O_RDONLY);assert(fd>=0 && !fd_table_get(t,fd));
+    assert(fd_close_execute(&q,&r,&guard,owner,fd,&bookkeeping)==0);
+    assert(calls==5 && bookkeeping==0 && fcntl(fd,F_GETFD)==-1 && errno==EBADF);
+    for(int i=0;i<4;i++)assert(fd_table_get(t,1000+i)->origin.mount_id==20);
     /* Unknown errors are NOT guessed as KEEP/REMOVE and are never retried. */
     const int errors[]={EINTR,EACCES,EIO};
     for(unsigned i=0;i<3;i++) {
@@ -71,10 +78,14 @@ int main(void)
         assert(fd_close_execute(&q,&r,&guard,owner,100+(int)i,&bookkeeping)==-errors[i]);
         assert(bookkeeping==-EINPROGRESS);
     }
-    assert(calls==7 && tasks[owner.slot].pending==3);
-    assert(fd_close_execute(&q,&r,&guard,owner,100,&bookkeeping)==-EBUSY && calls==7);
-    assert(fd_close_execute(&q,&r,&guard,owner,200,&bookkeeping)==-ENOSPC && calls==7);
+    assert(calls==8 && tasks[owner.slot].pending==3);
+    assert(fd_close_execute(&q,&r,&guard,owner,100,&bookkeeping)==-EBUSY && calls==8);
+    assert(fd_close_execute(&q,&r,&guard,owner,200,&bookkeeping)==-ENOSPC && calls==8);
     assert(fd_registry_retire(&r,owner)==-EBUSY && fd_close_drain(&q,&r)==0);
+    struct fd_task_handle untouched={99,123};
+    assert(fd_registry_clone(&r,owner,FD_CLONE_COPY,&untouched)==-EBUSY);
+    assert(fd_registry_clone(&r,owner,FD_CLONE_SHARE,&untouched)==-EBUSY);
+    assert(untouched.slot==99 && untouched.generation==123);
     puts("PASS: close execution preserves native results, defers bookkeeping without syscall retry, and quarantines injected uncertain errors");
     return 0;
 }

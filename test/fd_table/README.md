@@ -111,3 +111,10 @@ bookkeeping without retrying close. Identity mismatch/gettid failure stop before
 close; injected EINTR/EACCES/EIO retain pending reservations and owner pins.
 These injected errors are not evidence of native close error effects. Default
 payload interception and automatic unknown-result recovery remain disabled.
+
+Registry tests additionally verify table-wide pending barriers: a sibling's pin
+blocks COPY/SHARE without consuming output handles, while an independent table
+can still share and unpin restores progress. Close execution tests fill metadata
+capacity and close a real untracked FD without changing existing records; unknown
+outcomes also block registry clone preparation. Default clone/close interception
+remains unchanged.
