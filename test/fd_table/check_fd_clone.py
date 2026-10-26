@@ -27,3 +27,18 @@ with tempfile.TemporaryDirectory(prefix='fd-clone-') as temp:
                       for name in ('fd_table', 'fd_clone', 'fd_registry')],
                     '-o', str(registry)], check=True)
     subprocess.run([str(registry)], check=True, timeout=10)
+
+    guard_obj = Path(temp) / 'guard.o'
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror', '-ffreestanding',
+                    '-fno-builtin', '-fno-stack-protector',
+                    '-I' + str(repo / 'src/payload/include'), '-c',
+                    str(repo / 'src/payload/logic/fd_guard.c'), '-o', str(guard_obj)], check=True)
+    assert not subprocess.check_output(['llvm-nm', '--undefined-only', str(guard_obj)], text=True).strip()
+    guard = Path(temp) / 'guard'
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
+                    '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_table/guard.c'), str(guard_obj),
+                    *[str(repo / ('src/payload/logic/' + name + '.c'))
+                      for name in ('fd_table', 'fd_clone', 'fd_registry')],
+                    '-o', str(guard)], check=True)
+    subprocess.run([str(guard)], check=True, timeout=20)

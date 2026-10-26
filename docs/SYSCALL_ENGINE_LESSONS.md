@@ -280,3 +280,26 @@ lock across clone and no implicit claim of reentrant or concurrent safety.
 Real-clone tests use handshake ordering, then wait for kernel task disappearance
 before retiring a handle. Arbitrary signal reentry, concurrent FD operations,
 unknown exits and exec still require a runtime synchronization/lifecycle layer.
+
+
+## Nonwaiting metadata exclusion is not syscall atomicity
+
+The existing slow-path reentry guard admits multiple tasks and bypasses same-TID
+reentry; it cannot serialize registry/table mutation. `fd_guard.c` instead uses
+one lock-free 64-bit CAS containing TID and a 32-bit lease generation. Contention
+and recursion return immediately, stale releases cannot unlock later ownership,
+and generation exhaustion fails rather than wraps. Caller-provided TIDs must be
+actual kernel identities in the same namespace. No automatic dead-owner reset
+is safe because a terminated owner may have partially changed metadata.
+
+Four threads perform 8,000 protected registry/table transactions; a real signal
+handler verifies EDEADLK, and fork fault injection checks inherited shared state
+and dead-owner retention. The production primitive never waits; test coordination
+may retry outside it. This is not a benchmark or an end-to-end FD race test.
+
+Only metadata-only sections may hold the guard. Keeping it across clone, blocking
+syscalls or callbacks risks deadlock/progress failure. Releasing it around kernel
+operations creates a different issue: a successful close/open cannot be undone
+by returning EAGAIN on later bookkeeping. Runtime integration needs reservations,
+operation identity and a result-commit protocol. The new module is not linked to
+the default payload, and existing reentry bypass behavior remains unchanged.

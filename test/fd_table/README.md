@@ -80,3 +80,11 @@ handshakes serialize operations, so this is not a concurrent registry test.
 `registry.c` separately checks task/table capacity, copied snapshots, shared
 ownership, cancellation, last-owner recycling, stale handles after slot/TID
 reuse and generation overflow. No default payload FD interception is enabled.
+
+`guard.c` uses the production nonwaiting `fd_guard.c` to serialize 8,000 registry
+and table transactions across four threads. Real signal reentry, stale/duplicate
+leases, fork-inherited ownership, dead-owner retention and generation exhaustion
+are checked. A freestanding object check requires no undefined symbols. Test
+retries and deliberate fork/exit while holding a lease are harness coordination
+and fault injection, not supported production usage. The guard must not span
+syscalls or callbacks; these tests do not solve syscall/bookkeeping atomicity.
