@@ -51,7 +51,8 @@ static int reserve(struct fd_registry *r, struct fd_task_slot *parent,
                                 mode==FD_CLONE_COPY?&b->table:0,mode);
         if (rc) return rc;
     } else prepared.table=&b->table;
-    r->tasks[task]=(struct fd_task_slot){++r->serial,RESERVED,table,prepared};
+    r->tasks[task]=(struct fd_task_slot){.generation=++r->serial,.state=RESERVED,
+        .table_slot=table,.clone=prepared};
     b->owners++;
     *out=(struct fd_task_handle){task,r->serial};
     return 0;
@@ -91,7 +92,7 @@ static int release(struct fd_registry *r,struct fd_task_handle h,unsigned state)
 {
     struct fd_task_slot *t=resolve(r,h);
     if (!t) return -ESTALE;
-    if (t->state!=state) return -EBUSY;
+    if (t->state!=state || t->pending) return -EBUSY;
     r->tables[t->table_slot].owners--;
     t->state=0;
     return 0;
@@ -100,3 +101,20 @@ int fd_registry_cancel(struct fd_registry *r,struct fd_task_handle h)
 { return release(r,h,RESERVED); }
 int fd_registry_retire(struct fd_registry *r,struct fd_task_handle h)
 { return release(r,h,LIVE); }
+
+int fd_registry_pin(struct fd_registry *r,struct fd_task_handle h)
+{
+    struct fd_task_slot *t=resolve(r,h);
+    if (!t || t->state!=LIVE) return -ESTALE;
+    if (t->pending==SIZE_MAX) return -EOVERFLOW;
+    t->pending++;
+    return 0;
+}
+int fd_registry_unpin(struct fd_registry *r,struct fd_task_handle h)
+{
+    struct fd_task_slot *t=resolve(r,h);
+    if (!t) return -ESTALE;
+    if (!t->pending) return -EINVAL;
+    t->pending--;
+    return 0;
+}

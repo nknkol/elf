@@ -95,3 +95,11 @@ The generation-checked commit rejects stale removal and actual read verifies the
 replacement FD survives. Matching, absent and initially unknown generations are
 also covered. This does not test reuse before syscall entry, close EINTR/error
 classification, table-instance reuse or a runtime commit queue.
+
+`close_queue.c` verifies the production reserved outcome queue: actual close
+publishes while another thread owns the metadata guard, then drain removes the
+matching record and releases its registry pin. Task/table lifetime, duplicate
+publication, stale tickets, same-table overlap, capacity, cancellation and token
+exhaustion are checked. Blocking inside the guard is deliberate test coordination,
+not supported production usage. Kernel error classification and unknown-outcome
+recovery are outside this test; the queue is not enabled in the default payload.

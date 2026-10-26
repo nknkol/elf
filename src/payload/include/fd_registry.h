@@ -6,6 +6,7 @@ struct fd_task_handle { size_t slot; uint64_t generation; };
 struct fd_task_slot {
     uint64_t generation;
     unsigned state;
+    size_t pending;
     size_t table_slot;
     struct fd_clone clone;
 };
@@ -31,6 +32,10 @@ int fd_registry_find(struct fd_registry *, long tid, struct fd_task_handle *);
 /* Borrowed table for a valid reservation/live owner; never cache across retire.
  * Unknown/reused handles return NULL. Generations are registry-local. */
 struct fd_table *fd_registry_table(struct fd_registry *, struct fd_task_handle);
+/* Pending operations pin the owning task/table until bookkeeping completes.
+ * Must use the same external exclusion as all registry operations. */
+int fd_registry_pin(struct fd_registry *, struct fd_task_handle);
+int fd_registry_unpin(struct fd_registry *, struct fd_task_handle);
 int fd_registry_cancel(struct fd_registry *, struct fd_task_handle);
 /* Caller establishes task death AND all notification/readers are finished.
  * TID alone never authorizes retirement; PID namespaces are not supported here.

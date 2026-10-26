@@ -322,3 +322,26 @@ ESTALE must not overwrite the kernel result or trigger a retry of kernel close.
 Kernel error classification and reliable commit after guard contention remain
 unimplemented. Existing unconditional model operations remain for fully ordered
 events; neither API is enabled in default payload interception yet.
+
+
+## Reserve close bookkeeping before kernel entry
+
+`fd_close_queue.c` reserves bounded inherited storage and pins a registry owner
+before close. Outcome publication is a single atomic state transition with a
+generation ticket; it neither takes the metadata guard nor allocates memory.
+Later drain under exclusion applies generation-checked removal and drops the
+owner pin. Retirement cannot recycle the table while a result is outstanding.
+Reservations and ready results both count as pending for cooperating adapters.
+
+A real close test publishes while another thread owns the guard, then drains
+once. It also checks shared-table overlap, capacity exhaustion, stale tickets,
+KEEP cancellation, generation overflow and newer-record preservation. The
+kernel close is never repeated to resolve a bookkeeping conflict.
+
+KEEP/REMOVE are caller-established effects, not an errno classification. An
+unknown result or dead reserver remains pinned; no guessed cleanup is safe.
+Prepare/query/drain still require exclusion; only publication is concurrent.
+Drain errors may occur after earlier slots committed, and nonlocal death while
+mutating metadata must not be followed by blindly clearing its guard. No default
+payload interception, pre-kernel reuse prevention across uncooperative callers,
+close error adaptation or automatic abandoned-operation recovery is enabled.

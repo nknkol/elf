@@ -45,3 +45,12 @@ with tempfile.TemporaryDirectory(prefix='fd-table-') as temp:
                     str(repo / 'test/fd_table/close_commit.c'), str(obj),
                     '-o', str(close_exe)], check=True)
     subprocess.run([str(close_exe)], check=True, timeout=15)
+
+    queue_exe = Path(temp) / 'close-queue'
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
+                    '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_table/close_queue.c'), str(obj),
+                    *[str(repo / ('src/payload/logic/' + name + '.c'))
+                      for name in ('fd_clone', 'fd_registry', 'fd_guard', 'fd_close_queue')],
+                    '-o', str(queue_exe)], check=True)
+    subprocess.run([str(queue_exe)], check=True, timeout=15)
