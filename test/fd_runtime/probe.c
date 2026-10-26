@@ -41,13 +41,43 @@ void _start(void)
     CHECK(call(__NR_close_range,0,~0u,0,0)==-ENOSYS);
     CHECK(call(__NR_pipe2,0,0,0,0)==-ENOSYS);
     CHECK(call(__NR_close,other,0,0,0)==0 && call(__NR_close,fourth,0,0,0)==0);
+    long mem=call(__NR_memfd_create,(long)"fd-runtime",1,0,0);
+    CHECK(mem>=0 && query(3,mem)==1);
+    CHECK(call(__NR_fcntl,mem,F_GETFD,0,0)==FD_CLOEXEC);
+    char payload='M';CHECK(call(__NR_write,mem,(long)&payload,1,0)==1);
+    CHECK(call(__NR_lseek,mem,0,0,0)==0);
+    payload=0;CHECK(call(__NR_read,mem,(long)&payload,1,0)==1 && payload=='M');
+    long alias=call(__NR_dup,mem,0,0,0);
+    CHECK(alias>=0 && query(2,alias)==query(2,mem));
+    CHECK(call(__NR_close,mem,0,0,0)==0 && query(1,mem)==-ENOENT);
+    CHECK(call(__NR_lseek,alias,0,0,0)==0);
+    payload=0;CHECK(call(__NR_read,alias,(long)&payload,1,0)==1 && payload=='M');
+    CHECK(call(__NR_close,alias,0,0,0)==0);
+    long event=call(__NR_eventfd2,0,O_CLOEXEC|O_NONBLOCK,0,0);
+    CHECK(event>=0 && query(3,event)==1);
+    CHECK(call(__NR_fcntl,event,F_GETFD,0,0)==FD_CLOEXEC);
+    unsigned long count=3;
+    CHECK(call(__NR_write,event,(long)&count,8,0)==8);
+    count=0;CHECK(call(__NR_read,event,(long)&count,8,0)==8 && count==3);
+    CHECK(call(__NR_read,event,(long)&count,8,0)==-EAGAIN);
+    CHECK(call(__NR_close,event,0,0,0)==0 && query(1,event)==-ENOENT);
+    /* Also exercise the flags=0 branch, not only CLOEXEC creation. */
+    mem=call(__NR_memfd_create,(long)"fd-runtime",0,0,0);
+    event=call(__NR_eventfd2,0,O_NONBLOCK,0,0);
+    CHECK(mem>=0 && event>=0 && query(3,mem)==0 && query(3,event)==0);
+    CHECK(call(__NR_close,mem,0,0,0)==0 && call(__NR_close,event,0,0,0)==0);
+    CHECK(call(__NR_memfd_create,(long)"fd-runtime",0x80000000,0,0)==-EINVAL);
+    CHECK(call(__NR_eventfd2,0,0x80000000,0,0)==-EINVAL);
+    CHECK(query(0,0)==1);
     long fds[127];
     for(int i=0;i<127;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
     CHECK(query(0,0)==128);
     CHECK(call(__NR_dup,fd,0,0,0)==-ENOSPC && query(0,0)==128);
+    CHECK(call(__NR_memfd_create,(long)"no-room",0,0,0)==-ENOSPC);
+    CHECK(call(__NR_eventfd2,0,0,0,0)==-ENOSPC && query(0,0)==128);
     for(int i=0;i<127;i++)CHECK(call(__NR_close,fds[i],0,0,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0 && query(0,0)==0);
-    static const char ok[]="PASS: runtime FD open/dup/fcntl/close, lifecycle rejection and capacity\n";
+    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd, lifecycle rejection and capacity\n";
     call(__NR_write,1,(long)ok,sizeof(ok)-1,0);
     call(__NR_exit_group,0,0,0,0);for(;;){}
 }

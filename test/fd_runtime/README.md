@@ -13,7 +13,8 @@ share intermediate object paths, so do not build them concurrently. The last
 build also determines `src/elfloader`; prefer the named snapshots above.
 
 The experimental payload initializes a single-task registry on first slow call,
-tracks up to 128 descriptors from openat, dup, dup3, F_DUPFD/F_DUPFD_CLOEXEC and
+tracks up to 128 descriptors from openat, memfd_create, eventfd2, dup, dup3,
+F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
 UNKNOWN: there is no readonly/default-deny permission policy in this experiment.
@@ -41,3 +42,10 @@ file, checks duplication identities and descriptor flags, closes descriptors,
 and checks failure and capacity behavior. It links none of the FD metadata
 modules itself. Optional existing Alpine/Ubuntu fixtures also run their cat
 programs; missing fixtures are reported as skipped, not counted as passes.
+
+The runtime guest also writes/reads an anonymous memfd, duplicates it and reads
+after closing the original, and exercises a nonblocking eventfd counter. Native
+F_GETFD is compared with tracked CLOEXEC for both creators. Invalid flags leave
+metadata unchanged; a full metadata table rejects creation before the syscall.
+MFD_CLOEXEC uses bit 0, while eventfd uses O_CLOEXEC's bit. Both remain UNKNOWN
+provenance; this adds metadata coverage, not permission enforcement.

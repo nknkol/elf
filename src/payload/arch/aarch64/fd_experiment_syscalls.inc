@@ -1,4 +1,4 @@
-/* Experimental deny routes only; ordinary fast paths remain unchanged. */
+/* Experimental FD routes; ordinary fast paths remain unchanged. */
 SLOW_SYSCALL(__NR_pipe2)
 SLOW_SYSCALL(__NR_socket)
 SLOW_SYSCALL(__NR_socketpair)

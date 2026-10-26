@@ -336,3 +336,14 @@ clone/rt_sigreturn 等入口约束，并对未知接口采用经过设计的策�
 这替代了“只有独立 harness”的状态，但不是多任务完整跟踪，更不是权限隔离完成。
 使用方式、拒绝范围、诊断接口和共享构建目录限制见 ../test/fd_runtime/README.md。
 前文各独立模块阶段的“未接入默认 payload”仍然成立；实验构建按明确限制先形成闭环。
+
+
+## 实验运行时扩展：memfd 与 eventfd
+
+实验 dispatcher 已接入 memfd_create/eventfd2，不再拒绝这两个创建入口。两者沿用
+单任务容量预检、分配代次与描述身份记录，以及已有 dup/close 链。分别正确处理
+MFD_CLOEXEC 的 bit 0 和 eventfd 的 O_CLOEXEC；来源仍为 UNKNOWN。
+
+真实 guest 验证匿名文件写读、dup 后关闭原 FD、eventfd 非阻塞计数器读写，
+用原生 F_GETFD 对照记录标志，并验证无 CLOEXEC、非法 flags 和容量耗尽路径。
+没有新增模型层；普通构建仍保持原行为，实验模式的 clone/exec 限制没有放开。
