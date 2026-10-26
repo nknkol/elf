@@ -13,7 +13,8 @@ share intermediate object paths, so do not build them concurrently. The last
 build also determines `src/elfloader`; prefer the named snapshots above.
 
 The experimental payload initializes a single-task registry on first slow call,
-tracks up to 128 descriptors from openat, memfd_create, eventfd2, dup, dup3,
+tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
+timerfd_create, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
@@ -49,3 +50,10 @@ F_GETFD is compared with tracked CLOEXEC for both creators. Invalid flags leave
 metadata unchanged; a full metadata table rejects creation before the syscall.
 MFD_CLOEXEC uses bit 0, while eventfd uses O_CLOEXEC's bit. Both remain UNKNOWN
 provenance; this adds metadata coverage, not permission enforcement.
+
+The guest event-loop regression registers eventfd and timerfd with a tracked
+epoll instance, checks event payloads, consumes readiness, and confirms closing
+the last descriptors removes readiness and metadata. Timer expiration is tested
+with a one-shot 1 ms timer and a bounded wait. CLOEXEC/non-CLOEXEC, invalid flags
+or clock IDs, and capacity exhaustion are covered. epoll_ctl/epoll_pwait and
+timerfd_settime retain kernel behavior; no userspace event loop is implemented.

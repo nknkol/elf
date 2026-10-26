@@ -61,8 +61,7 @@ long fd_experiment_dispatch(long n,long a[6])
     case __NR_close_range: case __NR_unshare: case __NR_openat2:
     case __NR_pipe2: case __NR_socket: case __NR_socketpair:
     case __NR_accept: case __NR_accept4: case __NR_recvmsg: case __NR_recvmmsg:
-    case __NR_epoll_create1:
-    case __NR_inotify_init1: case __NR_signalfd4: case __NR_timerfd_create:
+    case __NR_inotify_init1: case __NR_signalfd4:
     case __NR_pidfd_getfd: case __NR_io_uring_setup:
         return -ENOSYS;
     }
@@ -70,7 +69,8 @@ long fd_experiment_dispatch(long n,long a[6])
     int duplicate=n==__NR_dup || n==__NR_dup3 ||
         (n==__NR_fcntl && (a[1]==F_DUPFD || a[1]==F_DUPFD_CLOEXEC));
     int setfd=n==__NR_fcntl && a[1]==F_SETFD;
-    int create=n==__NR_openat || n==__NR_memfd_create || n==__NR_eventfd2;
+    int create=n==__NR_openat || n==__NR_memfd_create || n==__NR_eventfd2 ||
+        n==__NR_epoll_create1 || n==__NR_timerfd_create;
     if(!create && !duplicate && !setfd)return syscall_handle_common(n,a);
     /* The entry trampoline rejects same-TID nested slow calls in this build;
      * clone is denied, so no metadata writer can run across these syscalls.
@@ -83,7 +83,8 @@ long fd_experiment_dispatch(long n,long a[6])
     if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
         int cloexec=n==__NR_memfd_create?!!(a[1]&1):
-            n==__NR_eventfd2?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
+            n==__NR_epoll_create1?!!(a[0]&O_CLOEXEC):
+            (n==__NR_eventfd2 || n==__NR_timerfd_create)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
         rc=fd_table_open(t,(int)result,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
     }
     else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],!!(a[2]&FD_CLOEXEC));

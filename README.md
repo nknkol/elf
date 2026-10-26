@@ -92,6 +92,6 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 
 
 单任务 FD 跟踪实验：`make check-fd-runtime` 构建独立的
-`vendor/proot/svc/build/elfloader-proot-fd-experiment`，实际接通 openat、memfd/eventfd、dup/fcntl
+`vendor/proot/svc/build/elfloader-proot-fd-experiment`，实际接通 openat、memfd/eventfd、epoll/timerfd、dup/fcntl
 和 close 元数据跟踪。它拒绝 clone/exec 等尚未支持的操作，不提供权限隔离。
 详见 [实验使用说明](test/fd_runtime/README.md)。普通构建保持原行为。

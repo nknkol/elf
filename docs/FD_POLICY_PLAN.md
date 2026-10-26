@@ -347,3 +347,14 @@ MFD_CLOEXEC 的 bit 0 和 eventfd 的 O_CLOEXEC；来源仍为 UNKNOWN。
 真实 guest 验证匿名文件写读、dup 后关闭原 FD、eventfd 非阻塞计数器读写，
 用原生 F_GETFD 对照记录标志，并验证无 CLOEXEC、非法 flags 和容量耗尽路径。
 没有新增模型层；普通构建仍保持原行为，实验模式的 clone/exec 限制没有放开。
+
+
+## 实验运行时扩展：内核事件循环
+
+新增 epoll_create1 和 timerfd_create 的单 FD 创建跟踪，沿用 128 条容量预检、
+UNKNOWN 来源以及已有关闭链。CLOEXEC 分别读取 epoll 的第一个参数和 timerfd
+的第二个参数，不改变事件注册、等待和定时器设置的内核实现。
+
+真实 guest 将 eventfd、timerfd 注册到 epoll，核对事件携带数据、计数消费、
+非就绪返回和最后 FD 关闭后的清理。另覆盖无 CLOEXEC、非法参数及容量耗尽。
+实验模式仍为单任务，clone/exec 未放开，文件访问权限策略仍未启用。

@@ -2,6 +2,8 @@
 #include <asm/unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include "fd_experiment.h"
 static long call(long n,long a,long b,long c,long d)
 {
@@ -60,7 +62,34 @@ void _start(void)
     CHECK(call(__NR_write,event,(long)&count,8,0)==8);
     count=0;CHECK(call(__NR_read,event,(long)&count,8,0)==8 && count==3);
     CHECK(call(__NR_read,event,(long)&count,8,0)==-EAGAIN);
+    long epoll=call(__NR_epoll_create1,EPOLL_CLOEXEC,0,0,0);
+    CHECK(epoll>=0 && query(3,epoll)==1 && call(__NR_fcntl,epoll,F_GETFD,0,0)==FD_CLOEXEC);
+    struct epoll_event interest={.events=EPOLLIN,.data.u64=123},ready={0};
+    CHECK(call(__NR_epoll_ctl,epoll,EPOLL_CTL_ADD,event,(long)&interest)==0);
+    count=5;CHECK(call(__NR_write,event,(long)&count,8,0)==8);
+    CHECK(call(__NR_epoll_pwait,epoll,(long)&ready,1,1000)==1);
+    CHECK((ready.events&EPOLLIN) && ready.data.u64==123);
+    CHECK(call(__NR_read,event,(long)&count,8,0)==8 && count==5);
+    CHECK(call(__NR_epoll_pwait,epoll,(long)&ready,1,0)==0);
+    long timer=call(__NR_timerfd_create,CLOCK_MONOTONIC,TFD_CLOEXEC|TFD_NONBLOCK,0,0);
+    CHECK(timer>=0 && query(3,timer)==1 && call(__NR_fcntl,timer,F_GETFD,0,0)==FD_CLOEXEC);
+    interest.data.u64=456;
+    CHECK(call(__NR_epoll_ctl,epoll,EPOLL_CTL_ADD,timer,(long)&interest)==0);
+    struct itimerspec spec={.it_value={.tv_sec=0,.tv_nsec=1000000}};
+    CHECK(call(__NR_timerfd_settime,timer,0,(long)&spec,0)==0);
+    CHECK(call(__NR_epoll_pwait,epoll,(long)&ready,1,1000)==1);
+    CHECK((ready.events&EPOLLIN) && ready.data.u64==456);
+    count=0;CHECK(call(__NR_read,timer,(long)&count,8,0)==8 && count==1);
+    CHECK(call(__NR_close,timer,0,0,0)==0 && query(1,timer)==-ENOENT);
     CHECK(call(__NR_close,event,0,0,0)==0 && query(1,event)==-ENOENT);
+    CHECK(call(__NR_epoll_pwait,epoll,(long)&ready,1,0)==0);
+    CHECK(call(__NR_close,epoll,0,0,0)==0 && query(1,epoll)==-ENOENT);
+    epoll=call(__NR_epoll_create1,0,0,0,0);
+    timer=call(__NR_timerfd_create,CLOCK_MONOTONIC,TFD_NONBLOCK,0,0);
+    CHECK(epoll>=0 && timer>=0 && query(3,epoll)==0 && query(3,timer)==0);
+    CHECK(call(__NR_close,epoll,0,0,0)==0 && call(__NR_close,timer,0,0,0)==0);
+    CHECK(call(__NR_epoll_create1,0x80000000,0,0,0)==-EINVAL);
+    CHECK(call(__NR_timerfd_create,-1,0,0,0)==-EINVAL);
     /* Also exercise the flags=0 branch, not only CLOEXEC creation. */
     mem=call(__NR_memfd_create,(long)"fd-runtime",0,0,0);
     event=call(__NR_eventfd2,0,O_NONBLOCK,0,0);
@@ -75,9 +104,11 @@ void _start(void)
     CHECK(call(__NR_dup,fd,0,0,0)==-ENOSPC && query(0,0)==128);
     CHECK(call(__NR_memfd_create,(long)"no-room",0,0,0)==-ENOSPC);
     CHECK(call(__NR_eventfd2,0,0,0,0)==-ENOSPC && query(0,0)==128);
+    CHECK(call(__NR_epoll_create1,0,0,0,0)==-ENOSPC);
+    CHECK(call(__NR_timerfd_create,CLOCK_MONOTONIC,0,0,0)==-ENOSPC);
     for(int i=0;i<127;i++)CHECK(call(__NR_close,fds[i],0,0,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0 && query(0,0)==0);
-    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd, lifecycle rejection and capacity\n";
+    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd/epoll/timerfd, lifecycle rejection and capacity\n";
     call(__NR_write,1,(long)ok,sizeof(ok)-1,0);
     call(__NR_exit_group,0,0,0,0);for(;;){}
 }
