@@ -168,3 +168,13 @@ BPF/seccomp are denied as whole multiplexed interfaces, including their non-FD
 commands; this is an explicit experimental compatibility restriction, not a
 claim that the host rejects those operations. FD-producing ioctls and other
 ancillary types remain outside coverage; this is not a complete syscall allowlist.
+
+The ioctl guest checks FIOCLEX/FIONCLEX metadata synchronization with native
+F_GETFD, stable generations/descriptions, and independent duplicate CLOEXEC bits.
+Known records can be updated at full capacity. Updating an inherited untracked
+FD reserves a slot before ioctl, returns ENOSPC without changing the kernel flag
+when full, and adopts UNKNOWN identity after a slot is released. FIONBIO remains
+kernel-driven and changes the shared status flags without changing metadata.
+TIOCGPTPEER is explicitly ENOSYS in the experiment because it creates an FD;
+a native /dev/ptmx unlock succeeded here but peer creation returned EACCES, so
+success-path tracking is not claimed. Other FD-bearing ioctls remain unaudited.

@@ -2,6 +2,7 @@
 #include <asm/unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <asm/ioctls.h>
 #include "fd_experiment.h"
 #include "fd_close_exec.h"
 #include "clone_notify.h"
@@ -66,10 +67,14 @@ long fd_experiment_dispatch(long n,long a[6])
 #undef FD_UNSUPPORTED
         return -ENOSYS;
     }
+    /* TIOCGPTPEER returns a new FD; do not treat it as an ordinary ioctl.
+     * Native success is not available in this sandbox, so keep it unsupported. */
+    if(n==__NR_ioctl && (unsigned)a[1]==TIOCGPTPEER)return -ENOSYS;
     if(n==__NR_close) { int bookkeeping;return fd_close_execute(&queue,&registry,&guard,owner,(int)a[0],&bookkeeping); }
     int duplicate=n==__NR_dup || n==__NR_dup3 ||
         (n==__NR_fcntl && (a[1]==F_DUPFD || a[1]==F_DUPFD_CLOEXEC));
-    int setfd=n==__NR_fcntl && a[1]==F_SETFD;
+    int ioctl_setfd=n==__NR_ioctl && ((unsigned)a[1]==FIOCLEX || (unsigned)a[1]==FIONCLEX);
+    int setfd=(n==__NR_fcntl && a[1]==F_SETFD) || ioctl_setfd;
     int create=n==__NR_openat || n==__NR_memfd_create || n==__NR_eventfd2 ||
         n==__NR_epoll_create1 || n==__NR_timerfd_create || n==__NR_socket ||
         n==__NR_accept || n==__NR_accept4 || n==__NR_inotify_init1 ||
@@ -113,7 +118,7 @@ long fd_experiment_dispatch(long n,long a[6])
         rc=n==__NR_pidfd_getfd?fd_table_import_unknown(t,(int)result,cloexec):
             fd_table_open(t,(int)result,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
     }
-    else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],!!(a[2]&FD_CLOEXEC));
+    else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
     else rc=fd_table_dup(t,(int)a[0],(int)result,n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC);
     /* Preflight plus single-task exclusion guarantees capacity/serial here. */
     if(rc)return rc;

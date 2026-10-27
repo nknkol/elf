@@ -89,7 +89,7 @@ print('PASS: native recvmmsg full and partial batches')
 with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
     work = Path(temp)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
                         '-DEXPECT_PEEK_RIGHTS=' + str(peek_rights),
                         '-I' + str(repo / 'src/payload/include'),
                         str(repo / 'test/fd_runtime' / (name + '.c')), '-o', str(probe)], check=True)
-        inherited = os.memfd_create('range-inherited', flags=0) if name == 'range' else None
+        inherited = os.memfd_create('range-inherited', flags=0) if name in ('range', 'ioctl') else None
         try:
             p = subprocess.run([str(loader), '--mode', 'compat', '--', str(probe)] +
                                ([str(inherited)] if inherited is not None else []),

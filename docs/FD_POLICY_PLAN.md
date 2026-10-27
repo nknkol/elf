@@ -480,3 +480,16 @@ landlock_create_ruleset / memfd_secret 在目标头文件提供编号时条件�
 不是宿主能力判定；bpf/seccomp 包括不创建 FD 的命令也暂时拒绝，属于兼容性限制。
 FD-producing ioctl、其他携带 FD 的辅助消息、原始入口及多任务生命周期仍未覆盖，
 不能将该清单描述为完整的 syscall 安全边界。
+
+### ioctl：CLOEXEC 状态同步与 TIOCGPTPEER 拒绝
+
+FIOCLEX/FIONCLEX 原先直接透传，会令内核 CLOEXEC 与跟踪记录不一致。
+现复用 F_SETFD 的预检和发布路径：成功后同步 CLOEXEC，不改变已有 generation
+和 description；继承未跟踪 FD 需要先确保可登记，失败不执行内核修改。
+实际 guest 验证副本标志独立、满表已知 FD 更新、未知继承 FD 的 ENOSPC 与释放槽后
+重试、EBADF，以及 FIONBIO 仍由内核处理并共享状态标志。
+
+本机原生 /dev/ptmx 的 TIOCSPTLCK 解锁成功，但 TIOCGPTPEER(O_RDWR|O_NOCTTY|
+O_CLOEXEC|O_NONBLOCK) 返回 EACCES；实验模式显式返回 ENOSYS，避免其成功时产生
+未登记 FD。本轮没有实现该请求成功路径，也没有完成所有 FD-producing ioctl 审计。
+普通构建行为不变，权限隔离和多任务/exec 仍待完成。
