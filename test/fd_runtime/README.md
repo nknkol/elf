@@ -138,3 +138,11 @@ events, and rejects unmapped host-source spellings. On this host symlink watches
 with IN_DONT_FOLLOW return EACCES; that rejection is preserved, not counted as a
 successful symlink watch. Path resolution races and permission enforcement remain
 outside this increment; FD creation coverage is not a complete isolation claim.
+
+The range guest verifies the explicit close_range ENOSYS fallback, not range
+emulation. It receives an inherited descriptor via pass_fds and creates/duplicates
+others, checks they survive all tested range flags unchanged, then exercises
+caller-side F_SETFD/close fallback with matching metadata. The ordinary HarmonyOS
+build runs the same guest without metadata queries: native close_range is sandbox
+fatal here, including empty ranges and invalid flags. Complete range emulation
+must account for inherited and loader-owned descriptors and table ownership.

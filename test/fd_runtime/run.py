@@ -89,16 +89,24 @@ print('PASS: native recvmmsg full and partial batches')
 with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
     work = Path(temp)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
+                        '-DFD_TRACK=1',
                         '-DEXPECT_ACCEPT_NONBLOCK=' + str(accept_nonblock),
                         '-DEXPECT_PEEK_RIGHTS=' + str(peek_rights),
                         '-I' + str(repo / 'src/payload/include'),
                         str(repo / 'test/fd_runtime' / (name + '.c')), '-o', str(probe)], check=True)
-        p = subprocess.run([str(loader), '--mode', 'compat', '--', str(probe)],
-                           cwd=work, text=True, capture_output=True, timeout=20)
+        inherited = os.memfd_create('range-inherited', flags=0) if name == 'range' else None
+        try:
+            p = subprocess.run([str(loader), '--mode', 'compat', '--', str(probe)] +
+                               ([str(inherited)] if inherited is not None else []),
+                               pass_fds=(inherited,) if inherited is not None else (),
+                               cwd=work, text=True, capture_output=True, timeout=20)
+        finally:
+            if inherited is not None:
+                os.close(inherited)
         assert p.returncode == 0 and 'PASS: runtime FD' in p.stdout, (p.returncode,p.stdout,p.stderr)
         print(p.stdout, end='')
 

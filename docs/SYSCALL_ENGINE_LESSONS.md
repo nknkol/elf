@@ -417,3 +417,21 @@ not readonly/default-deny enforcement: origins remain UNKNOWN, alternate paths
 and raw-entry bypasses are not an adversarial boundary. See test/fd_runtime for
 commands, diagnostic ABI and limitations. Build variants share intermediate files
 and must not be built concurrently.
+
+## close_range sandbox-fatal recipe (2026-10-27)
+
+Isolated native children calling AArch64 syscall 436 with an empty high-FD
+interval [1000000, 1000000] and flags 0, 4 (CLOEXEC), 2 (UNSHARE), 6, or 8
+(invalid) all terminated with SIGSYS (signal 31). A valid open-FD CLOEXEC recipe
+also terminated. Invalid-argument probes cannot be used as harmless feature
+checks on this host. Ordinary HarmonyOS payloads now return ENOSYS before kernel
+entry, matching the experimental FD mode's explicit lack of support. Other
+platforms retain normal passthrough in the ordinary build.
+
+The real guest regression passes an inherited, initially untracked descriptor
+alongside created/duplicated descriptors. ENOSYS must leave all kernel flags and
+tracked identities unchanged; explicit caller F_SETFD/close fallback must work.
+This does not implement close_range. Iterating the metadata table would omit
+inherited descriptors, and UNSHARE cannot be represented by merely deleting
+records. Any future emulation needs complete kernel-FD enumeration, concurrency
+and table ownership semantics, plus handling of loader-owned descriptors.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import os
 import hashlib
 import json
 import subprocess
@@ -23,3 +24,18 @@ with tempfile.TemporaryDirectory(prefix='dispatch-runtime-', dir=build) as temp:
             for item in expected: assert item+'\n' in p.stdout, results[-1]
             if mode == 'b': assert p.stdout.count('RET=-38\n') == 6, results[-1]
             print('PASS:',backend,mode)
+
+with tempfile.TemporaryDirectory(prefix='range-runtime-', dir=build) as temp:
+    probe = Path(temp) / 'range'
+    subprocess.run(['clang', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
+                    '-fno-stack-protector', '-O1', '-DFD_TRACK=0',
+                    '-I' + str(root / 'src/payload/include'),
+                    str(root / 'test/fd_runtime/range.c'), '-o', str(probe)], check=True)
+    inherited = os.memfd_create('range-inherited', flags=0)
+    try:
+        p = subprocess.run([str(loader), '--mode', 'compat', '--', str(probe), str(inherited)],
+                           pass_fds=(inherited,), capture_output=True, text=True, timeout=15)
+        assert p.returncode == 0 and 'PASS:' in p.stdout, (p.returncode, p.stdout, p.stderr)
+        print(p.stdout, end='')
+    finally:
+        os.close(inherited)

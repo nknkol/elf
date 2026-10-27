@@ -442,3 +442,14 @@ description、CLOEXEC；因此满表也可更新，继承的未跟踪 FD 不因�
 原生对照覆盖 ONLYDIR、缺失/空路径、空指针，以及宿主对 nofollow 链接 watch 的 EACCES。
 额外验证直接传入存在的宿主绑定源路径不能绕过 guest 路径解析（ENOENT）。
 本机拒绝监视符号链接，不能将该用例计为链接 watch 成功；路径竞争窗口和权限策略仍未完成。
+
+### close_range：宿主致命调用防护，尚非范围关闭实现
+
+原生隔离子进程实测 flags=0/CLOEXEC/UNSHARE/二者组合/非法标志均触发 SIGSYS；
+即使范围内没有 FD 也会被杀。普通 HarmonyOS 构建现明确返回 ENOSYS，
+FD 实验模式继续保持原有 ENOSYS；其他平台普通构建保留内核透传。
+真实 guest 用继承且未跟踪的 FD、创建和 dup 的 FD 验证调用不改变 flags/记录，
+再验证调用方逐个 F_SETFD/close 的回退。普通和实验构建均纳入回归。
+
+未实现 close_range 批量语义。不能仅遍历跟踪表而遗漏继承 FD；后续实现需覆盖
+完整宿主 FD 集合、loader 自有 FD、并发和 UNSHARE 的表所有权，不可假成功。
