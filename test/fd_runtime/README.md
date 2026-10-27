@@ -14,7 +14,8 @@ build also determines `src/elfloader`; prefer the named snapshots above.
 
 The experimental payload initializes a single-task registry on first slow call,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
-timerfd_create, pipe2, socket, socketpair, accept, accept4, dup, dup3,
+timerfd_create, inotify_init1, signalfd4 creation, pipe2, socket, socketpair,
+accept, accept4, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
@@ -122,3 +123,14 @@ the adapter returns the published prefix count (or the copy error if empty) and
 closes unpublished descriptors. Timeout-copy failure closes all received FDs and
 returns the copy error. These are explicit experimental limits, not full Linux
 fault/partial-progress equivalence. Origin and alias identity remain UNKNOWN.
+
+The notify guest validates inotify file modification/close events and signalfd
+signal delivery. signalfd4(fd=-1) creates a tracked descriptor; updates of an
+existing descriptor keep its generation, description and CLOEXEC untouched and
+need no free slot. Tests fill the table, update the signal mask, close the original
+FD and read the new signal through a duplicate. Creation flags, ignored update
+flags, malformed arguments and capacity errors are checked against kernel state.
+Inherited/untracked descriptors remain untracked when their mask is updated.
+This increment does not translate inotify_add_watch paths into the guest view;
+the event test uses a relative fixture in compat mode. Watch-path translation
+and permissions remain explicit follow-up work before isolation use.

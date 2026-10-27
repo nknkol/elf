@@ -420,3 +420,15 @@ UNKNOWN 导入及失败清理。recvmmsg 每批最多 8 条（超出 E2BIG），
 整批容量拒绝后原消息仍可接收、首项/次项控制区只读、msg_len 单独只读、
 timeout 输入/输出故障及 FD 号复用检查；原生对照验证完整和部分 datagram 批次。
 仍为单任务实验模式，其他携带 FD 的辅助消息类型与多任务生命周期未完成。
+
+### 实验运行时扩展：inotify / signalfd
+
+inotify_init1 和 signalfd4(fd=-1) 接入创建预检及 UNKNOWN 来源记录。
+signalfd4 更新已有 FD 直接保留内核语义，不分配新记录，不改变 generation、
+description、CLOEXEC；因此满表也可更新，继承的未跟踪 FD 不因更新被错误认领。
+真实 guest 覆盖文件修改/关闭事件、信号接收、满表更新信号掩码、通过 dup
+副本接收更新后的信号、创建 flags 与更新 flags 的区别、非法参数与容量失败。
+
+本轮只完成 FD 生命周期覆盖，inotify_add_watch 的路径仍未转换到 guest 视图，
+测试使用 compat 模式相对路径。watch 路径转换和权限检查必须后续接入，
+不能据此宣称文件事件接口已隔离。pidfd_getfd、io_uring 创建及多任务/exec 仍待处理。
