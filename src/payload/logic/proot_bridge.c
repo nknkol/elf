@@ -3,6 +3,7 @@
 #include <asm/stat.h>
 #include <asm/unistd.h>
 #include <linux/fcntl.h>
+#include <linux/inotify.h>
 #include <stddef.h>
 #include <errno.h>
 #include <string.h>
@@ -153,6 +154,7 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
 int proot_handles_syscall(long number)
 {
     switch (number) {
+    case __NR_inotify_add_watch:
     case SYS_fchmodat:
     case SYS_fchownat:
     case SYS_utimensat:
@@ -253,6 +255,12 @@ static long mutate(Bridge *b, long number, long a[6])
 static long dispatch(Bridge *b, long number, long a[6])
 {
     long ret;
+    if (number == __NR_inotify_add_watch) {
+        if (!a[1]) return -EFAULT;
+        ret = resolve(b, AT_FDCWD, (const char *)a[1], !(a[2] & IN_DONT_FOLLOW));
+        if (ret < 0) return ret;
+        return raw_syscall(number, a[0], (long)b->host, a[2], 0, 0, 0);
+    }
     /* Descriptor operations retain kernel identity; FD policy is a later layer. */
     if (number == SYS_fchmod || number == SYS_fchown ||
         number == SYS_fstatfs || number == __NR_ftruncate)

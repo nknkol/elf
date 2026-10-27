@@ -22,7 +22,7 @@ inventory = subprocess.check_output(['clang', '-E', '-P', '-I'+str(arch), '-'],
 selected = {int(n) for n in re.findall(r'selected\((\d+)\)', inventory)}
 for name in ('exit', 'exit_group', 'clone', 'rt_sigreturn', 'futex', 'getpid'):
     assert number('__NR_'+name) not in selected, name
-for name in ('openat', 'read', 'write', 'fchmodat', 'io_uring_enter', 'openat2'):
+for name in ('openat', 'read', 'write', 'fchmodat', 'io_uring_enter', 'openat2', 'inotify_add_watch'):
     assert number('__NR_'+name) in selected, name
 with tempfile.TemporaryDirectory() as temp:
     obj = Path(temp)/'entry.o'

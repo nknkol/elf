@@ -115,3 +115,6 @@ for directory, target, arguments, marker in [
                        capture_output=True, timeout=20)
     assert p.returncode == 0 and marker in p.stdout, (directory, p.returncode, p.stdout, p.stderr)
     print('PASS: experimental runtime rootfs cat', directory)
+
+subprocess.run(['python3', str(repo / 'vendor/proot/port-tests/test_inotify.py'),
+                '--fd-experiment'], check=True)

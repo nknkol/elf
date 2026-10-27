@@ -432,3 +432,13 @@ description、CLOEXEC；因此满表也可更新，继承的未跟踪 FD 不因�
 本轮只完成 FD 生命周期覆盖，inotify_add_watch 的路径仍未转换到 guest 视图，
 测试使用 compat 模式相对路径。watch 路径转换和权限检查必须后续接入，
 不能据此宣称文件事件接口已隔离。pidfd_getfd、io_uring 创建及多任务/exec 仍待处理。
+
+### 路径语义补齐：inotify_add_watch
+
+将 inotify_add_watch 加入共享慢路径和 PRoot 路径适配，普通及 FD 实验构建均启用。
+保留原 FD 和事件 mask，以 guest cwd 解析相对路径，按 root/bind 转换绝对路径；
+默认跟随末端符号链接，IN_DONT_FOLLOW 则保留末端链接交给内核处理。
+实际事件测试覆盖根目录文件、相对路径、外部绑定目录、跨绑定绝对符号链接和目录；
+原生对照覆盖 ONLYDIR、缺失/空路径、空指针，以及宿主对 nofollow 链接 watch 的 EACCES。
+额外验证直接传入存在的宿主绑定源路径不能绕过 guest 路径解析（ENOENT）。
+本机拒绝监视符号链接，不能将该用例计为链接 watch 成功；路径竞争窗口和权限策略仍未完成。

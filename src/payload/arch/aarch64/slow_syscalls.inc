@@ -396,3 +396,7 @@ SLOW_SYSCALL(__NR_pidfd_open)
 #ifdef __NR_pidfd_getfd
 SLOW_SYSCALL(__NR_pidfd_getfd)
 #endif
+
+#ifdef __NR_inotify_add_watch
+SLOW_SYSCALL(__NR_inotify_add_watch)
+#endif

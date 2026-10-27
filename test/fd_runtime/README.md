@@ -131,6 +131,10 @@ need no free slot. Tests fill the table, update the signal mask, close the origi
 FD and read the new signal through a duplicate. Creation flags, ignored update
 flags, malformed arguments and capacity errors are checked against kernel state.
 Inherited/untracked descriptors remain untracked when their mask is updated.
-This increment does not translate inotify_add_watch paths into the guest view;
-the event test uses a relative fixture in compat mode. Watch-path translation
-and permissions remain explicit follow-up work before isolation use.
+inotify_add_watch now enters the shared path backend and resolves absolute,
+relative and bind paths, following the final symlink unless IN_DONT_FOLLOW is set.
+The path suite compares native and loader outcomes, exercises actual modification
+events, and rejects unmapped host-source spellings. On this host symlink watches
+with IN_DONT_FOLLOW return EACCES; that rejection is preserved, not counted as a
+successful symlink watch. Path resolution races and permission enforcement remain
+outside this increment; FD creation coverage is not a complete isolation claim.
