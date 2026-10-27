@@ -519,3 +519,18 @@ clone/线程仍拒绝，通用 shell 创建子进程和权限隔离尚未实现�
 不改 generation/description，F_SETFD/FIOCLEX/FIONCLEX 及 close 仍允许，
 新建/复制仍拒绝 EOVERFLOW。测试先在修复前失败，再验证修复后的行为。
 这些人工快照只测试协议/元数据边界，不构成认证或权限隔离证明。
+
+### 实际接入独立地址空间 fork
+
+实验模式的生成 clone gate 现在接受 SIGCHLD，以及可选 CHILD_SETTID/CHILD_CLEARTID。
+共享 VM、CLONE_FILES、线程、vfork 和其他组合继续 ENOSYS；直接普通慢入口的 clone
+仍拒绝，必须走保留原栈的通知入口。before 获取父任务 reentry 活跃调用槽，初始化
+元数据、drain 完成 close 并拒绝 pending；不持有元数据互斥锁跨 clone。
+父返回才释放共享活跃调用槽；子进程不释放父槽，而在自己的私有映射副本中将
+单任务 registry 绑定到实际子 TID，保留记录/序号。父进程在返回前死亡可能遗留
+活跃调用槽，目前不自动回收；该限制不因 clone transaction reaper 而消失。
+
+真实 guest 验证首次受控调用就是 fork、child_tid 输出、父改 CLOEXEC 后子仍为原值、
+子 close 不影响父 FD，以及子进程再 exec 后的状态恢复。这里使用私有 VM 的真实复制，
+不启用共享 registry 的线程方案，也不按宿主有偏差的 CLONE_FILES 标志推断共享。
+权限隔离、共享 VM/线程和通用 shell/vfork 兼容仍未完成。

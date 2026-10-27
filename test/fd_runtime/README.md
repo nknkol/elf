@@ -1,4 +1,4 @@
-# Single-task FD runtime experiment
+# Single-threaded process FD runtime experiment
 
 Run from the repository root:
 
@@ -12,7 +12,7 @@ continue to produce `elfloader-proot` with the existing behavior. Both builds
 share intermediate object paths, so do not build them concurrently. The last
 build also determines `src/elfloader`; prefer the named snapshots above.
 
-The experimental payload initializes a single-task registry on first slow call,
+The experimental payload initializes a one-task-per-private-VM registry on first slow call or fork,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
 timerfd_create, inotify_init1, signalfd4 creation, pipe2, socket, socketpair,
 accept, accept4, pidfd_open, pidfd_getfd, dup, dup3,
@@ -21,11 +21,11 @@ F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
 UNKNOWN: there is no readonly/default-deny permission policy in this experiment.
 
-Clone, close_range, unshare and selected alternate FD creation/transfer
+Shared-VM/shared-FD clone, close_range, unshare and selected alternate FD creation/transfer
 interfaces return ENOSYS. Same-task nested slow calls return EDEADLK, other task
-identities are refused, and no guard is held across blocking syscalls. Uncertain
+identities are refused, and no metadata mutex is held across blocking syscalls. Uncertain
 close outcomes remain pending (no automatic provenance withdrawal). This is a
-single-task debugging mode, not general shell/container compatibility, complete
+single-threaded process debugging mode, not general shell/container compatibility, complete
 FD interception, or an adversarial isolation boundary. Existing raw-entry/path
 race limitations still apply. Do not enable it as an agent sandbox yet.
 
@@ -194,7 +194,7 @@ then performs exec and execveat through two image replacements. Tests verify
 non-CLOEXEC identity, removal of CLOEXEC records (including ioctl-set flags),
 shared kernel offset and preserved root/bind view. An unsealed handoff is rejected
 persistently. Optional Alpine busybox sh and Ubuntu dash each run an exec builtin
-into cat. Clone/threads, general shell process creation and permission enforcement
+into cat. Shared-VM clone/threads, vfork, general shell compatibility and permission enforcement
 remain unsupported; existing bounded exec/shebang/empty-path limits still apply.
 
 Exec restore boundary fixtures now include sealed snapshots naming an absent FD,
@@ -203,3 +203,18 @@ initialization error. A valid sealed snapshot with serial UINT64_MAX verifies
 that F_SETFD/FIOCLEX/FIONCLEX still update existing records without allocating a
 new generation, while new FD assignments return EOVERFLOW; close still works.
 These synthetic snapshots exercise metadata validation, not protocol authenticity.
+
+Private fork now uses the generated clone notification gate: SIGCHLD with optional
+CLONE_CHILD_SETTID/CLONE_CHILD_CLEARTID is accepted, while other clone combinations
+remain ENOSYS. Before kernel entry the parent acquires the active-call reentry
+slot, initializes/drains metadata and rejects pending close outcomes. It releases
+that shared slot only on the parent's return; the child never releases it. Each
+child rebinds its copied singleton registry to its own TID without changing its
+copied records. The payload mappings are private: this is not the shared-registry
+thread path, nor permission to use CLONE_FILES based on Linux assumptions.
+
+The fork guest covers clone as the first instrumented operation, child TID output,
+parent/child CLOEXEC independence, child close versus parent survival, and child
+exec with preserved records. Direct slow-entry clone stays rejected; the generated
+original-stack clone gate is required. A parent dying before its return can strand
+an active-call slot; automatic reclamation of that slot is not implemented.

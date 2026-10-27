@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <asm/ioctls.h>
+#include <linux/sched.h>
+#include "reentry_guard.h"
 #include "fd_experiment.h"
 #include "fd_handoff.h"
 #include "config.h"
@@ -25,8 +27,42 @@ static long owner_tid;
 extern long fd_receive_messages(struct fd_table *,long [6]);
 extern long fd_receive_message(struct fd_table *,long [6]);
 extern long raw_syscall(long,long,long,long,long,long,long);
+static int start(void);
 int clone_observer_before(struct clone_event *event)
-{ (void)event;return -ENOSYS; }
+{
+    /* Only private-VM, copied-FD fork. Optional child TID stores do not share
+     * the VM or the FD table. Never infer host sharing from CLONE_FILES. */
+    unsigned long allowed=CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID;
+    if((event->flags & 255)!=17 || (event->flags & ~(allowed|255ul)))return -ENOSYS;
+    struct reentry_slot *slot=reentry_try_enter();
+    if(!slot)return -EDEADLK;
+    if((uintptr_t)slot>=(uintptr_t)-4095)return (long)slot;
+    int rc=start();
+    if(!rc)rc=fd_close_drain(&queue,&registry);
+    if(rc>=0 && fd_close_pending(&queue,fd_registry_table(&registry,owner),-1))rc=-EBUSY;
+    if(rc<0) { reentry_leave(slot);return rc; }
+    /* Shared guard slot belongs to the parent until its kernel return. The
+     * child must never release it; no metadata mutex is held across clone. */
+    event->cookie=slot;
+    return 0;
+}
+void clone_observer_finish(const struct clone_event *event,long result)
+{
+    if(result) { reentry_leave(event->cookie);return; }
+    long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
+    /* These singleton objects live in private payload mappings copied by fork.
+     * Rebind only the child's private registry, preserving records and serial. */
+    tasks[owner.slot].clone.child_tid=0;
+    int rc=fd_registry_publish(&registry,owner,tid);
+    if(rc) {
+        init_error=rc;
+        __atomic_store_n(&initialized,3,__ATOMIC_RELEASE);
+        return;
+    }
+    owner_tid=tid;
+}
+/* No cookie allocation. A parent dying before return can strand its shared
+ * guard slot; never release that slot again after normal finish/reuse. */
 static int start(void)
 {
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
