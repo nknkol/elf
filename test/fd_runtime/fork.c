@@ -51,7 +51,7 @@ void run(long *sp)
     long generation=query(1,fd);
     CHECK(call(__NR_clone,CLONE_VM|17,0,0,0)==-ENOSYS);
     CHECK(call(__NR_clone,CLONE_FILES|17,0,0,0)==-ENOSYS);
-    CHECK(call(__NR_clone,CLONE_VFORK|CLONE_VM|17,0,0,0)==-ENOSYS);
+    CHECK(call(__NR_clone,CLONE_VFORK|CLONE_VM|CLONE_FILES|17,0,0,0)==-ENOSYS);
     for(int round=0;round<3;round++) {
         int pipe[2];CHECK(call(__NR_pipe2,(long)pipe,0,0,0)==0);
         CHECK(call(__NR_fcntl,fd,F_SETFD,0,0)==0);

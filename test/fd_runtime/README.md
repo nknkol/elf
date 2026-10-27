@@ -12,7 +12,7 @@ continue to produce `elfloader-proot` with the existing behavior. Both builds
 share intermediate object paths, so do not build them concurrently. The last
 build also determines `src/elfloader`; prefer the named snapshots above.
 
-The experimental payload initializes a one-task-per-private-VM registry on first slow call or fork,
+The experimental payload initializes a private registry on first slow call or fork,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
 timerfd_create, inotify_init1, signalfd4 creation, pipe2, socket, socketpair,
 accept, accept4, pidfd_open, pidfd_getfd, dup, dup3,
@@ -21,7 +21,7 @@ F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
 UNKNOWN: there is no readonly/default-deny permission policy in this experiment.
 
-Shared-VM/shared-FD clone, close_range, unshare and selected alternate FD creation/transfer
+General shared-VM/shared-FD clone (except bounded vfork below), close_range, unshare and selected alternate FD creation/transfer
 interfaces return ENOSYS. Same-task nested slow calls return EDEADLK, other task
 identities are refused, and no metadata mutex is held across blocking syscalls. Uncertain
 close outcomes remain pending (no automatic provenance withdrawal). This is a
@@ -194,7 +194,7 @@ then performs exec and execveat through two image replacements. Tests verify
 non-CLOEXEC identity, removal of CLOEXEC records (including ioctl-set flags),
 shared kernel offset and preserved root/bind view. An unsealed handoff is rejected
 persistently. Optional Alpine busybox sh and Ubuntu dash each run an exec builtin
-into cat. Shared-VM clone/threads, vfork, general shell compatibility and permission enforcement
+into cat. General shared-VM clone/threads, general shell compatibility and permission enforcement
 remain unsupported; existing bounded exec/shebang/empty-path limits still apply.
 
 Exec restore boundary fixtures now include sealed snapshots naming an absent FD,
@@ -219,14 +219,31 @@ exec with preserved records. Direct slow-entry clone stays rejected; the generat
 original-stack clone gate is required. A parent dying before its return can strand
 an active-call slot; automatic reclamation of that slot is not implemented.
 
-Real shell workflow coverage (`python3 test/fd_runtime/shell.py`) now checks
+Real shell workflow coverage (`python3 test/fd_runtime/shell.py`) checks
 Alpine busybox and Ubuntu dash pipelines with external cat, subshells, background
 exit/wait status, command substitution, and FD redirection across fork. It binds
 host /dev/null explicitly: extracted minirootfs fixtures lack the device, causing
-background jobs to fail independently of clone support. Alpine also passes an
-external command followed by a builtin. Ubuntu dash instead exits 2 with Cannot
-fork for that case; the suite reports KNOWN LIMIT, not PASS. Its libc vfork uses
-clone flags 0x4111 (CLONE_VM | CLONE_VFORK | SIGCHLD), which the experimental gate
-rejects. Do not enable these flags with the private-VM singleton registry, or
-silently substitute fork and claim shared-memory vfork semantics. Fixtures are
-optional and missing roots are reported as SKIP.
+background jobs to fail independently of clone support. Both now also pass an
+external command followed by a builtin (dash's vfork route). Missing optional
+rootfs fixtures are reported as SKIP.
+
+Bounded vfork now accepts exactly CLONE_VM | CLONE_VFORK | SIGCHLD (0x4111).
+The kernel still supplies shared memory and parent suspension; flags are never
+rewritten into fork. Before clone, the parent copies records into a separate
+child arena and repairs its internal pointers. Child operations select that
+arena by TID; the parent's arena stays untouched. Parent kernel return after
+child exec/exit discards the child state and unmaps exec scratch retained in the
+old shared VM, releasing the child's nonreturning exec entry slot. Failed exec
+cleans up normally and can be retried. Nested clone (including private fork),
+CLONE_FILES, extra vfork flags and ordinary shared-VM threads remain unsupported.
+This is FD metadata support, not a claim that all legacy backend globals or
+arbitrary shared-VM guest operations are isolated. Death inside other slow calls
+can still strand active-call slots/temporary mappings; parent death before its
+clone return is also not reclaimed automatically.
+
+The libc-free vfork guest runs both natively and through the loader. It checks
+shared memory visible immediately on parent return, independent kernel CLOEXEC,
+child dup/close with unchanged parent records, first-call initialization, exit,
+SIGKILL outside a slow call, failed exec then successful exec, nested clone
+rejection, and 40 exec cycles (more than the 32 active-call slots). The real dash
+workflow additionally covers its same-stack libc vfork calling convention.

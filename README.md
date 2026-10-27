@@ -94,5 +94,6 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 单线程进程的 FD 跟踪实验：`make check-fd-runtime` 构建独立的
 `vendor/proot/svc/build/elfloader-proot-fd-experiment`，覆盖常用 FD 创建、复制、
 标志修改、关闭和 SCM_RIGHTS 接收，并支持私有地址空间 fork 与 exec 状态交接。
-共享 VM/线程、vfork 等仍拒绝，不提供权限隔离。
+支持单层 `CLONE_VM|CLONE_VFORK|SIGCHLD` 的 vfork，父子分别保存 FD 元数据；
+普通共享 VM/线程及嵌套 clone 仍拒绝，不提供权限隔离。
 详见 [实验使用说明](test/fd_runtime/README.md)。普通构建保持原行为。

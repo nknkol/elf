@@ -61,3 +61,14 @@ void reentry_leave(struct reentry_slot *slot)
     if (slot)
         __atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
 }
+
+struct reentry_slot *reentry_current(void)
+{
+    long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
+    struct guard_table *table=__atomic_load_n(&g_table,__ATOMIC_ACQUIRE);
+    if(!table || tid<=0)return NULL;
+    for(int i=0;i<GUARD_SLOTS;i++)
+        if(__atomic_load_n(&table->slots[i].tid,__ATOMIC_ACQUIRE)==tid)
+            return &table->slots[i];
+    return NULL;
+}

@@ -548,3 +548,18 @@ CLONE_VM|CLONE_VFORK|SIGCHLD，当前门禁明确拒绝。现有 pipeline/subshe
 不能推出普通 shell 命令已完整兼容。下一步应处理 vfork 的共享 VM 生命周期、
 父任务挂起期间的元数据所有权、子 exec/exit 后父状态恢复，不能直接放开标志或
 把 fork 替代当作完整 vfork 语义。本轮只增加实际工作流回归和诊断，不改变门禁。
+
+### 接入受限 vfork，解除 Ubuntu dash 普通外部命令阻塞
+
+本机原生探针确认 0x4111 的共享内存、父挂起、独立 FD 标志及退出行为。
+实验 clone gate 现接受精确 CLONE_VM|CLONE_VFORK|SIGCHLD；保留真实内核语义。
+父 clone 前复制独立子 metadata arena 并修复内部指针；按 TID 选择父/子记录，
+不让子 close/dup/CLOEXEC 改写父记录。父从内核返回后丢弃子状态，同时释放成功
+exec 在旧 VM 中留下的 scratch 和活跃调用槽。失败 exec 走正常清理和重试。
+
+新增 native/loader 双跑 vfork guest：首次调用初始化、共享内存和父挂起、FD 标志
+独立、子 close/dup、exit、慢路径外 SIGKILL、失败 exec 后重试、40 次 exec 循环。
+Alpine/Ubuntu 共 12 个 shell 工作流现在全部通过，Ubuntu 普通外部命令不再作为
+KNOWN LIMIT。仍拒绝嵌套 clone、额外 vfork flags、CLONE_FILES 和普通共享 VM 线程。
+这只完成受限 FD 生命周期接入；其他旧后端全局状态及任意共享 VM 操作未全面审计。
+子在其他慢调用中死亡仍可能遗留活跃槽/临时映射；父提前死亡也未自动回收。

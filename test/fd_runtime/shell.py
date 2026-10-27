@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real rootfs shell workflows; report vfork rejection separately from passes."""
+"""Real rootfs shell workflows; including dash vfork external commands."""
 import subprocess
 from pathlib import Path
 
@@ -31,12 +31,7 @@ for directory, shell, prefix, cat in (
         assert (p.returncode, p.stdout) == (0, expected), (directory, name, p.returncode, p.stdout, p.stderr)
         print('PASS: shell workflow', directory, name)
 
-    # A following builtin prevents tail-exec optimization. Ubuntu dash uses
-    # vfork here; do not count a known failure as working shell compatibility.
+    # A following builtin prevents tail-exec optimization; dash uses vfork.
     p = run(f'{cat} /dev/null; printf "done\\n"')
-    if directory == 'ubuntu-root':
-        assert p.returncode == 2 and not p.stdout and 'Cannot fork' in p.stderr, (p.returncode, p.stdout, p.stderr)
-        print('KNOWN LIMIT: Ubuntu dash external command requires unsupported vfork')
-    else:
-        assert (p.returncode, p.stdout) == (0, 'done\n'), (p.returncode, p.stdout, p.stderr)
-        print('PASS: shell workflow', directory, 'external-command')
+    assert (p.returncode, p.stdout) == (0, 'done\n'), (p.returncode, p.stdout, p.stderr)
+    print('PASS: shell workflow', directory, 'external-command')

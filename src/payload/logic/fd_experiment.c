@@ -12,73 +12,113 @@
 #include "clone_notify.h"
 #include "syscall_hooks.h"
 #define CAPACITY 128
-static struct fd_registry registry;
-static struct fd_task_slot tasks[1];
-static struct fd_table_slot tables[1];
-static struct fd_record records[CAPACITY];
-static struct fd_close_queue queue;
-static struct fd_close_slot pending[8];
-static struct fd_guard guard;
-static struct fd_task_handle owner;
-static int initialized;
-static int init_error;
+struct fd_runtime {
+    struct fd_registry registry;
+    struct fd_task_slot tasks[1];
+    struct fd_table_slot tables[1];
+    struct fd_record records[CAPACITY];
+    struct fd_close_queue queue;
+    struct fd_close_slot pending[8];
+    struct fd_guard guard;
+    struct fd_task_handle owner;
+    int initialized, init_error;
+    long owner_tid;
+};
+static struct fd_runtime primary, vfork_child;
+static int vfork_active;
+static void *vfork_exec_scratch;
+static size_t vfork_exec_size;
+static struct reentry_slot *vfork_exec_slot;
 #define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
-static long owner_tid;
 extern long fd_receive_messages(struct fd_table *,long [6]);
 extern long fd_receive_message(struct fd_table *,long [6]);
 extern long raw_syscall(long,long,long,long,long,long,long);
-static int start(void);
+static int start(struct fd_runtime *s);
+static struct fd_runtime *current(void)
+{
+    if(!vfork_active)return &primary;
+    long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
+    return vfork_active && tid==vfork_child.owner_tid ? &vfork_child : &primary;
+}
 int clone_observer_before(struct clone_event *event)
 {
-    /* Only private-VM, copied-FD fork. Optional child TID stores do not share
-     * the VM or the FD table. Never infer host sharing from CLONE_FILES. */
     unsigned long allowed=CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID;
-    if((event->flags & 255)!=17 || (event->flags & ~(allowed|255ul)))return -ENOSYS;
+    int vf=event->flags==(CLONE_VM|CLONE_VFORK|17ul);
+    if(!vf && ((event->flags & 255)!=17 || (event->flags & ~(allowed|255ul))))return -ENOSYS;
+    /* One suspended parent and one child only. No nested clone or threads. */
+    if(vfork_active)return -ENOSYS;
     struct reentry_slot *slot=reentry_try_enter();
     if(!slot)return -EDEADLK;
     if((uintptr_t)slot>=(uintptr_t)-4095)return (long)slot;
-    int rc=start();
-    if(!rc)rc=fd_close_drain(&queue,&registry);
-    if(rc>=0 && fd_close_pending(&queue,fd_registry_table(&registry,owner),-1))rc=-EBUSY;
+    struct fd_runtime *s=&primary;
+    int rc=start(s);
+    if(!rc)rc=fd_close_drain(&s->queue,&s->registry);
+    if(rc>=0 && fd_close_pending(&s->queue,fd_registry_table(&s->registry,s->owner),-1))rc=-EBUSY;
     if(rc<0) { reentry_leave(slot);return rc; }
-    /* Shared guard slot belongs to the parent until its kernel return. The
-     * child must never release it; no metadata mutex is held across clone. */
+    if(vf) {
+        vfork_child=*s;
+        /* Fix all pointers into the copied arena; no pending close pins exist. */
+        vfork_child.registry.tasks=vfork_child.tasks;
+        vfork_child.registry.tables=vfork_child.tables;
+        vfork_child.tables[0].table.slots=vfork_child.records;
+        fd_close_queue_init(&vfork_child.queue,vfork_child.pending,8);
+        vfork_child.owner_tid=0;
+        vfork_active=1;
+    }
     event->cookie=slot;
     return 0;
 }
 void clone_observer_finish(const struct clone_event *event,long result)
 {
-    if(result) { reentry_leave(event->cookie);return; }
+    int vf=event->flags==(CLONE_VM|CLONE_VFORK|17ul);
+    if(result) {
+        if(vf) {
+            /* Kernel vfork return proves the child left this VM (exec/exit),
+             * or clone failed. Its FD changes never touched primary. */
+            if(vfork_exec_scratch)
+                raw_syscall(__NR_munmap,(long)vfork_exec_scratch,vfork_exec_size,0,0,0,0);
+            reentry_leave(vfork_exec_slot);
+            vfork_exec_slot=0;vfork_exec_scratch=0;vfork_exec_size=0;
+            vfork_active=0;
+        }
+        reentry_leave(event->cookie);return;
+    }
+    struct fd_runtime *s=vf?&vfork_child:&primary;
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
-    /* These singleton objects live in private payload mappings copied by fork.
-     * Rebind only the child's private registry, preserving records and serial. */
-    tasks[owner.slot].clone.child_tid=0;
-    int rc=fd_registry_publish(&registry,owner,tid);
+    s->tasks[s->owner.slot].clone.child_tid=0;
+    int rc=fd_registry_publish(&s->registry,s->owner,tid);
     if(rc) {
-        init_error=rc;
-        __atomic_store_n(&initialized,3,__ATOMIC_RELEASE);
+        s->init_error=rc;
+        __atomic_store_n(&s->initialized,3,__ATOMIC_RELEASE);
         return;
     }
-    owner_tid=tid;
+    s->owner_tid=tid;
 }
-/* No cookie allocation. A parent dying before return can strand its shared
- * guard slot; never release that slot again after normal finish/reuse. */
-static int start(void)
+/* Track only the exec scratch and its held entry slot. Failure returns through
+ * the normal entry epilogue; successful vfork exec is cleaned by the parent.
+ * Death inside other slow calls can still strand slots/temporary mappings. */
+void fd_experiment_exec_scratch(void *address,size_t size)
+{
+    if(current()!=&vfork_child)return;
+    vfork_exec_scratch=address;vfork_exec_size=size;
+    vfork_exec_slot=address?reentry_current():0;
+}
+static int start(struct fd_runtime *s)
 {
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
     if(tid<=0)return tid<0?(int)tid:-EIO;
-    int state=__atomic_load_n(&initialized,__ATOMIC_ACQUIRE);
-    if(state==2)return tid==owner_tid?0:-EOPNOTSUPP;
-    if(state==3)return init_error;
+    int state=__atomic_load_n(&s->initialized,__ATOMIC_ACQUIRE);
+    if(state==2)return tid==s->owner_tid?0:-EOPNOTSUPP;
+    if(state==3)return s->init_error;
     int empty=0;
-    if(!__atomic_compare_exchange_n(&initialized,&empty,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return -EAGAIN;
-    fd_registry_init(&registry,tasks,1,tables,1,records,CAPACITY);
-    fd_close_queue_init(&queue,pending,8);
-    fd_registry_create(&registry,&owner);
-    fd_registry_publish(&registry,owner,tid);
+    if(!__atomic_compare_exchange_n(&s->initialized,&empty,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return -EAGAIN;
+    fd_registry_init(&s->registry,s->tasks,1,s->tables,1,s->records,CAPACITY);
+    fd_close_queue_init(&s->queue,s->pending,8);
+    fd_registry_create(&s->registry,&s->owner);
+    fd_registry_publish(&s->registry,s->owner,tid);
     if(g_payload_config.fd_state>=0) {
         unsigned char snapshot[STATE_BYTES];
-        struct fd_table *table=fd_registry_table(&registry,owner);
+        struct fd_table *table=fd_registry_table(&s->registry,s->owner);
         int transport=g_payload_config.fd_state;
         int rc=fd_handoff_restore(table,transport,snapshot,sizeof(snapshot));
         if(!rc)for(size_t i=0;i<table->capacity;i++) {
@@ -92,19 +132,20 @@ static int start(void)
         raw_syscall(__NR_close,transport,0,0,0,0,0);
         g_payload_config.fd_state=-1;
         if(rc) {
-            init_error=rc;
-            __atomic_store_n(&initialized,3,__ATOMIC_RELEASE);
+            s->init_error=rc;
+            __atomic_store_n(&s->initialized,3,__ATOMIC_RELEASE);
             return rc;
         }
     }
-    owner_tid=tid;
-    __atomic_store_n(&initialized,2,__ATOMIC_RELEASE);
+    s->owner_tid=tid;
+    __atomic_store_n(&s->initialized,2,__ATOMIC_RELEASE);
     return 0;
 }
 long fd_experiment_export(void)
 {
+    struct fd_runtime *s=current();
     unsigned char snapshot[STATE_BYTES];
-    return fd_handoff_create(fd_registry_table(&registry,owner),snapshot,sizeof(snapshot));
+    return fd_handoff_create(fd_registry_table(&s->registry,s->owner),snapshot,sizeof(snapshot));
 }
 static int room(struct fd_table *t,int target,int assign)
 {
@@ -116,8 +157,9 @@ static int room(struct fd_table *t,int target,int assign)
 }
 long fd_experiment_dispatch(long n,long a[6])
 {
-    int rc=start();if(rc)return rc;
-    struct fd_table *t=fd_registry_table(&registry,owner);
+    struct fd_runtime *s=current();
+    int rc=start(s);if(rc)return rc;
+    struct fd_table *t=fd_registry_table(&s->registry,s->owner);
     if(n==__NR_prctl && a[0]==PR_ELF_FD_QUERY) {
         if(a[1]==0) { long count=0;for(size_t i=0;i<t->capacity;i++)count+=t->slots[i].fd>=0;return count; }
         const struct fd_record *r=fd_table_get(t,(int)a[2]);if(!r)return -ENOENT;
@@ -138,7 +180,7 @@ long fd_experiment_dispatch(long n,long a[6])
     /* TIOCGPTPEER returns a new FD; do not treat it as an ordinary ioctl.
      * Native success is not available in this sandbox, so keep it unsupported. */
     if(n==__NR_ioctl && (unsigned)a[1]==TIOCGPTPEER)return -ENOSYS;
-    if(n==__NR_close) { int bookkeeping;return fd_close_execute(&queue,&registry,&guard,owner,(int)a[0],&bookkeeping); }
+    if(n==__NR_close) { int bookkeeping;return fd_close_execute(&s->queue,&s->registry,&s->guard,s->owner,(int)a[0],&bookkeeping); }
     int duplicate=n==__NR_dup || n==__NR_dup3 ||
         (n==__NR_fcntl && (a[1]==F_DUPFD || a[1]==F_DUPFD_CLOEXEC));
     int ioctl_setfd=n==__NR_ioctl && ((unsigned)a[1]==FIOCLEX || (unsigned)a[1]==FIONCLEX);
@@ -155,10 +197,10 @@ long fd_experiment_dispatch(long n,long a[6])
     int receive=n==__NR_recvmsg || n==__NR_recvmmsg;
     if(!create && !pair && !duplicate && !setfd && !receive && !execute)return syscall_handle_common(n,a);
     /* The entry trampoline rejects same-TID nested slow calls in this build;
-     * clone is denied, so no metadata writer can run across these syscalls.
+     * each supported task has its own metadata arena across these syscalls.
      * Never generalize this to a multithreaded permission mode. */
-    rc=fd_close_drain(&queue,&registry);if(rc<0)return rc;
-    if(fd_close_pending(&queue,t,-1))return -EBUSY;
+    rc=fd_close_drain(&s->queue,&s->registry);if(rc<0)return rc;
+    if(fd_close_pending(&s->queue,t,-1))return -EBUSY;
     if(execute)return syscall_handle_common(n,a);
     if(receive)return n==__NR_recvmsg?fd_receive_message(t,a):fd_receive_messages(t,a);
     rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1,!setfd);if(rc)return rc;

@@ -105,6 +105,7 @@ long proot_execve(long number, long a[6])
     ExecScratch *s = (void *)mem;
 #ifdef FD_EXPERIMENT
     long transport = -1;
+    fd_experiment_exec_scratch(s,sizeof(*s));
 #endif
     long ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
                                        s->guest, s->host, sizeof(s->host));
@@ -207,6 +208,7 @@ long proot_execve(long number, long a[6])
                       (long)env, 0, 0, 0);
  done:
 #ifdef FD_EXPERIMENT
+    fd_experiment_exec_scratch(NULL,0);
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
 #endif
     raw_syscall(__NR_munmap, mem, sizeof(ExecScratch), 0, 0, 0, 0);

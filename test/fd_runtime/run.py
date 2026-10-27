@@ -91,7 +91,7 @@ print('PASS: native recvmmsg full and partial batches')
 with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
     work = Path(temp)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl', 'exec', 'fork'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl', 'exec', 'fork', 'vfork'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -100,6 +100,16 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
                         '-DEXPECT_PEEK_RIGHTS=' + str(peek_rights),
                         '-I' + str(repo / 'src/payload/include'),
                         str(repo / 'test/fd_runtime' / (name + '.c')), '-o', str(probe)], check=True)
+        if name == 'vfork':
+            native = work / 'vfork-native'
+            subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
+                            '-fno-builtin', '-fno-stack-protector', '-DFD_TRACK=0',
+                            '-I' + str(repo / 'src/payload/include'),
+                            str(repo / 'test/fd_runtime/vfork.c'), '-o', str(native)], check=True)
+            reference = subprocess.run([str(native)], cwd=work, text=True,
+                                       capture_output=True, timeout=20)
+            assert reference.returncode == 0, (reference.returncode, reference.stdout, reference.stderr)
+            print('PASS: native vfork sharing/suspension/FD/exec baseline')
         inherited = os.memfd_create('range-inherited', flags=0) if name in ('range', 'ioctl') else None
         command = [str(loader), '--mode', 'compat', '--', str(probe)]
         if name == 'exec':
