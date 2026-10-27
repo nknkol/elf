@@ -358,3 +358,11 @@ UNKNOWN 来源以及已有关闭链。CLOEXEC 分别读取 epoll 的第一个参
 真实 guest 将 eventfd、timerfd 注册到 epoll，核对事件携带数据、计数消费、
 非就绪返回和最后 FD 关闭后的清理。另覆盖无 CLOEXEC、非法参数及容量耗尽。
 实验模式仍为单任务，clone/exec 未放开，文件访问权限策略仍未启用。
+
+### 实验运行时扩展：pipe2 双 FD 创建
+
+pipe2 创建前预检两个空槽及两个序号的余量，再由内核创建管道。
+成功后双端各自建立 UNKNOWN 来源记录，dup 只共享对应端的 description。
+真实 guest 验证数据传输、非阻塞、EOF、CLOEXEC、错误参数及容量边界。
+仍限单任务实验模式：内核成功后读取 guest FD 数组，不提供并发用户内存快照，
+不启用权限隔离；socketpair、SCM_RIGHTS 与多任务生命周期尚未接入。

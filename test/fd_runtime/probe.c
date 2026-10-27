@@ -41,7 +41,7 @@ void _start(void)
     CHECK(call(__NR_clone,17,0,0,0)==-ENOSYS);
     CHECK(call(__NR_execve,(long)"does-not-exist",0,0,0)==-ENOSYS);
     CHECK(call(__NR_close_range,0,~0u,0,0)==-ENOSYS);
-    CHECK(call(__NR_pipe2,0,0,0,0)==-ENOSYS);
+    CHECK(call(__NR_pipe2,0,0,0,0)==-EFAULT);
     CHECK(call(__NR_close,other,0,0,0)==0 && call(__NR_close,fourth,0,0,0)==0);
     long mem=call(__NR_memfd_create,(long)"fd-runtime",1,0,0);
     CHECK(mem>=0 && query(3,mem)==1);
@@ -98,9 +98,40 @@ void _start(void)
     CHECK(call(__NR_memfd_create,(long)"fd-runtime",0x80000000,0,0)==-EINVAL);
     CHECK(call(__NR_eventfd2,0,0x80000000,0,0)==-EINVAL);
     CHECK(query(0,0)==1);
+    int ends[2]={-1,-1};
+    CHECK(call(__NR_pipe2,(long)ends,O_CLOEXEC|O_NONBLOCK,0,0)==0);
+    CHECK(query(0,0)==3 && query(2,ends[0])!=query(2,ends[1]));
+    for(int i=0;i<2;i++) {
+        CHECK(query(3,ends[i])==1 && call(__NR_fcntl,ends[i],F_GETFD,0,0)==FD_CLOEXEC);
+        CHECK(call(__NR_fcntl,ends[i],F_GETFL,0,0)&O_NONBLOCK);
+    }
+    CHECK(call(__NR_read,ends[0],(long)&c,1,0)==-EAGAIN);
+    copy=call(__NR_dup,ends[1],0,0,0);
+    CHECK(copy>=0 && query(2,copy)==query(2,ends[1]));
+    CHECK(call(__NR_close,ends[1],0,0,0)==0 && query(1,ends[1])==-ENOENT);
+    c='P';CHECK(call(__NR_write,copy,(long)&c,1,0)==1);
+    c=0;CHECK(call(__NR_read,ends[0],(long)&c,1,0)==1 && c=='P');
+    CHECK(call(__NR_close,copy,0,0,0)==0);
+    CHECK(call(__NR_read,ends[0],(long)&c,1,0)==0);
+    CHECK(call(__NR_close,ends[0],0,0,0)==0 && query(0,0)==1);
+    CHECK(call(__NR_pipe2,(long)ends,0,0,0)==0);
+    CHECK(query(3,ends[0])==0 && query(3,ends[1])==0);
+    CHECK(call(__NR_close,ends[0],0,0,0)==0 && call(__NR_close,ends[1],0,0,0)==0);
+    ends[0]=-1;ends[1]=-1;
+    CHECK(call(__NR_pipe2,(long)ends,0x80000000,0,0)==-EINVAL);
+    CHECK(ends[0]==-1 && ends[1]==-1 && query(0,0)==1);
     long fds[127];
-    for(int i=0;i<127;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
+    for(int i=0;i<126;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
+    CHECK(call(__NR_pipe2,(long)ends,0,0,0)==-ENOSPC);
+    CHECK(ends[0]==-1 && ends[1]==-1 && query(0,0)==127);
+    CHECK(call(__NR_close,fds[125],0,0,0)==0 && query(0,0)==126);
+    CHECK(call(__NR_pipe2,(long)ends,0,0,0)==0 && query(0,0)==128);
+    CHECK(query(1,ends[0])>0 && query(1,ends[1])>0);
+    CHECK(call(__NR_close,ends[0],0,0,0)==0 && call(__NR_close,ends[1],0,0,0)==0);
+    fds[125]=call(__NR_dup,fd,0,0,0);CHECK(fds[125]>=0);
+    for(int i=126;i<127;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
     CHECK(query(0,0)==128);
+    CHECK(call(__NR_pipe2,(long)ends,0,0,0)==-ENOSPC);
     CHECK(call(__NR_dup,fd,0,0,0)==-ENOSPC && query(0,0)==128);
     CHECK(call(__NR_memfd_create,(long)"no-room",0,0,0)==-ENOSPC);
     CHECK(call(__NR_eventfd2,0,0,0,0)==-ENOSPC && query(0,0)==128);
@@ -108,7 +139,7 @@ void _start(void)
     CHECK(call(__NR_timerfd_create,CLOCK_MONOTONIC,0,0,0)==-ENOSPC);
     for(int i=0;i<127;i++)CHECK(call(__NR_close,fds[i],0,0,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0 && query(0,0)==0);
-    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd/epoll/timerfd, lifecycle rejection and capacity\n";
+    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd/epoll/timerfd/pipe2, lifecycle rejection and capacity\n";
     call(__NR_write,1,(long)ok,sizeof(ok)-1,0);
     call(__NR_exit_group,0,0,0,0);for(;;){}
 }

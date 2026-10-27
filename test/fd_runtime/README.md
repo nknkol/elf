@@ -14,7 +14,7 @@ build also determines `src/elfloader`; prefer the named snapshots above.
 
 The experimental payload initializes a single-task registry on first slow call,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
-timerfd_create, dup, dup3,
+timerfd_create, pipe2, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
@@ -57,3 +57,10 @@ the last descriptors removes readiness and metadata. Timer expiration is tested
 with a one-shot 1 ms timer and a bounded wait. CLOEXEC/non-CLOEXEC, invalid flags
 or clock IDs, and capacity exhaustion are covered. epoll_ctl/epoll_pwait and
 timerfd_settime retain kernel behavior; no userspace event loop is implemented.
+
+The pipe2 adapter preflights two free slots and two generation values before
+kernel entry, then records the read and write ends with distinct descriptions.
+Tests cover CLOEXEC/nonblocking flags, a duplicated writer, EOF after the last
+writer closes, EFAULT, invalid flags, and 0/1/2 free-slot boundaries. Failed
+creation publishes no records. Reading the returned array relies on the current
+single-task AArch64 mode; this is not a concurrent user-memory snapshot guarantee.
