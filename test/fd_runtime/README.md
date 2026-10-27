@@ -239,7 +239,8 @@ CLONE_FILES, extra vfork flags and ordinary shared-VM threads remain unsupported
 This is FD metadata support, not a claim that all legacy backend globals or
 arbitrary shared-VM guest operations are isolated. The child's guard slot is now
 reclaimed even when a slow call never returns.
-Other temporary mappings interrupted by death still need separate accounting;
+Path/exec scratch uses parent reservations as described below; other internal
+temporary mappings interrupted by death still need separate accounting;
 parent death before its clone return is also not reclaimed automatically.
 
 The libc-free vfork guest runs both natively and through the loader. It checks
@@ -259,3 +260,21 @@ acquisition/return interruption windows. Only the suspended parent's kernel
 return authorizes retirement; no reusable public slot is reclaimed by TID.
 The guard test also fills the public pool and verifies child-slot retirement
 leaves all 32 owners intact. This does not implement general dead-task reaping.
+
+Path and exec scratch are now reserved by the parent before kernel vfork entry,
+using the actual sizes of Bridge and ExecScratch. The child borrows zeroed slots
+(best-fit so exec leaves room for nested path resolution), and normal free only
+returns a slot. Kernel vfork return discards both mappings, including clone
+failure. Partial reservation failure frees earlier reservations before returning
+an error. This removes the child's mmap-to-registration and munmap-to-forgetting
+interruption windows for these two adapters. Non-vfork and normal builds retain
+per-call kernel mmap/munmap; other internal mappings are not covered.
+
+The guest adds 32 interrupted FIFO openat cycles and checks parent virtual pages
+via numeric /proc/<pid>/statm after every child, as well as unchanged FD metadata.
+Numeric PID avoids the unsupported /proc/self magic-link resolver route. The
+runner creates the FIFO in the HarmonyOS app cache (ordinary temp directory on
+other hosts), because workspace storage rejects FIFO creation, and links it into
+the temporary working directory. Both the FIFO and its directory are cleaned up.
+The existing failed-exec/retry and 40 successful exec cycles exercise nested
+scratch use and reuse alongside the new interrupted path test.

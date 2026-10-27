@@ -10,6 +10,7 @@
 #include "config.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
+#include "proot_scratch.h"
 #include "path/resolve_core.h"
 #include "path/binding_core.h"
 
@@ -26,6 +27,8 @@ typedef struct {
     char cwd[PATH_MAX], guest[PATH_MAX], host[PATH_MAX];
     char first_guest[PATH_MAX], first_host[PATH_MAX];
 } Bridge;
+
+size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
 
 static int host_map(void *opaque, const char *guest, char *host)
 {
@@ -378,7 +381,7 @@ static long bridge_create(Bridge **out)
         return -EOPNOTSUPP;
     if (cfg->bind_count < 0 || cfg->bind_count > CONFIG_MAX_BINDS)
         return -EINVAL;
-    long mem = raw_syscall(SYS_mmap, 0, sizeof(Bridge), 3, 0x22, -1, 0);
+    long mem = proot_scratch_alloc(sizeof(Bridge));
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     Bridge *b = (void *)mem;
@@ -388,7 +391,7 @@ static long bridge_create(Bridge **out)
         b->bindings[i] = (PathBinding){cfg->binds[i].src, cfg->binds[i].dst};
     long ret = binding_table_validate(&b->table);
     if (ret < 0) {
-        raw_syscall(__NR_munmap, mem, sizeof(Bridge), 0, 0, 0, 0);
+        proot_scratch_free((void *)mem,sizeof(Bridge));
         return ret;
     }
     *out = b;
@@ -404,7 +407,7 @@ long proot_syscall(long number, long args[6])
     if (ret < 0)
         return ret;
     ret = dispatch(b, number, args);
-    raw_syscall(__NR_munmap, (long)b, sizeof(Bridge), 0, 0, 0, 0);
+    proot_scratch_free(b,sizeof(Bridge));
     return ret;
 }
 
@@ -426,6 +429,6 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
             strcpy(host, b->host);
         }
     }
-    raw_syscall(__NR_munmap, (long)b, sizeof(Bridge), 0, 0, 0, 0);
+    proot_scratch_free(b,sizeof(Bridge));
     return (int)ret;
 }

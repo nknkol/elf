@@ -578,3 +578,18 @@ KNOWN LIMIT。仍拒绝嵌套 clone、额外 vfork flags、CLONE_FILES 和普通
 
 本步解决 vfork 子活跃槽泄漏；其他慢调用的临时 mmap、父提前死亡以及普通 fork
 子进程遗留公共槽仍需后续处理，不声称完成通用进程退出回收。
+
+### 为 vfork 预留路径/exec scratch，回收阻塞路径调用遗留映射
+
+Bridge 与 ExecScratch 统一使用 scratch 分配接口；普通构建及非 vfork 调用仍按原样
+mmap/munmap。父在进入内核 vfork 前按两个结构实际大小预留映射，失败时回收已分配
+部分再返回错误。子按最小可容纳槽借用并清零，释放只归还槽；父内核返回后统一
+munmap，包括 clone 失败。这避免子在 mmap 成功但尚未登记、或释放前后被杀的窗口。
+分配必须选择最小合适槽，否则较小的 exec scratch 会占用 Bridge 槽，导致嵌套解析
+无可用槽；exec 失败重试和多轮成功 exec 已覆盖该组合。
+
+新增 native/loader 对照：32 次 vfork 子在 FIFO openat 中阻塞，由 SIGALRM 终止，
+父每轮读 /proc/<数字 PID>/statm，验证虚拟页数不增长和 FD generation/CLOEXEC 不变。
+工作目录不允许 FIFO，fixture 在允许创建及删除的应用 cache 中建立，并用工作目录
+软链接访问；退出清理。现有 40 次 recvmsg 中断、40 次 exec 和 shell 工作流继续通过。
+本步覆盖路径/exec 两类 scratch，不包括其他内部 mmap、父提前死亡和普通 fork 回收。

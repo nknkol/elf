@@ -88,8 +88,15 @@ try:
 finally:
     sender.close(); receiver.close()
 print('PASS: native recvmmsg full and partial batches')
-with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
+# Workspace storage rejects FIFOs on this host; the app cache supports both
+# creation and deletion. Other hosts use their ordinary temporary directory.
+fifo_base = Path('/data/storage/el2/base/cache')
+with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
+        tempfile.TemporaryDirectory(prefix='elf-fifo-', dir=fifo_base if fifo_base.is_dir() else None) as fifo_temp:
     work = Path(temp)
+    fifo = Path(fifo_temp) / 'fifo'
+    os.mkfifo(fifo, 0o600)
+    (work / 'vfork-fifo').symlink_to(fifo)
     (work / 'fd-data').write_text('Q runtime file\n')
     for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl', 'exec', 'fork', 'vfork'):
         probe = work / name

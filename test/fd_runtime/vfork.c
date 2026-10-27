@@ -25,6 +25,19 @@ static char stack[65536] __attribute__((aligned(16)));
 extern long spawn(void *);
 static long number(const char *p) { long n=0;while(*p)n=n*10+*p++-'0';return n; }
 static char *decimal(char *buffer,long n) { char *p=buffer+31;*p=0;do { *--p='0'+n%10;n/=10; } while(n);return p; }
+static long memory_pages(void) {
+    char text[128],path[64]="/proc/",digits[32];
+    char *pid=decimal(digits,call(__NR_getpid,0,0,0,0));int at=6;
+    while(*pid)path[at++]=*pid++;
+    const char *tail="/statm";while((path[at++]=*tail++)){}
+    long handle=call(__NR_openat,AT_FDCWD,(long)path,O_RDONLY,0);
+    CHECK(handle>=0);
+    long n=call(__NR_read,handle,(long)text,sizeof(text),0);CHECK(n>0);
+    CHECK(call(__NR_close,handle,0,0,0)==0);
+    long pages=0;int i=0;
+    while(i<n && text[i]>='0' && text[i]<='9')pages=pages*10+text[i++]-'0';
+    CHECK(i>0 && i<n && text[i]==' ');return pages;
+}
 void child(void) {
     marker=1;
     if(mode==-1) {
@@ -32,6 +45,12 @@ void child(void) {
         call(__NR_exit,42,0,0,0);for(;;){}
     }
     META(query(0,0)==1 && query(1,fd)==generation);
+    if(mode==101) {
+        struct itimerval timer={{0,0},{0,50000}};
+        CHECK(call(__NR_setitimer,ITIMER_REAL,(long)&timer,0,0)==0);
+        /* No writer: path scratch remains live across this blocking open. */
+        call(__NR_openat,AT_FDCWD,(long)"vfork-fifo",O_RDONLY,0);CHECK(0);
+    }
     if(mode==100) {
         int sockets[2];
         CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)sockets)==0);
@@ -101,8 +120,16 @@ void run(long *sp) {
         META(query(0,0)==1 && query(1,fd)==generation && query(3,fd)==0);
         CHECK(call(__NR_fcntl,fd,F_GETFD,0,0)==0);
     }
+    long pages=memory_pages();
+    for(int round=0;round<32;round++) {
+        mode=101;marker=0;
+        pid=spawn(stack+sizeof(stack));CHECK(pid>0 && marker==1);
+        status=0;CHECK(call(__NR_wait4,pid,(long)&status,0,0)==pid && status==14);
+        CHECK(memory_pages()==pages);
+        META(query(0,0)==1 && query(1,fd)==generation && query(3,fd)==0);
+    }
     CHECK(call(__NR_close,fd,0,0,0)==0);
-    static const char pass[]="PASS: runtime FD vfork shared memory, copied FDs, exit/kill/failed exec, repeated exec and interrupted recvmsg\n";
+    static const char pass[]="PASS: runtime FD vfork shared memory, copied FDs, exit/kill/failed exec, repeated exec and interrupted recvmsg/FIFO scratch\n";
     call(__NR_write,1,(long)pass,sizeof(pass)-1,0);call(__NR_exit_group,0,0,0,0);for(;;){}
 }
 /* Keep the parent's C stack intact. Kernel selects the child-only stack before

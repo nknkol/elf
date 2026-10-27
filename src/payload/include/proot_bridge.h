@@ -5,6 +5,8 @@
 #include <stdbool.h>
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
                             char *guest, char *host, size_t capacity);
+size_t proot_bridge_scratch_size(void);
+size_t proot_exec_scratch_size(void);
 long proot_get_auxv(long args[6]);
 long proot_execve(long number, long args[6]);
 int proot_handles_syscall(long number);

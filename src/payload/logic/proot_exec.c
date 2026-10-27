@@ -10,6 +10,7 @@
 #include "config.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
+#include "proot_scratch.h"
 #ifdef FD_EXPERIMENT
 #include "fd_experiment.h"
 #endif
@@ -31,6 +32,8 @@ typedef struct {
     char fd_state[24];
 #endif
 } ExecScratch;
+
+size_t proot_exec_scratch_size(void) { return sizeof(ExecScratch); }
 
 static int read_executable(const char *path, int nofollow, char header[256])
 {
@@ -99,13 +102,12 @@ long proot_execve(long number, long a[6])
         if (++argc >= EXEC_ARGS)
             return -E2BIG;
     }
-    long mem = raw_syscall(SYS_mmap, 0, sizeof(ExecScratch), 3, 0x22, -1, 0);
+    long mem = proot_scratch_alloc(sizeof(ExecScratch));
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     ExecScratch *s = (void *)mem;
 #ifdef FD_EXPERIMENT
     long transport = -1;
-    fd_experiment_exec_scratch(s,sizeof(*s));
 #endif
     long ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
                                        s->guest, s->host, sizeof(s->host));
@@ -208,9 +210,8 @@ long proot_execve(long number, long a[6])
                       (long)env, 0, 0, 0);
  done:
 #ifdef FD_EXPERIMENT
-    fd_experiment_exec_scratch(NULL,0);
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
 #endif
-    raw_syscall(__NR_munmap, mem, sizeof(ExecScratch), 0, 0, 0, 0);
+    proot_scratch_free((void *)mem,sizeof(ExecScratch));
     return ret;
 }

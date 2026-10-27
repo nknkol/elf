@@ -11,6 +11,8 @@
 #include "fd_close_exec.h"
 #include "clone_notify.h"
 #include "syscall_hooks.h"
+#include "proot_bridge.h"
+#include <string.h>
 #define CAPACITY 128
 struct fd_runtime {
     struct fd_registry registry;
@@ -26,8 +28,7 @@ struct fd_runtime {
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
-static void *vfork_exec_scratch;
-static size_t vfork_exec_size;
+static struct scratch_slot { void *address;size_t size;int used; } scratch[2];
 #define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
 extern long fd_receive_messages(struct fd_table *,long [6]);
 extern long fd_receive_message(struct fd_table *,long [6]);
@@ -38,6 +39,24 @@ static struct fd_runtime *current(void)
     if(!vfork_active)return &primary;
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
     return vfork_active && tid==vfork_child.owner_tid ? &vfork_child : &primary;
+}
+static void scratch_discard(void)
+{
+    for(int i=0;i<2;i++) {
+        if(scratch[i].address)
+            raw_syscall(__NR_munmap,(long)scratch[i].address,scratch[i].size,0,0,0,0);
+        scratch[i]=(struct scratch_slot){0};
+    }
+}
+static int scratch_prepare(void)
+{
+    size_t sizes[]={proot_bridge_scratch_size(),proot_exec_scratch_size()};
+    for(int i=0;i<2;i++) {
+        long mem=raw_syscall(__NR_mmap,0,sizes[i],3,0x22,-1,0);
+        if((unsigned long)mem>=(unsigned long)-4095) { scratch_discard();return mem; }
+        scratch[i]=(struct scratch_slot){(void *)mem,sizes[i],0};
+    }
+    return 0;
 }
 int clone_observer_before(struct clone_event *event)
 {
@@ -55,6 +74,8 @@ int clone_observer_before(struct clone_event *event)
     if(rc>=0 && fd_close_pending(&s->queue,fd_registry_table(&s->registry,s->owner),-1))rc=-EBUSY;
     if(rc<0) { reentry_leave(slot);return rc; }
     if(vf) {
+        rc=scratch_prepare();
+        if(rc) { reentry_leave(slot);return rc; }
         vfork_child=*s;
         /* Fix all pointers into the copied arena; no pending close pins exist. */
         vfork_child.registry.tasks=vfork_child.tasks;
@@ -74,10 +95,8 @@ void clone_observer_finish(const struct clone_event *event,long result)
         if(vf) {
             /* Kernel vfork return proves the child left this VM (exec/exit),
              * or clone failed. Its FD changes never touched primary. */
-            if(vfork_exec_scratch)
-                raw_syscall(__NR_munmap,(long)vfork_exec_scratch,vfork_exec_size,0,0,0,0);
+            scratch_discard();
             reentry_vfork_end();
-            vfork_exec_scratch=0;vfork_exec_size=0;
             vfork_active=0;
         }
         reentry_leave(event->cookie);return;
@@ -94,12 +113,30 @@ void clone_observer_finish(const struct clone_event *event,long result)
     }
     s->owner_tid=tid;
 }
-/* Exec scratch survives successful exec in the parent's VM. Other internal
- * temporary mappings interrupted by death still need separate accounting. */
-void fd_experiment_exec_scratch(void *address,size_t size)
+/* Parent-owned reservations remove the child mmap/publication and
+ * munmap/unregistration death windows for the migrated path/exec scratch. */
+long fd_experiment_scratch_alloc(size_t size)
 {
-    if(current()!=&vfork_child)return;
-    vfork_exec_scratch=address;vfork_exec_size=size;
+    if(current()!=&vfork_child)return raw_syscall(__NR_mmap,0,size,3,0x22,-1,0);
+    int best=-1;
+    for(int i=0;i<2;i++)if(!scratch[i].used && size<=scratch[i].size &&
+        (best<0 || scratch[i].size<scratch[best].size))best=i;
+    if(best>=0) {
+        scratch[best].used=1;
+        memset(scratch[best].address,0,size);
+        return (long)scratch[best].address;
+    }
+    return -ENOMEM;
+}
+void fd_experiment_scratch_free(void *address,size_t size)
+{
+    if(current()==&vfork_child) {
+        for(int i=0;i<2;i++)if(scratch[i].address==address) {
+            scratch[i].used=0;return;
+        }
+        return;
+    }
+    raw_syscall(__NR_munmap,(long)address,size,0,0,0,0);
 }
 static int start(struct fd_runtime *s)
 {

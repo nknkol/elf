@@ -3,7 +3,8 @@
 #define ELF_FD_EXPERIMENT_H
 /* Compile-time, private fork and bounded vfork metadata experiment; NOT a permissions mode. */
 #include <stddef.h>
-void fd_experiment_exec_scratch(void *,size_t);
+long fd_experiment_scratch_alloc(size_t);
+void fd_experiment_scratch_free(void *,size_t);
 #define PR_ELF_FD_QUERY 0x46445452
 long fd_experiment_export(void);
 long fd_experiment_dispatch(long number,long args[6]);
