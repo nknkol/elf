@@ -196,3 +196,10 @@ shared kernel offset and preserved root/bind view. An unsealed handoff is reject
 persistently. Optional Alpine busybox sh and Ubuntu dash each run an exec builtin
 into cat. Clone/threads, general shell process creation and permission enforcement
 remain unsupported; existing bounded exec/shebang/empty-path limits still apply.
+
+Exec restore boundary fixtures now include sealed snapshots naming an absent FD,
+the transport FD itself, or an invalid CLOEXEC entry. Each produces a persistent
+initialization error. A valid sealed snapshot with serial UINT64_MAX verifies
+that F_SETFD/FIOCLEX/FIONCLEX still update existing records without allocating a
+new generation, while new FD assignments return EOVERFLOW; close still works.
+These synthetic snapshots exercise metadata validation, not protocol authenticity.

@@ -15,11 +15,14 @@ static long call(long n,long a,long b,long c,long d)
 #define CHECK(x) do { if(!(x)) { call(__NR_exit_group,__LINE__,0,0,0);for(;;){} } } while(0)
 static long query(int selector,int fd) { return call(__NR_prctl,PR_ELF_FD_QUERY,selector,fd,0); }
 
-void _start(void)
+void run(long *sp)
 {
-    /* Unsealed transport must produce a sticky initialization failure. */
-    CHECK(query(0,0)==-EINVAL);
-    CHECK(call(__NR_openat,AT_FDCWD,(long)"fd-data",O_RDONLY,0)==-EINVAL);
-    CHECK(query(0,0)==-EINVAL);
+    char **av=(void *)(sp+1);long error=EINVAL;
+    if(sp[0]==2) { error=0;for(char *p=av[1];*p;p++)error=error*10+*p-'0'; }
+    CHECK(query(0,0)==-error);
+    CHECK(call(__NR_openat,AT_FDCWD,(long)"fd-data",O_RDONLY,0)==-error);
+    CHECK(query(0,0)==-error);
     call(__NR_exit_group,0,0,0,0);for(;;){}
 }
+
+__asm__(".global _start\n_start:\nmov x0, sp\nbl run\n");

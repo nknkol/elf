@@ -509,3 +509,13 @@ CLOEXEC 删除（含 ioctl 设置）、共享偏移及 root/bind 视图。另测
 持续拒绝。Alpine busybox sh 与 Ubuntu dash 的 exec builtin -> cat 实测通过。
 clone/线程仍拒绝，通用 shell 创建子进程和权限隔离尚未实现；既有 exec 路径预检、
 单层 shebang、有界 argv、AT_EMPTY_PATH 等限制不因本次接入而消失。
+
+### exec 恢复边界与序号耗尽修复
+
+新增真实 guest 恢复用例：密封快照引用失效 FD、将传输 FD 本身列为继承项、
+携带非法 CLOEXEC 记录，分别持续返回 ESTALE/EINVAL，不回退到空表继续运行。
+另用合法密封快照将 serial 置为 UINT64_MAX，复现已知 FD 的 F_SETFD 被误拒绝。
+修正创建预检：仅需要新 generation 的操作受序号耗尽限制；已有 FD 的标志更新
+不改 generation/description，F_SETFD/FIOCLEX/FIONCLEX 及 close 仍允许，
+新建/复制仍拒绝 EOVERFLOW。测试先在修复前失败，再验证修复后的行为。
+这些人工快照只测试协议/元数据边界，不构成认证或权限隔离证明。

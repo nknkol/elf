@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end FD experiment through the built loader, not linked model callbacks."""
+import struct
+import errno
 import array
 import ctypes
 import fcntl
@@ -130,6 +132,32 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
     finally:
         os.close(bad_state)
     print('PASS: malformed exec handoff remains a persistent initialization error')
+    limit_probe = work / 'restore-limit'
+    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
+                    '-fno-stack-protector', '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_runtime/restore_limit.c'), '-o', str(limit_probe)], check=True)
+    for case in ('missing-fd', 'transport-alias', 'cloexec-record', 'serial-limit'):
+        state = os.memfd_create('sealed-state', os.MFD_ALLOW_SEALING)
+        inherited = os.memfd_create('state-record', flags=0)
+        try:
+            fd = 1000000 if case == 'missing-fd' else state if case == 'transport-alias' else inherited
+            serial = (1 << 64) - 1 if case == 'serial-limit' else 1
+            snapshot = struct.pack('<10Q', 0x31534446464c45, 1, serial, 1,
+                                   fd, int(case == 'cloexec-record'), 1, 1, 0, 0)
+            os.write(state, snapshot)
+            fcntl.fcntl(state, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW |
+                        fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+            target = limit_probe if case == 'serial-limit' else bad_probe
+            argument = str(inherited) if case == 'serial-limit' else str(
+                errno.EINVAL if case == 'cloexec-record' else errno.ESTALE)
+            p = subprocess.run([str(loader), '--child-loader', '--fd-state', str(state),
+                                '--', str(target), argument], cwd=work, pass_fds=(state, inherited),
+                               capture_output=True, text=True, timeout=20)
+            assert p.returncode == 0, (case, p.returncode, p.stdout, p.stderr)
+        finally:
+            os.close(state); os.close(inherited)
+        print('PASS: exec handoff', case)
+
 
 # Optional smoke tests against already extracted user-provided fixtures.
 for directory, target, arguments, marker in [

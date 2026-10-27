@@ -70,10 +70,11 @@ long fd_experiment_export(void)
     unsigned char snapshot[STATE_BYTES];
     return fd_handoff_create(fd_registry_table(&registry,owner),snapshot,sizeof(snapshot));
 }
-static int room(struct fd_table *t,int target)
+static int room(struct fd_table *t,int target,int assign)
 {
-    if(t->serial==UINT64_MAX)return -EOVERFLOW;
-    if(target>=0 && fd_table_get(t,target))return 0;
+    int existing=target>=0 && fd_table_get(t,target);
+    if(t->serial==UINT64_MAX && (assign || !existing))return -EOVERFLOW;
+    if(existing)return 0;
     for(size_t i=0;i<t->capacity;i++)if(t->slots[i].fd<0)return 0;
     return -ENOSPC;
 }
@@ -124,7 +125,7 @@ long fd_experiment_dispatch(long n,long a[6])
     if(fd_close_pending(&queue,t,-1))return -EBUSY;
     if(execute)return syscall_handle_common(n,a);
     if(receive)return n==__NR_recvmsg?fd_receive_message(t,a):fd_receive_messages(t,a);
-    rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1);if(rc)return rc;
+    rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1,!setfd);if(rc)return rc;
     if(pair) {
         if(t->serial>UINT64_MAX-2)return -EOVERFLOW;
         size_t free_slots=0;
