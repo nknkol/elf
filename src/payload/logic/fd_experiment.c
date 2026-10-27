@@ -61,7 +61,7 @@ long fd_experiment_dispatch(long n,long a[6])
     switch(n) {
     case __NR_clone: case __NR_clone3: case __NR_execve: case __NR_execveat:
     case __NR_close_range: case __NR_unshare: case __NR_openat2:
-    case __NR_pidfd_getfd: case __NR_io_uring_setup:
+    case __NR_io_uring_setup:
         return -ENOSYS;
     }
     if(n==__NR_close) { int bookkeeping;return fd_close_execute(&queue,&registry,&guard,owner,(int)a[0],&bookkeeping); }
@@ -71,6 +71,7 @@ long fd_experiment_dispatch(long n,long a[6])
     int create=n==__NR_openat || n==__NR_memfd_create || n==__NR_eventfd2 ||
         n==__NR_epoll_create1 || n==__NR_timerfd_create || n==__NR_socket ||
         n==__NR_accept || n==__NR_accept4 || n==__NR_inotify_init1 ||
+        n==__NR_pidfd_open || n==__NR_pidfd_getfd ||
         (n==__NR_signalfd4 && (int)a[0]==-1);
     /* signalfd4 with an existing FD updates its mask, not its identity/flags.
      * Let the kernel validate it without requiring a new metadata slot. */
@@ -103,11 +104,12 @@ long fd_experiment_dispatch(long n,long a[6])
     }
     else if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
-        int cloexec=n==__NR_accept?0:(n==__NR_accept4 || n==__NR_signalfd4)?!!(a[3]&O_CLOEXEC):
+        int cloexec=(n==__NR_pidfd_open || n==__NR_pidfd_getfd)?1:n==__NR_accept?0:(n==__NR_accept4 || n==__NR_signalfd4)?!!(a[3]&O_CLOEXEC):
             n==__NR_memfd_create?!!(a[1]&1):
             (n==__NR_epoll_create1 || n==__NR_inotify_init1)?!!(a[0]&O_CLOEXEC):
             (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
-        rc=fd_table_open(t,(int)result,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
+        rc=n==__NR_pidfd_getfd?fd_table_import_unknown(t,(int)result,cloexec):
+            fd_table_open(t,(int)result,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
     }
     else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],!!(a[2]&FD_CLOEXEC));
     else rc=fd_table_dup(t,(int)a[0],(int)result,n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC);

@@ -453,3 +453,15 @@ FD 实验模式继续保持原有 ENOSYS；其他平台普通构建保留内核�
 
 未实现 close_range 批量语义。不能仅遍历跟踪表而遗漏继承 FD；后续实现需覆盖
 完整宿主 FD 集合、loader 自有 FD、并发和 UNSHARE 的表所有权，不可假成功。
+
+### 实验运行时扩展：pidfd_open / pidfd_getfd
+
+隔离原生探测确认 pidfd_open(自身 PID) 与 pidfd_getfd(自身 FD) 可用，返回 FD
+均有 CLOEXEC。pidfd_open 原先虽已进入慢路径但未登记元数据，现接入创建预检；
+pidfd_getfd 接入同样预检并以 UNKNOWN 来源、description=0 导入，不推断别名权限。
+真实 guest 验证共享文件偏移、关闭原 FD 后仍可读取、dup pidfd 后仍能导入、
+错误参数和满表/释放槽后重试，普通路径不受实验开关之外的行为修改。
+
+io_uring_setup 原生可成功，但 enter/register 已知受宿主限制；实验模式继续拒绝
+setup，不以创建成功冒充异步 FD 生命周期已覆盖。跨进程导入权限、多任务、exec
+与 close_range 完整语义仍未完成。

@@ -15,7 +15,7 @@ build also determines `src/elfloader`; prefer the named snapshots above.
 The experimental payload initializes a single-task registry on first slow call,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
 timerfd_create, inotify_init1, signalfd4 creation, pipe2, socket, socketpair,
-accept, accept4, dup, dup3,
+accept, accept4, pidfd_open, pidfd_getfd, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
@@ -146,3 +146,13 @@ caller-side F_SETFD/close fallback with matching metadata. The ordinary HarmonyO
 build runs the same guest without metadata queries: native close_range is sandbox
 fatal here, including empty ranges and invalid flags. Complete range emulation
 must account for inherited and loader-owned descriptors and table ownership.
+
+The pidfd guest validates pidfd_open and self-process pidfd_getfd through the real
+loader. Both new descriptors have CLOEXEC set by the kernel. pidfd_getfd imports
+UNKNOWN provenance and description=0, even when the sender happens to be this
+process; it does not infer local alias permissions. Tests check shared kernel
+file offsets, survival after the source closes, duplicated pidfd usability,
+invalid handles/flags, full-table rejection and retry after releasing one slot.
+This does not enforce cross-process import policy. io_uring_setup remains refused
+in the experiment: a working setup call alone does not cover asynchronous FD
+creation or the host's blocked io_uring_enter/register paths.
