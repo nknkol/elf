@@ -68,7 +68,7 @@ single-task AArch64 mode; this is not a concurrent user-memory snapshot guarante
 Socket coverage uses AF_UNIX stream sockets, including bidirectional socketpair
 IO, duplicated endpoint lifetime, EOF, CLOEXEC/nonblocking flags, EFAULT, invalid
 types, and pair capacity boundaries. Creation and IO retain host kernel behavior;
-recvmmsg remains unsupported.
+recvmmsg is covered by the bounded batch adapter described below.
 On this host, raw socketpair accepts unknown high type bits that socket rejects;
 the invalid-type test uses type 15, which the host rejects with EINVAL.
 
@@ -102,4 +102,23 @@ experimental recvmsg path; ordinary read/write remain kernel operations.
 On this host only the first MSG_PEEK delivers SCM_RIGHTS; subsequent peeks and
 the consuming receive return data without the rights. The native reference
 records this behavior rather than assuming Linux repeated-peek semantics.
-recvmmsg and other FD-bearing ancillary types are not covered by this increment.
+Other FD-bearing ancillary types are not covered by the SCM_RIGHTS adapter.
+
+The batch guest covers recvmmsg with two SCM_RIGHTS messages, CLOEXEC, a partial
+batch, MSG_WAITFORONE on a blocking socket, aggregate capacity rejection without
+consuming queued messages, and failure while publishing the first/second control
+buffer, msg_len, or timeout. Completed-prefix descriptors stay tracked; all
+unpublished suffix descriptors are closed, with FD-number reuse checked for
+leaks. Native full/partial datagram batches are also checked by the runner.
+
+The experimental adapter allows at most 8 messages per call (E2BIG above that)
+and at most 128 potentially received descriptors across the vector. It snapshots
+all input headers and reserves their aggregate upper bound before kernel entry;
+a bad later header or insufficient aggregate capacity rejects the entire call.
+It invokes native recvmmsg once with private headers, control buffers and timeout,
+so waiting, MSG_WAITFORONE and partial kernel results remain kernel behavior.
+Output-copy failure may occur after later messages have already been consumed;
+the adapter returns the published prefix count (or the copy error if empty) and
+closes unpublished descriptors. Timeout-copy failure closes all received FDs and
+returns the copy error. These are explicit experimental limits, not full Linux
+fault/partial-progress equivalence. Origin and alias identity remain UNKNOWN.

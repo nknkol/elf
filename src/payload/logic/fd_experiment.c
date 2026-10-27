@@ -17,6 +17,7 @@ static struct fd_guard guard;
 static struct fd_task_handle owner;
 static int initialized;
 static long owner_tid;
+extern long fd_receive_messages(struct fd_table *,long [6]);
 extern long fd_receive_message(struct fd_table *,long [6]);
 extern long raw_syscall(long,long,long,long,long,long,long);
 int clone_observer_before(struct clone_event *event)
@@ -60,7 +61,6 @@ long fd_experiment_dispatch(long n,long a[6])
     switch(n) {
     case __NR_clone: case __NR_clone3: case __NR_execve: case __NR_execveat:
     case __NR_close_range: case __NR_unshare: case __NR_openat2:
-    case __NR_recvmmsg:
     case __NR_inotify_init1: case __NR_signalfd4:
     case __NR_pidfd_getfd: case __NR_io_uring_setup:
         return -ENOSYS;
@@ -73,14 +73,14 @@ long fd_experiment_dispatch(long n,long a[6])
         n==__NR_epoll_create1 || n==__NR_timerfd_create || n==__NR_socket ||
         n==__NR_accept || n==__NR_accept4;
     int pair=n==__NR_pipe2 || n==__NR_socketpair;
-    int receive=n==__NR_recvmsg;
+    int receive=n==__NR_recvmsg || n==__NR_recvmmsg;
     if(!create && !pair && !duplicate && !setfd && !receive)return syscall_handle_common(n,a);
     /* The entry trampoline rejects same-TID nested slow calls in this build;
      * clone is denied, so no metadata writer can run across these syscalls.
      * Never generalize this to a multithreaded permission mode. */
     rc=fd_close_drain(&queue,&registry);if(rc<0)return rc;
     if(fd_close_pending(&queue,t,-1))return -EBUSY;
-    if(receive)return fd_receive_message(t,a);
+    if(receive)return n==__NR_recvmsg?fd_receive_message(t,a):fd_receive_messages(t,a);
     rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1);if(rc)return rc;
     if(pair) {
         if(t->serial>UINT64_MAX-2)return -EOVERFLOW;

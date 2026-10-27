@@ -56,10 +56,40 @@ try:
 finally:
     sender.close(); receiver.close()
 print('Native repeated-peek rights mask:', peek_rights)
+# Native recvmmsg baseline, using the AArch64 ABI (syscall 243).
+class IOVec(ctypes.Structure):
+    _fields_ = [('base', ctypes.c_void_p), ('length', ctypes.c_size_t)]
+class MsgHdr(ctypes.Structure):
+    _fields_ = [('name', ctypes.c_void_p), ('namelen', ctypes.c_uint),
+                ('iov', ctypes.POINTER(IOVec)), ('iovlen', ctypes.c_size_t),
+                ('control', ctypes.c_void_p), ('controllen', ctypes.c_size_t),
+                ('flags', ctypes.c_int)]
+class MMsgHdr(ctypes.Structure):
+    _fields_ = [('header', MsgHdr), ('length', ctypes.c_uint)]
+sender, receiver = socket.socketpair(type=socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+try:
+    buffers = [ctypes.create_string_buffer(1) for _ in range(2)]
+    vectors = [IOVec(ctypes.addressof(buffer), 1) for buffer in buffers]
+    for queued in (2, 1):
+        messages = (MMsgHdr * 2)()
+        for i in range(2):
+            messages[i].header.iov = ctypes.pointer(vectors[i])
+            messages[i].header.iovlen = 1
+            messages[i].length = 777
+        for _ in range(queued):
+            sender.send(b'R')
+        result = libc.syscall(243, receiver.fileno(), messages, 2, socket.MSG_DONTWAIT, 0)
+        assert result == queued, ('native recvmmsg', result, ctypes.get_errno())
+        assert all(messages[i].length == 1 and buffers[i].raw == b'R' for i in range(queued))
+        if queued == 1:
+            assert messages[1].length == 777
+finally:
+    sender.close(); receiver.close()
+print('PASS: native recvmmsg full and partial batches')
 with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
     work = Path(temp)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights'):
+    for name in ('probe', 'rights', 'batch'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
