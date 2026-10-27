@@ -68,7 +68,7 @@ single-task AArch64 mode; this is not a concurrent user-memory snapshot guarante
 Socket coverage uses AF_UNIX stream sockets, including bidirectional socketpair
 IO, duplicated endpoint lifetime, EOF, CLOEXEC/nonblocking flags, EFAULT, invalid
 types, and pair capacity boundaries. Creation and IO retain host kernel behavior;
-recvmsg/recvmmsg (including SCM_RIGHTS) remain unsupported.
+recvmmsg remains unsupported.
 On this host, raw socketpair accepts unknown high type bits that socket rejects;
 the invalid-type test uses type 15, which the host rejects with EINVAL.
 
@@ -80,3 +80,26 @@ capacity without consuming the queued connection (accepted after one slot frees)
 The runner obtains native AArch64 accept/accept4 status flags as a reference:
 this host inherits listener O_NONBLOCK even without SOCK_NONBLOCK. The adapter
 preserves host behavior rather than implementing Linux flag normalization.
+
+The separate rights guest exercises recvmsg SCM_RIGHTS: two descriptors,
+MSG_CMSG_CLOEXEC, repeated MSG_PEEK against a native reference, partial/no control
+space and MSG_CTRUNC, full/one-free/two-free table boundaries, and rollback when
+the control buffer or msghdr output fields are read-only. A data-only receive
+with no control space works at full capacity. FD numbers are checked after
+rollback to detect leaked kernel descriptors, in addition to metadata counts.
+
+This experimental recvmsg adapter snapshots the header with self process_vm_readv,
+receives into a bounded private control buffer, and uses process_vm_writev for
+fault-checked output. It preflights the maximum number of rights the caller's
+control length could hold, so oversized control buffers can return ENOSPC even
+when the queued message has few/no descriptors. It does not shrink the control
+buffer silently. Each received descriptor has UNKNOWN origin and description=0;
+SCM_RIGHTS does not establish sender permissions or local alias identity.
+Copy-back failure closes received descriptors but may have consumed data or
+partially written outputs. This adds copying/syscall overhead only to the
+experimental recvmsg path; ordinary read/write remain kernel operations.
+
+On this host only the first MSG_PEEK delivers SCM_RIGHTS; subsequent peeks and
+the consuming receive return data without the rights. The native reference
+records this behavior rather than assuming Linux repeated-peek semantics.
+recvmmsg and other FD-bearing ancillary types are not covered by this increment.

@@ -30,6 +30,8 @@ const struct fd_record *fd_table_get(const struct fd_table *, int fd);
 /* Successful open/adoption. Distinct opens have distinct descriptions even
  * when host inode and mount match. All errors leave the table unchanged. */
 int fd_table_open(struct fd_table *, int fd, struct fd_origin, int cloexec);
+/* Imported FD with unknown provenance AND unknown open-description identity. */
+int fd_table_import_unknown(struct fd_table *, int fd, int cloexec);
 /* Successful dup/dup3/F_DUPFD. same-FD success is dup2's no-op. Unknown source
  * replaces destination provenance with unknown rather than keeping old rights. */
 int fd_table_dup(struct fd_table *, int source, int target, int cloexec);

@@ -33,7 +33,7 @@ ifneq ($(PROOT_PATH),1)
 $(error FD_EXPERIMENT requires PROOT_PATH=1)
 endif
 CPPFLAGS += -DFD_EXPERIMENT
-OBJ += $(addprefix logic/,fd_experiment.o fd_table.o fd_clone.o fd_registry.o fd_guard.o fd_close_queue.o fd_close_exec.o)
+OBJ += $(addprefix logic/,fd_experiment.o fd_receive.o fd_table.o fd_clone.o fd_registry.o fd_guard.o fd_close_queue.o fd_close_exec.o)
 endif
 
 # Explicit opt-in while only a subset of file syscalls is migrated.

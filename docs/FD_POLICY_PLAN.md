@@ -384,3 +384,21 @@ accept/accept4、SCM_RIGHTS 接收及多任务生命周期仍未接入，来源�
 本机原生 accept/accept4(flags=0) 会继承监听端 O_NONBLOCK；测试运行器先获取
 原生参考值，再对照 guest，适配层不改写该宿主行为。CLOEXEC 仍按调用标志跟踪。
 recvmsg/recvmmsg 的 SCM_RIGHTS 接收及多任务生命周期仍未接入，来源仍为 UNKNOWN。
+
+### 实验运行时扩展：recvmsg / SCM_RIGHTS
+
+新增独立接收适配器：用 self process_vm_readv 安全读取 msghdr，在内部有界
+控制缓冲区接收，再用 process_vm_writev 回填控制区及输出字段。进入内核前
+按控制长度计算 FD 数量上界，预检槽位和 generation；不静默缩小控制空间。
+当前上限为 128 个 FD，过大的控制区或保守预检容量不足会返回 ENOSPC，
+即使实际排队消息只有少量 FD。普通 read/write 不受此复制开销影响。
+
+收到的 FD 来源 UNKNOWN、description=0，不推断发送者权限或与本地 FD 的别名关系。
+输出回填失败会关闭收到的 FD，消息可能已经消耗或部分输出已写入。
+真实 guest 覆盖双 FD、CLOEXEC、peek、截断、0/1/2 空槽、只读控制区和只读消息头
+的回滚、满表无控制区的数据接收；同时检查元数据和内核 FD 号复用以检测泄漏。
+本机原生重复 MSG_PEEK 仅第一次返回 SCM_RIGHTS，后续只返回数据；测试按原生参考对照。
+recvmmsg、其他携带 FD 的辅助消息类型及多任务生命周期仍未覆盖，不代表完整隔离。
+
+本轮普通回归曾在 clone_notify_test.c 的 orphan 子进程退出断言失败一次；
+该测试单独重跑通过，保留为待调查的已有生命周期测试不稳定性，不修改断言掩盖。

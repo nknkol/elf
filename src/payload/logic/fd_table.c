@@ -49,6 +49,12 @@ int fd_table_open(struct fd_table *t, int fd, struct fd_origin origin, int cloex
     return assign(t, fd, (struct fd_record){.cloexec = cloexec, .origin = origin}, 1);
 }
 
+int fd_table_import_unknown(struct fd_table *t, int fd, int cloexec)
+{
+    if (cloexec != 0 && cloexec != 1) return -EINVAL;
+    return assign(t, fd, (struct fd_record){.cloexec = cloexec}, 0);
+}
+
 int fd_table_dup(struct fd_table *t, int source, int target, int cloexec)
 {
     if (source < 0 || target < 0 || (cloexec != 0 && cloexec != 1)) return -EINVAL;
