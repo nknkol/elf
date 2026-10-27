@@ -18,9 +18,12 @@ struct stats {long cleaned, rejected, abandoned_parent, abandoned_child; struct 
 static struct stats *stats;
 static int reject, fail_mapping, nested_init, probe_error, abort_child, pause_child, abort_parent;
 static long pid, wait_for_child, unpublished_tid;
+static long identity_exit, identity_fail, identity_result;
 static int cleanup_pause, cleanup_entered, cleanup_proceed, cleanup_exit, cleanup_nested;
 long raw_syscall(long n,long a,long b,long c,long d,long e,long f)
 {
+    if(n==identity_exit)pthread_exit((void *)1);
+    if(n==identity_fail)return identity_result;
     if(n==SYS_mmap && fail_mapping){fail_mapping=0;return -ENOMEM;}
     if(n==SYS_tgkill && probe_error)return -probe_error;
     if(n==SYS_mmap && nested_init) {
@@ -185,12 +188,40 @@ static void capacity_check(void)
     long t=clone_notify_prepare(7,8,SIGCHLD);assert(t>0);
     clone_notify_finish((void*)t,-EINVAL);
 }
+static void *identity_worker(void *unused)
+{
+    (void)unused;
+    clone_notify_prepare(0,0,SIGCHLD);
+    assert(0);return NULL; /* Must exit inside the identity query, not exhaust. */
+}
+static void identity_checks(void)
+{
+    const long calls[]={SYS_getpid,SYS_gettid};
+    for(unsigned n=0;n<2;n++) {
+        identity_exit=calls[n];
+        for(unsigned i=0;i<CLONE_NOTIFY_CAPACITY+3;i++) {
+            pthread_t worker;void *result=NULL;
+            assert(pthread_create(&worker,NULL,identity_worker,NULL)==0);
+            assert(pthread_join(worker,&result)==0 && result==(void *)1);
+        }
+        identity_exit=0;
+        assert(stats->before==0 && stats->maps==0 && clone_notify_reap()==0);
+        identity_fail=calls[n];
+        identity_result=-EINTR;assert(clone_notify_prepare(0,0,SIGCHLD)==-EINTR);
+        identity_result=0;assert(clone_notify_prepare(0,0,SIGCHLD)==-EIO);
+        identity_fail=0;
+    }
+    capacity_check();
+    assert(stats->before==stats->cleaned && stats->maps==1);
+    puts("PASS: identity-query death/errors reserve no clone slots; full capacity remains");
+}
 int main(int argc,char **argv)
 {
     stats=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(stats!=MAP_FAILED);pid=getpid();
     void *stack=mmap(NULL,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     assert(stack!=MAP_FAILED);
+    if(argc>1 && !strcmp(argv[1],"--identity-exit")) { identity_checks();return 0; }
     if(argc>1 && (!strcmp(argv[1],"--cleanup-exit") || !strcmp(argv[1],"--cleanup-pause"))) {
         cleanup_checks(!strcmp(argv[1],"--cleanup-exit"));return 0;
     }

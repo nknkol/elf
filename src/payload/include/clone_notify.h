@@ -38,6 +38,8 @@ void clone_observer_cleanup(const struct clone_event *event, unsigned reasons);
  * identity, interrupted initialization and abandoned reaper pins cannot yet
  * be reclaimed. Pool exhaustion returns EAGAIN, never untracked passthrough. */
 unsigned clone_notify_reap(void);
+/* Resolve/validate parent identity before pool allocation or reservation. Death
+ * after reservation and inside before remains an unreclaimable INIT boundary. */
 long clone_notify_prepare(unsigned long saved_x9, unsigned long continuation,
                           unsigned long flags);
 /* AAPCS64 returns the two words in x0/x1. */

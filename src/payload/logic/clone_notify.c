@@ -135,6 +135,13 @@ unsigned clone_notify_reap(void)
 long clone_notify_prepare(unsigned long saved_x9, unsigned long continuation,
                           unsigned long flags)
 {
+    /* A task can disappear even during these raw identity queries. Resolve
+     * them before allocating/reserving anything, so that interval cannot
+     * strand an unpublished INIT slot (which the reaper cannot inspect). */
+    long parent_pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+    if (parent_pid <= 0) return parent_pid < 0 ? parent_pid : -EIO;
+    long parent_tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
+    if (parent_tid <= 0) return parent_tid < 0 ? parent_tid : -EIO;
     struct clone_pool *p = get_pool();
     if ((uintptr_t)p >= (uintptr_t)-4095) return (long)p;
     struct clone_transaction *t = reserve(p);
@@ -145,13 +152,8 @@ long clone_notify_prepare(unsigned long saved_x9, unsigned long continuation,
     }
     t->saved = (struct clone_return){saved_x9, continuation};
     t->event.flags = flags;
-    t->event.parent_pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
-    t->event.parent_tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
-    if (t->event.parent_pid <= 0 || t->event.parent_tid <= 0) {
-        long error = t->event.parent_pid <= 0 ? t->event.parent_pid : t->event.parent_tid;
-        __atomic_store_n(&t->state, 0, __ATOMIC_RELEASE);
-        return error < 0 ? error : -EIO;
-    }
+    t->event.parent_pid = parent_pid;
+    t->event.parent_tid = parent_tid;
     t->event.cookie = 0;
     __atomic_store_n(&t->abandoned, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&t->child_tid, 0, __ATOMIC_RELAXED);

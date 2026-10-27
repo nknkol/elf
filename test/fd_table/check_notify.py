@@ -18,6 +18,6 @@ with tempfile.TemporaryDirectory(prefix='clone-notify-') as temp:
                  re.findall(r'^([0-9a-f]+) [a-zA-Z] (\w+)$', symbols, re.M)}
     assert addresses['test_data'] - addresses['test_stub'] == 160
     assert addresses['test_resume'] - addresses['test_stub'] == 100
-    for mode in ("--nested-init", "--cleanup-pause", "--cleanup-exit"):
+    for mode in ("--identity-exit", "--nested-init", "--cleanup-pause", "--cleanup-exit"):
         subprocess.run([str(exe), mode], check=True, timeout=30)
     subprocess.run([str(exe)], check=True, timeout=30)

@@ -621,3 +621,15 @@ FD generation 并继续 fork；监督进程作为 subreaper 接收最后完成�
 81 个进程。累计超过通知池 64 槽，验证正常 clone 返回后的父退出不会阻塞后代。
 本次没有放宽 clone_notify 的死亡判定；未知 child、INIT 中死亡、遗留 reaper pin
 和 finalizer 中死亡仍不能据此声称已解决，也未完成一般资源回收或权限隔离。
+
+### 消除 clone 身份查询阶段的 INIT 槽泄漏窗口
+
+原实现先 reserve INIT 槽，再调用 getpid/gettid。任务若在身份查询中非局部退出，
+槽尚不可被 reaper 检查，累计会耗尽 64 槽。现在先完成 PID/TID 查询和有效性检查，
+再创建通知池、占槽和调用 observer；查询失败不会分配池或留下 INIT 槽。
+
+新增故障注入在两个 raw 身份查询中分别 pthread_exit，各连续 67 次；旧版失败，
+修复后没有 observer/池分配，完整容量检查通过。另验证 EINTR 原样返回、零身份
+返回 EIO，原有 observer 中死亡、并发回收、finalizer 保留测试继续通过。
+这消除的是占槽前可完成的身份查询窗口；占槽之后的初始化、before 回调中途死亡、
+未知 child、reaper pin 和 finalizer 遗留仍需不同的生命周期协议，不能推断可回收。
