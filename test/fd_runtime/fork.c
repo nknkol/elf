@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include "fd_experiment.h"
 static long call(long n,long a,long b,long c,long d)
 {
@@ -81,8 +82,52 @@ void run(long *sp)
         CHECK(query(0,0)==1 && query(1,fd)==generation && query(3,fd)==1);
         CHECK(call(__NR_fcntl,fd,F_GETFD,0,0)==FD_CLOEXEC);
     }
+    /* A child that already owns a private guard must be able to fork again. */
+    long branch=fork_call(17,0);CHECK(branch>=0);
+    if(!branch) {
+        CHECK(query(1,fd)==generation);
+        long leaf=fork_call(17,0);CHECK(leaf>=0);
+        if(!leaf) {
+            CHECK(query(1,fd)==generation);
+            CHECK(call(__NR_close,fd,0,0,0)==0);
+            call(__NR_exit_group,42,0,0,0);for(;;){}
+        }
+        int status=0;CHECK(call(__NR_wait4,leaf,(long)&status,0,0)==leaf && status==(42<<8));
+        CHECK(query(1,fd)==generation && call(__NR_fcntl,fd,F_GETFD,0,0)==FD_CLOEXEC);
+        call(__NR_exit_group,42,0,0,0);for(;;){}
+    }
+    int branch_status=0;
+    CHECK(call(__NR_wait4,branch,(long)&branch_status,0,0)==branch && branch_status==(42<<8));
+    /* Successful exec also abandons its old entry frame. Exercise more than
+     * the shared pool capacity without changing the parent's CLOEXEC. */
+    for(int round=0;round<40;round++) {
+        long child=fork_call(17,0);CHECK(child>=0);
+        if(!child) {
+            CHECK(call(__NR_fcntl,fd,F_SETFD,0,0)==0);
+            CHECK(call(__NR_lseek,fd,0,0,0)==0);
+            char digits[2][32];char *next[]={av[0],"child",decimal(digits[0],fd),decimal(digits[1],generation),0};
+            call(__NR_execve,(long)av[0],(long)next,0,0);CHECK(0);
+        }
+        int status=0;CHECK(call(__NR_wait4,child,(long)&status,0,0)==child && status==(42<<8));
+        CHECK(query(0,0)==1 && query(1,fd)==generation && query(3,fd)==1);
+    }
+    /* Terminated children must not consume the parent's 32 shared guard slots. */
+    for(int round=0;round<40;round++) {
+        long child=fork_call(17,0);CHECK(child>=0);
+        if(!child) {
+            CHECK(query(0,0)==1 && query(1,fd)==generation);
+            int pair[2];CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)pair)==0);
+            char byte;struct iovec vector={&byte,1};struct msghdr message={0};
+            message.msg_iov=&vector;message.msg_iovlen=1;
+            struct itimerval timer={{0,0},{0,50000}};
+            CHECK(call(__NR_setitimer,ITIMER_REAL,(long)&timer,0,0)==0);
+            call(__NR_recvmsg,pair[0],(long)&message,0,0);CHECK(0);
+        }
+        int status=0;CHECK(call(__NR_wait4,child,(long)&status,0,0)==child && status==14);
+        CHECK(query(0,0)==1 && query(1,fd)==generation && query(3,fd)==1);
+    }
     CHECK(call(__NR_close,fd,0,0,0)==0 && query(0,0)==0);
-    static const char pass[]="PASS: runtime FD private fork, copied flags, child close and child exec\n";
+    static const char pass[]="PASS: runtime FD private fork, copied flags, child close, nested fork, 40 execs and 40 interrupted children\n";
     call(__NR_write,1,(long)pass,sizeof(pass)-1,0);call(__NR_exit_group,0,0,0,0);for(;;){}
 }
 __asm__(".global _start\n_start:\nmov x0, sp\nbl run\n");

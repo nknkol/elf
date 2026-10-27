@@ -278,3 +278,23 @@ other hosts), because workspace storage rejects FIFO creation, and links it into
 the temporary working directory. Both the FIFO and its directory are cleaned up.
 The existing failed-exec/retry and 40 successful exec cycles exercise nested
 scratch use and reuse alongside the new interrupted path test.
+
+Private fork children now switch to a guard slot in their own private payload
+mapping before returning to guest code. An interrupted slow call or successful
+exec can abandon that slot: the kernel frees the old VM without consuming an
+ancestor's shared-pool capacity. A nested private fork resets only the child's
+copied slot; the parent retains its active clone lease until its own return.
+The vfork-specific slot still takes priority while that child shares the VM.
+This switch is limited to the confirmed private-fork callback; the normal build
+and general shared-VM/thread guard retain their existing shared-pool behavior.
+Parent-only clone cookies may reference inherited private slots; child finish
+and transaction cleanup must never dereference those leases.
+
+The fork guest checks nested fork, 40 successful child execs, and 40 children
+terminated by SIGALRM during blocking recvmsg. Parent FD metadata and CLOEXEC
+survive every round. The interrupted test failed on the old shared-slot path.
+A guard ownership test also leaves a child's private slot active at exit and
+verifies the parent's active slot remains held and reusable after release.
+This avoids ordinary fork-child guard leakage rather than adding TID-based
+reaping. Initial-process shared slots, interrupted clone notification transactions
+and arbitrary parent-death handling are still separate work.

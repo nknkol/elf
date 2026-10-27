@@ -10,5 +10,8 @@ struct reentry_slot *reentry_try_enter(void);
  * These manage a dedicated slot and never reclaim shared-pool owners by TID. */
 void reentry_vfork_begin(long tid);
 void reentry_vfork_end(void);
+/* Call only in a confirmed private-VM fork child before entering guest code.
+ * Resets its copied slot without touching the parent's active ownership. */
+void reentry_private_fork(long tid);
 void reentry_leave(struct reentry_slot *slot);
 #endif

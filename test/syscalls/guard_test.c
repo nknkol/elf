@@ -81,6 +81,23 @@ static int fork_ownership(void) {
     }
     return 0;
 }
+static void private_fork_ownership(void) {
+    reentry_private_fork(syscall(SYS_gettid));
+    struct reentry_slot *parent=reentry_try_enter();assert((intptr_t)parent>0);
+    assert(reentry_try_enter()==NULL);
+    pid_t pid=fork();assert(pid>=0);
+    if(!pid) {
+        reentry_private_fork(syscall(SYS_gettid));
+        struct reentry_slot *child=reentry_try_enter();
+        if((intptr_t)child<=0 || reentry_try_enter()!=NULL)_exit(20);
+        /* Leave an active private lease behind on death. */
+        _exit(0);
+    }
+    int status;assert(waitpid(pid,&status,0)==pid && status==0);
+    assert(reentry_try_enter()==NULL); /* Child reset did not release parent. */
+    reentry_leave(parent);
+    parent=reentry_try_enter();assert((intptr_t)parent>0);reentry_leave(parent);
+}
 int main(int argc,char **argv) {
     (void)argv;
     fail_mapping=1;
@@ -133,5 +150,6 @@ int main(int argc,char **argv) {
     worker(NULL);
     assert(!pthread_join(thread,NULL));assert(signals_seen>0);
     if(fork_ownership())return 1;
+    private_fork_ownership();
     puts("PASS: fork ownership, guard reuse, recursion, capacity, 8 threads and asynchronous signals");
 }

@@ -85,6 +85,8 @@ int clone_observer_before(struct clone_event *event)
         vfork_child.owner_tid=0;
         vfork_active=1;
     }
+    /* Only the returning parent dereferences this lease. A private-fork
+     * descendant may hold a private slot; child finish/cleanup never touch it. */
     event->cookie=slot;
     return 0;
 }
@@ -104,6 +106,7 @@ void clone_observer_finish(const struct clone_event *event,long result)
     struct fd_runtime *s=vf?&vfork_child:&primary;
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
     if(vf)reentry_vfork_begin(tid);
+    else reentry_private_fork(tid);
     s->tasks[s->owner.slot].clone.child_tid=0;
     int rc=fd_registry_publish(&s->registry,s->owner,tid);
     if(rc) {

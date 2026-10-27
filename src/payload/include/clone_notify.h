@@ -23,10 +23,12 @@ int clone_observer_before(struct clone_event *event);
 void clone_observer_finish(const struct clone_event *event, long result);
 /* Exactly one invocation after both roles and all readers complete, or after
  * before rejects. reasons is a CLONE_CLEANUP_* mask (zero for normal completion
- * and kernel failure). Reaper cleanup may run in any inheriting task/VM: cookie
- * must reference inherited shared storage or a stable arena handle, never a
- * private allocation or an address mapped only after fork. This callback retires
- * shared metadata, not process-local FDs/mappings. It must be nonblocking and
+ * and kernel failure). Reaper cleanup may run in any inheriting task/VM. A cookie
+ * dereferenced by cleanup must reference inherited shared storage or a stable
+ * arena handle, never private or post-fork-only mappings. Parent-only cookies
+ * may reference private inherited storage only if child finish and cleanup
+ * never dereference it; that storage must survive the parent finish callback.
+ * This callback retires shared metadata, not process-local FDs/mappings. It must be nonblocking and
  * reentrant, with no libc/TLS dependency. A finalizer that dies/escapes strands
  * its slot; cleanup is never retried because its side effects may have occurred.
  * Unknown-child transactions are retained, not cleaned speculatively. */

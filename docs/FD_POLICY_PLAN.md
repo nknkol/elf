@@ -593,3 +593,17 @@ munmap，包括 clone 失败。这避免子在 mmap 成功但尚未登记、或�
 工作目录不允许 FIFO，fixture 在允许创建及删除的应用 cache 中建立，并用工作目录
 软链接访问；退出清理。现有 40 次 recvmsg 中断、40 次 exec 和 shell 工作流继续通过。
 本步覆盖路径/exec 两类 scratch，不包括其他内部 mmap、父提前死亡和普通 fork 回收。
+
+### 普通 fork 子改用私有活跃槽
+
+新增 40 次普通 fork 子在 recvmsg 中被 SIGALRM 终止的回归，旧实验后端失败：子进程
+退出留下的公共活跃槽会累积耗尽。现在仅在确认独立 VM 的 child clone 回调中绑定
+私有 payload 槽；子死亡/exec 时旧 VM 由内核回收，不再消耗祖先的共享槽容量。
+嵌套 fork 只重置子 VM 中复制的槽，父槽仍由父返回释放；vfork 专用槽保持优先。
+普通构建及一般共享 VM/thread 的公共 guard 未切换，不能外推为线程支持。
+
+真实 guest 新增嵌套 fork、40 次子 exec、40 次阻塞 recvmsg 中断，逐轮检查父 FD
+记录/CLOEXEC。guard 测试在持槽状态 fork，子绑定并带着活跃槽退出，父仍检测到
+递归且正常释放后可复用。clone cookie 文档明确父专用私有引用禁止子和 cleanup
+解引用；本适配器遵守此约束。初始任务共享槽、未完成 clone transaction 和任意
+父提前死亡的处理仍未完成；本步不做基于 TID 的死亡猜测与回收。
