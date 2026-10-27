@@ -285,8 +285,8 @@ exec can abandon that slot: the kernel frees the old VM without consuming an
 ancestor's shared-pool capacity. A nested private fork resets only the child's
 copied slot; the parent retains its active clone lease until its own return.
 The vfork-specific slot still takes priority while that child shares the VM.
-This switch is limited to the confirmed private-fork callback; the normal build
-and general shared-VM/thread guard retain their existing shared-pool behavior.
+The initial experimental task also binds privately as described below; the normal
+build and general shared-VM/thread guard retain their shared-pool behavior.
 Parent-only clone cookies may reference inherited private slots; child finish
 and transaction cleanup must never dereference those leases.
 
@@ -296,5 +296,23 @@ survive every round. The interrupted test failed on the old shared-slot path.
 A guard ownership test also leaves a child's private slot active at exit and
 verifies the parent's active slot remains held and reusable after release.
 This avoids ordinary fork-child guard leakage rather than adding TID-based
-reaping. Initial-process shared slots, interrupted clone notification transactions
-and arbitrary parent-death handling are still separate work.
+reaping. Interrupted clone notification transactions and arbitrary parent-death
+handling are still separate work.
+
+The experimental initial task now binds its private reentry slot at the first
+entry, before any lease is acquired. This removes the remaining shared guard
+pool from the experimental runtime, including initial-process exit/exec. A
+foreign TID in the same VM receives EOPNOTSUPP unless it is the explicitly bound
+vfork child. The ordinary build keeps the existing shared guard implementation.
+Binding is performed at entry rather than inside dispatch so a nested signal
+cannot bypass an already-held lease. The dedicated test requires no mmap calls,
+checks recursion and foreign-TID rejection, and preserves the parent's held
+lease while retiring an abandoned vfork child lease.
+
+The orphan guest creates an 80-generation chain whose parents exit without
+waiting. Every descendant verifies inherited FD metadata and can fork again,
+exceeding the notification pool's 64 slots cumulatively. A supervising subreaper
+checks the final child's completion and reaps all 81 processes. This exercises
+parent exit after normal clone return; it does not force death inside the clone
+callback or prove recovery of unknown-child/INIT/finalizer-abandoned transactions.
+Those conservative notification limits and non-guard resource cleanup remain.

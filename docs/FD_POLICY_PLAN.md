@@ -607,3 +607,17 @@ munmap，包括 clone 失败。这避免子在 mmap 成功但尚未登记、或�
 递归且正常释放后可复用。clone cookie 文档明确父专用私有引用禁止子和 cleanup
 解引用；本适配器遵守此约束。初始任务共享槽、未完成 clone transaction 和任意
 父提前死亡的处理仍未完成；本步不做基于 TID 的死亡猜测与回收。
+
+### 初始实验任务也使用私有活跃槽；真实孤儿链回归
+
+实验后端首次 entry 在获取 lease 前绑定私有槽，不再初始化公共 guard 表；普通构建
+保留原实现。未知同 VM TID 返回 EOPNOTSUPP，已绑定 vfork 子走自己的专用槽。
+绑定不能延迟到 dispatch，否则信号重入可能绕过外层已持有的另一槽。初始进程
+退出/exec 时，活跃槽随旧 VM 一并消失；不再产生共享 guard 遗留引用。
+专用测试禁止 mmap，验证首次获取、递归拒绝、未知 TID 拒绝和父持槽时 vfork 回收。
+
+新增真实 orphan guest：80 代父进程创建下一代后立即退出不等待，后代逐代验证
+FD generation 并继续 fork；监督进程作为 subreaper 接收最后完成标记并回收全部
+81 个进程。累计超过通知池 64 槽，验证正常 clone 返回后的父退出不会阻塞后代。
+本次没有放宽 clone_notify 的死亡判定；未知 child、INIT 中死亡、遗留 reaper pin
+和 finalizer 中死亡仍不能据此声称已解决，也未完成一般资源回收或权限隔离。

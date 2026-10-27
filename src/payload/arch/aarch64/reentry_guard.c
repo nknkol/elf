@@ -8,15 +8,17 @@
 
 #define GUARD_SLOTS 32
 struct reentry_slot { long tid; };
+#ifndef FD_EXPERIMENT
 struct guard_table { struct reentry_slot slots[GUARD_SLOTS]; };
 static struct guard_table *g_table;
+#endif
 /* Private payload storage, shared only by the supported vfork pair. Unlike a
  * public pool slot, this slot cannot be reused by a fork sibling before the
  * suspended parent completes retirement. */
 static struct reentry_slot vfork_slot;
 static long vfork_tid;
-/* Enabled only by the private-fork child callback, never for general threads.
- * A nested fork copies this slot; its child resets only its private copy. */
+/* Experimental initial task binds at first entry; private-fork children reset
+ * only their own copied slot. Never enable this for general shared-VM threads. */
 static struct reentry_slot private_slot;
 static long private_tid;
 extern long raw_syscall(long, long, long, long, long, long, long);
@@ -24,6 +26,7 @@ extern long raw_syscall(long, long, long, long, long, long, long);
 /* Shared anonymous storage prevents fork from copying owners that only the
  * parent can release. CLONE_VM users naturally share it too. Initialization
  * is publish-once CAS, with no lock that a nested signal could wait on. */
+#ifndef FD_EXPERIMENT
 static struct guard_table *guard_table_get(void)
 {
     struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);
@@ -41,6 +44,8 @@ static struct guard_table *guard_table_get(void)
     return table;
 }
 
+#endif
+
 struct reentry_slot *reentry_try_enter(void)
 {
     long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
@@ -52,12 +57,24 @@ struct reentry_slot *reentry_try_enter(void)
                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
             ? &vfork_slot : NULL;
     }
+#ifdef FD_EXPERIMENT
+    /* Bind once at entry, before acquiring any lease. Binding later inside
+     * dispatch would let a nested signal bypass the already-held old slot. */
+    if (!__atomic_load_n(&private_tid, __ATOMIC_ACQUIRE)) {
+        long empty_owner = 0;
+        __atomic_compare_exchange_n(&private_tid, &empty_owner, tid, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+#endif
     if (__atomic_load_n(&private_tid, __ATOMIC_ACQUIRE) == tid) {
         long empty = 0;
         return __atomic_compare_exchange_n(&private_slot.tid, &empty, tid, 0,
                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
             ? &private_slot : NULL;
     }
+#ifdef FD_EXPERIMENT
+    return (struct reentry_slot *)(intptr_t)-EOPNOTSUPP;
+#else
     struct guard_table *table = guard_table_get();
     if ((uintptr_t)table >= (uintptr_t)-4095)
         return (struct reentry_slot *)table;
@@ -75,6 +92,7 @@ struct reentry_slot *reentry_try_enter(void)
     }
     /* Capacity is not recursion. Never silently bypass policy on exhaustion. */
     return (struct reentry_slot *)(intptr_t)-EAGAIN;
+#endif
 }
 
 void reentry_leave(struct reentry_slot *slot)
