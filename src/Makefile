@@ -5,6 +5,10 @@ ifeq ($(PROOT_PATH),1)
 CPPFLAGS += -DPROOT_PATH
 endif
 
+ifeq ($(FD_EXPERIMENT),1)
+CPPFLAGS += -DFD_EXPERIMENT
+endif
+
 ARCHS32 := i386
 ARCHS64 := amd64 aarch64
 ARCHS := $(ARCHS32) $(ARCHS64)

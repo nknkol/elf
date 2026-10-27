@@ -493,3 +493,19 @@ FIOCLEX/FIONCLEX 原先直接透传，会令内核 CLOEXEC 与跟踪记录不一
 O_CLOEXEC|O_NONBLOCK) 返回 EACCES；实验模式显式返回 ENOSYS，避免其成功时产生
 未登记 FD。本轮没有实现该请求成功路径，也没有完成所有 FD-producing ioctl 审计。
 普通构建行为不变，权限隔离和多任务/exec 仍待完成。
+
+### 实际接入单任务 exec 交接
+
+实验模式现在允许 execve/execveat 经现有 PRoot exec 链进入同一实验 loader。
+目标预检后导出密封 memfd 快照，仅包含非 CLOEXEC 记录；执行前解除传输 FD 的
+CLOEXEC，失败返回时关闭传输 FD，不更改原表。loader 通过内部 --fd-state 参数
+传递 FD，下一 payload 首次慢调用恢复 generation/description，核对 F_GETFD，
+关闭传输 FD；恢复失败保存错误，不静默回到空表。来源一律降为 UNKNOWN。
+内部参数只在实验构建提供并要求 --child-loader，密封不构成认证或权限授权。
+
+真实 guest 在私有 loader 副本被临时移走后触发快照创建后的内核 exec ENOENT，
+验证原记录、CLOEXEC 和 FD 号复用；随后连续 execve/execveat，核对保留项、
+CLOEXEC 删除（含 ioctl 设置）、共享偏移及 root/bind 视图。另测未密封快照的
+持续拒绝。Alpine busybox sh 与 Ubuntu dash 的 exec builtin -> cat 实测通过。
+clone/线程仍拒绝，通用 shell 创建子进程和权限隔离尚未实现；既有 exec 路径预检、
+单层 shebang、有界 argv、AT_EMPTY_PATH 等限制不因本次接入而消失。

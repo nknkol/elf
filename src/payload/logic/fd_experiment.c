@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <asm/ioctls.h>
 #include "fd_experiment.h"
+#include "fd_handoff.h"
+#include "config.h"
 #include "fd_close_exec.h"
 #include "clone_notify.h"
 #include "syscall_hooks.h"
@@ -17,6 +19,8 @@ static struct fd_close_slot pending[8];
 static struct fd_guard guard;
 static struct fd_task_handle owner;
 static int initialized;
+static int init_error;
+#define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
 static long owner_tid;
 extern long fd_receive_messages(struct fd_table *,long [6]);
 extern long fd_receive_message(struct fd_table *,long [6]);
@@ -29,15 +33,42 @@ static int start(void)
     if(tid<=0)return tid<0?(int)tid:-EIO;
     int state=__atomic_load_n(&initialized,__ATOMIC_ACQUIRE);
     if(state==2)return tid==owner_tid?0:-EOPNOTSUPP;
+    if(state==3)return init_error;
     int empty=0;
     if(!__atomic_compare_exchange_n(&initialized,&empty,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return -EAGAIN;
     fd_registry_init(&registry,tasks,1,tables,1,records,CAPACITY);
     fd_close_queue_init(&queue,pending,8);
     fd_registry_create(&registry,&owner);
     fd_registry_publish(&registry,owner,tid);
+    if(g_payload_config.fd_state>=0) {
+        unsigned char snapshot[STATE_BYTES];
+        struct fd_table *table=fd_registry_table(&registry,owner);
+        int transport=g_payload_config.fd_state;
+        int rc=fd_handoff_restore(table,transport,snapshot,sizeof(snapshot));
+        if(!rc)for(size_t i=0;i<table->capacity;i++) {
+            struct fd_record *record=&table->slots[i];
+            if(record->fd<0)continue;
+            long flags=raw_syscall(__NR_fcntl,record->fd,F_GETFD,0,0,0,0);
+            if(record->fd==transport || flags<0 || (flags&FD_CLOEXEC)) { rc=-ESTALE;break; }
+            /* Serialized metadata is not permission authority. */
+            record->origin=(struct fd_origin){0,FD_ACCESS_UNKNOWN};
+        }
+        raw_syscall(__NR_close,transport,0,0,0,0,0);
+        g_payload_config.fd_state=-1;
+        if(rc) {
+            init_error=rc;
+            __atomic_store_n(&initialized,3,__ATOMIC_RELEASE);
+            return rc;
+        }
+    }
     owner_tid=tid;
     __atomic_store_n(&initialized,2,__ATOMIC_RELEASE);
     return 0;
+}
+long fd_experiment_export(void)
+{
+    unsigned char snapshot[STATE_BYTES];
+    return fd_handoff_create(fd_registry_table(&registry,owner),snapshot,sizeof(snapshot));
 }
 static int room(struct fd_table *t,int target)
 {
@@ -60,7 +91,7 @@ long fd_experiment_dispatch(long n,long a[6])
     }
     /* No partial support for lifecycle or alternate FD creation in this mode. */
     switch(n) {
-    case __NR_clone: case __NR_clone3: case __NR_execve: case __NR_execveat:
+    case __NR_clone: case __NR_clone3:
     case __NR_close_range: case __NR_unshare: case __NR_openat2:
 #define FD_UNSUPPORTED(n) case n:
 #include "fd_unsupported_syscalls.inc"
@@ -83,13 +114,15 @@ long fd_experiment_dispatch(long n,long a[6])
     /* signalfd4 with an existing FD updates its mask, not its identity/flags.
      * Let the kernel validate it without requiring a new metadata slot. */
     int pair=n==__NR_pipe2 || n==__NR_socketpair;
+    int execute=n==__NR_execve || n==__NR_execveat;
     int receive=n==__NR_recvmsg || n==__NR_recvmmsg;
-    if(!create && !pair && !duplicate && !setfd && !receive)return syscall_handle_common(n,a);
+    if(!create && !pair && !duplicate && !setfd && !receive && !execute)return syscall_handle_common(n,a);
     /* The entry trampoline rejects same-TID nested slow calls in this build;
      * clone is denied, so no metadata writer can run across these syscalls.
      * Never generalize this to a multithreaded permission mode. */
     rc=fd_close_drain(&queue,&registry);if(rc<0)return rc;
     if(fd_close_pending(&queue,t,-1))return -EBUSY;
+    if(execute)return syscall_handle_common(n,a);
     if(receive)return n==__NR_recvmsg?fd_receive_message(t,a):fd_receive_messages(t,a);
     rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1);if(rc)return rc;
     if(pair) {

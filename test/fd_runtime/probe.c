@@ -91,7 +91,7 @@ void _start(void)
     CHECK(call(__NR_fcntl,copy,F_GETFD,0,0)==-EBADF);
     CHECK(call(__NR_close,copy,0,0,0)==-EBADF && query(0,0)==3);
     CHECK(call(__NR_clone,17,0,0,0)==-ENOSYS);
-    CHECK(call(__NR_execve,(long)"does-not-exist",0,0,0)==-ENOSYS);
+    CHECK(call(__NR_execve,(long)"does-not-exist",0,0,0)==-ENOENT);
     CHECK(call(__NR_close_range,0,~0u,0,0)==-ENOSYS);
     CHECK(call(__NR_pipe2,0,0,0,0)==-EFAULT);
     CHECK(call(__NR_close,other,0,0,0)==0 && call(__NR_close,fourth,0,0,0)==0);

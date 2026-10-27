@@ -21,7 +21,7 @@ F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
 UNKNOWN: there is no readonly/default-deny permission policy in this experiment.
 
-Clone, exec, close_range, unshare and selected alternate FD creation/transfer
+Clone, close_range, unshare and selected alternate FD creation/transfer
 interfaces return ENOSYS. Same-task nested slow calls return EDEADLK, other task
 identities are refused, and no guard is held across blocking syscalls. Uncertain
 close outcomes remain pending (no automatic provenance withdrawal). This is a
@@ -178,3 +178,21 @@ kernel-driven and changes the shared status flags without changing metadata.
 TIOCGPTPEER is explicitly ENOSYS in the experiment because it creates an FD;
 a native /dev/ptmx unlock succeeded here but peer creation returned EACCES, so
 success-path tracking is not claimed. Other FD-bearing ioctls remain unaudited.
+
+Single-task exec/execveat now chain through the experimental loader with a sealed
+memfd snapshot of non-CLOEXEC records. The new payload restores generations and
+known duplicate identities, verifies each inherited FD with F_GETFD, and closes
+the transport. Imported origins are downgraded to UNKNOWN: sealing validates
+immutability, not authority. Initialization failure remains sticky rather than
+silently starting an empty table. The internal --fd-state option requires
+--child-loader and exists only in experimental builds; it is not an authenticated
+protocol. Loader and payload must be built together with FD_EXPERIMENT.
+
+The exec guest uses a private loader copy to force a real kernel exec failure
+after snapshot creation, checks unchanged metadata/flags and transport cleanup,
+then performs exec and execveat through two image replacements. Tests verify
+non-CLOEXEC identity, removal of CLOEXEC records (including ioctl-set flags),
+shared kernel offset and preserved root/bind view. An unsealed handoff is rejected
+persistently. Optional Alpine busybox sh and Ubuntu dash each run an exec builtin
+into cat. Clone/threads, general shell process creation and permission enforcement
+remain unsupported; existing bounded exec/shebang/empty-path limits still apply.

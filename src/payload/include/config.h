@@ -85,6 +85,9 @@ typedef struct payload_config {
     char vfs_lower[CONFIG_MAX_PATH];
     char vfs_upper[CONFIG_MAX_PATH];
 #ifdef PROOT_PATH
+#ifdef FD_EXPERIMENT
+    int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
+#endif
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
 #endif

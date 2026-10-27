@@ -1001,6 +1001,9 @@ static void init_payload_config(payload_config_t *cfg)
 		cfg->hook_max_interp = 0x7fffffff;
 		cfg->loader_norecurse = 1;
 		cfg->loader_fd = -1;
+#ifdef FD_EXPERIMENT
+		cfg->fd_state = -1;
+#endif
 		apply_mode(cfg, CONFIG_MODE_COMPAT, 0);
 	}
 }
@@ -1408,6 +1411,19 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 			continue;
 		}
 
+#ifdef FD_EXPERIMENT
+        if (z_strncmp(arg, "--fd-state", 11) == 0) {
+            if (i + 1 >= argc || !argv[i + 1][0]) z_errx(1, "missing fd state");
+            unsigned value = 0;
+            for (const char *p = argv[++i]; *p; p++) {
+                if (*p < '0' || *p > '9' || value > (2147483647u - (*p - '0')) / 10)
+                    z_errx(1, "invalid fd state");
+                value = value * 10 + (*p - '0');
+            }
+            cfg->fd_state = (int)value;
+            continue;
+        }
+#endif
 		if (is_child_loader_arg(arg)) {
 			child_loader = 1;
 			continue;
@@ -1960,6 +1976,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	int target_index = 0;
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
 			  &shell_mode, &child_proto);
+#ifdef FD_EXPERIMENT
+    if (bootstrap_cfg.fd_state >= 0 && !child_loader)
+        z_errx(1, "fd state requires child loader");
+#endif
 	int argi = target_index;
 	int has_config = (config_path && config_path[0]) ? 1 : 0;
 	const char *child_exec_target = child_proto.exec_target;

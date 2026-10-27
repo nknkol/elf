@@ -89,7 +89,7 @@ print('PASS: native recvmmsg full and partial batches')
 with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
     work = Path(temp)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl', 'exec'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -99,8 +99,15 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
                         '-I' + str(repo / 'src/payload/include'),
                         str(repo / 'test/fd_runtime' / (name + '.c')), '-o', str(probe)], check=True)
         inherited = os.memfd_create('range-inherited', flags=0) if name in ('range', 'ioctl') else None
+        command = [str(loader), '--mode', 'compat', '--', str(probe)]
+        if name == 'exec':
+            private_loader = work / 'exec-loader'
+            private_loader.write_bytes(loader.read_bytes()); private_loader.chmod(0o755)
+            external = work / 'external'; external.mkdir(); (external / 'value').write_text('V')
+            command = [str(private_loader), '--mode', 'container', '--root', str(work),
+                       '-v', f'{external}:/bound', '--', './exec']
         try:
-            p = subprocess.run([str(loader), '--mode', 'compat', '--', str(probe)] +
+            p = subprocess.run(command +
                                ([str(inherited)] if inherited is not None else []),
                                pass_fds=(inherited,) if inherited is not None else (),
                                cwd=work, text=True, capture_output=True, timeout=20)
@@ -109,6 +116,20 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp:
                 os.close(inherited)
         assert p.returncode == 0 and 'PASS: runtime FD' in p.stdout, (p.returncode,p.stdout,p.stderr)
         print(p.stdout, end='')
+
+    bad_probe = work / 'restore-error'
+    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
+                    '-fno-stack-protector', '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_runtime/restore_error.c'), '-o', str(bad_probe)], check=True)
+    bad_state = os.memfd_create('unsealed-fd-state', flags=0)
+    try:
+        p = subprocess.run([str(loader), '--child-loader', '--fd-state', str(bad_state),
+                            '--', str(bad_probe)], cwd=work, pass_fds=(bad_state,),
+                           capture_output=True, text=True, timeout=20)
+        assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    finally:
+        os.close(bad_state)
+    print('PASS: malformed exec handoff remains a persistent initialization error')
 
 # Optional smoke tests against already extracted user-provided fixtures.
 for directory, target, arguments, marker in [
@@ -126,3 +147,15 @@ for directory, target, arguments, marker in [
 
 subprocess.run(['python3', str(repo / 'vendor/proot/port-tests/test_inotify.py'),
                 '--fd-experiment'], check=True)
+
+for directory, shell, command, marker in [
+        ('alpine-test-root', './bin/busybox', ['sh', '-c', 'exec /bin/busybox cat /etc/alpine-release'], '3.24.3'),
+        ('ubuntu-root', './usr/bin/dash', ['-c', 'exec /usr/bin/cat /etc/os-release'], 'Ubuntu')]:
+    root = build / directory
+    if not (root / shell).exists():
+        print('SKIP: optional rootfs exec smoke', directory)
+        continue
+    p = subprocess.run([str(loader), '--mode', 'container', '--root', str(root),
+                        '--', shell, *command], cwd=root, capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0 and marker in p.stdout, (directory, p.returncode, p.stdout, p.stderr)
+    print('PASS: experimental runtime rootfs shell exec', directory)

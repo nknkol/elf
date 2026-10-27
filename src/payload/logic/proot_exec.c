@@ -10,6 +10,9 @@
 #include "config.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
+#ifdef FD_EXPERIMENT
+#include "fd_experiment.h"
+#endif
 
 #define EXEC_ARGS 128
 #define CHAIN_ARGS (EXEC_ARGS + 40)
@@ -24,6 +27,9 @@ typedef struct {
     char header[256];
     char volumes[CONFIG_MAX_BINDS][CONFIG_MAX_PATH * 2 + 2];
     char *argv[CHAIN_ARGS];
+#ifdef FD_EXPERIMENT
+    char fd_state[24];
+#endif
 } ExecScratch;
 
 static int read_executable(const char *path, int nofollow, char header[256])
@@ -97,6 +103,9 @@ long proot_execve(long number, long a[6])
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     ExecScratch *s = (void *)mem;
+#ifdef FD_EXPERIMENT
+    long transport = -1;
+#endif
     long ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
                                        s->guest, s->host, sizeof(s->host));
     if (ret < 0)
@@ -166,6 +175,16 @@ long proot_execve(long number, long a[6])
     s->argv[pos++] = target;
     s->argv[pos++] = "--exec-path";
     s->argv[pos++] = s->guest;
+#ifdef FD_EXPERIMENT
+    transport = fd_experiment_export();
+    if (transport < 0) { ret = transport; goto done; }
+    unsigned value = (unsigned)transport;
+    char *digit = s->fd_state + sizeof(s->fd_state) - 1;
+    *digit = 0;
+    do { *--digit = '0' + value % 10; value /= 10; } while (value);
+    s->argv[pos++] = "--fd-state";
+    s->argv[pos++] = digit;
+#endif
     s->argv[pos++] = "--";
     if (script) {
         s->argv[pos++] = interpreter;
@@ -180,9 +199,16 @@ long proot_execve(long number, long a[6])
     s->argv[pos] = NULL;
     /* The signed loader starts the same embedded backend. Do not fall back
      * to raw target exec, which would lose the guest filesystem view. */
+#ifdef FD_EXPERIMENT
+    ret = raw_syscall(__NR_fcntl, transport, F_SETFD, 0, 0, 0, 0);
+    if (ret < 0) goto done;
+#endif
     ret = raw_syscall(SYS_execve, (long)cfg->loader_path, (long)s->argv,
                       (long)env, 0, 0, 0);
  done:
+#ifdef FD_EXPERIMENT
+    if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
+#endif
     raw_syscall(__NR_munmap, mem, sizeof(ExecScratch), 0, 0, 0, 0);
     return ret;
 }
