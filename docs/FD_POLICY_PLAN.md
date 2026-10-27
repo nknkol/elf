@@ -375,3 +375,12 @@ AF_UNIX 实测覆盖双向读写、dup 后原端关闭、EOF、flags、失败及
 原生探测发现本机 socketpair 接受 0x80000000/0x40000000 未知 type 位，
 但 socket 拒绝；不在适配层改写此行为，非法类型回归使用 type=15（EINVAL）。
 accept/accept4、SCM_RIGHTS 接收及多任务生命周期仍未接入，来源仍为 UNKNOWN。
+
+### 实验运行时扩展：accept / accept4
+
+两种接收调用接入单 FD 创建预检；accept 的 CLOEXEC 为 0，accept4 来自
+第 4 个参数。抽象 UNIX socket 实测地址回填、双向 IO、关闭及 EOF、空队列、
+非法参数；满表拒绝后释放一个槽仍能接收原排队连接，验证拒绝发生于内核调用前。
+本机原生 accept/accept4(flags=0) 会继承监听端 O_NONBLOCK；测试运行器先获取
+原生参考值，再对照 guest，适配层不改写该宿主行为。CLOEXEC 仍按调用标志跟踪。
+recvmsg/recvmmsg 的 SCM_RIGHTS 接收及多任务生命周期仍未接入，来源仍为 UNKNOWN。

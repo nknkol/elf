@@ -14,7 +14,7 @@ build also determines `src/elfloader`; prefer the named snapshots above.
 
 The experimental payload initializes a single-task registry on first slow call,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
-timerfd_create, pipe2, socket, socketpair, dup, dup3,
+timerfd_create, pipe2, socket, socketpair, accept, accept4, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
@@ -68,6 +68,15 @@ single-task AArch64 mode; this is not a concurrent user-memory snapshot guarante
 Socket coverage uses AF_UNIX stream sockets, including bidirectional socketpair
 IO, duplicated endpoint lifetime, EOF, CLOEXEC/nonblocking flags, EFAULT, invalid
 types, and pair capacity boundaries. Creation and IO retain host kernel behavior;
-accept/accept4 and recvmsg/recvmmsg (including SCM_RIGHTS) remain unsupported.
+recvmsg/recvmmsg (including SCM_RIGHTS) remain unsupported.
 On this host, raw socketpair accepts unknown high type bits that socket rejects;
 the invalid-type test uses type 15, which the host rejects with EINVAL.
+
+Accept tests use an autobound abstract UNIX listener, connect without another
+task, and exercise accept, accept4 with zero flags, and accept4 with CLOEXEC and
+NONBLOCK. They verify peer address output, distinct descriptor identity,
+bidirectional IO, EOF, empty-queue EAGAIN, invalid flags/FD, and rejection at full
+capacity without consuming the queued connection (accepted after one slot frees).
+The runner obtains native AArch64 accept/accept4 status flags as a reference:
+this host inherits listener O_NONBLOCK even without SOCK_NONBLOCK. The adapter
+preserves host behavior rather than implementing Linux flag normalization.

@@ -5,6 +5,7 @@
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include "fd_experiment.h"
 static long call(long n,long a,long b,long c,long d)
 {
@@ -18,6 +19,56 @@ static void fail(int line)
 #define CHECK(x) do { if(!(x))fail(__LINE__); } while(0)
 static long query(int type,int fd)
 { return call(__NR_prctl,PR_ELF_FD_QUERY,type,fd,0); }
+static void check_accept(void)
+{
+    long listener=call(__NR_socket,AF_UNIX,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0,0);
+    CHECK(listener>=0);
+    /* Let the kernel choose a unique abstract address; no filesystem fixture. */
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    CHECK(call(__NR_bind,listener,(long)&address,sizeof(address.sun_family),0)==0);
+    unsigned length=sizeof(address);
+    CHECK(call(__NR_getsockname,listener,(long)&address,(long)&length,0)==0);
+    CHECK(length>sizeof(address.sun_family) && length<=sizeof(address));
+    CHECK(call(__NR_listen,listener,4,0,0)==0);
+    CHECK(call(__NR_accept,listener,0,0,0)==-EAGAIN && query(0,0)==1);
+    CHECK(call(__NR_accept4,listener,0,0,0)==-EAGAIN && query(0,0)==1);
+    CHECK(call(__NR_accept4,listener,0,0,0x80000000)==-EINVAL);
+    CHECK(call(__NR_accept,-1,0,0,0)==-EBADF);
+    for(int mode=0;mode<3;mode++) {
+        long client=call(__NR_socket,AF_UNIX,SOCK_STREAM|SOCK_NONBLOCK,0,0);
+        CHECK(client>=0);
+        CHECK(call(__NR_connect,client,(long)&address,length,0)==0);
+        long filler[126];
+        if(mode==0) {
+            for(int i=0;i<126;i++) { filler[i]=call(__NR_dup,listener,0,0,0);CHECK(filler[i]>=0); }
+            CHECK(query(0,0)==128);
+            CHECK(call(__NR_accept,listener,0,0,0)==-ENOSPC);
+            CHECK(call(__NR_accept4,listener,0,0,SOCK_CLOEXEC)==-ENOSPC);
+            CHECK(query(0,0)==128);
+            CHECK(call(__NR_close,filler[125],0,0,0)==0);
+        }
+        struct sockaddr_un peer={0};unsigned peer_length=sizeof(peer);
+        long accepted=call(mode==0?__NR_accept:__NR_accept4,listener,
+                           (long)&peer,(long)&peer_length,mode==1?SOCK_CLOEXEC|SOCK_NONBLOCK:0);
+        CHECK(accepted>=0 && peer.sun_family==AF_UNIX);
+        CHECK(query(3,accepted)==(mode==1));
+        CHECK(call(__NR_fcntl,accepted,F_GETFD,0,0)==(mode==1?FD_CLOEXEC:0));
+        CHECK(!!(call(__NR_fcntl,accepted,F_GETFL,0,0)&O_NONBLOCK)==!!(EXPECT_ACCEPT_NONBLOCK&(1<<mode)));
+        CHECK(query(2,accepted)!=query(2,listener));
+        if(mode==0) {
+            CHECK(query(0,0)==128);
+            for(int i=0;i<125;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+        }
+        char c='A';CHECK(call(__NR_write,client,(long)&c,1,0)==1);
+        c=0;CHECK(call(__NR_read,accepted,(long)&c,1,0)==1 && c=='A');
+        c='B';CHECK(call(__NR_write,accepted,(long)&c,1,0)==1);
+        c=0;CHECK(call(__NR_read,client,(long)&c,1,0)==1 && c=='B');
+        CHECK(call(__NR_close,accepted,0,0,0)==0 && query(1,accepted)==-ENOENT);
+        CHECK(call(__NR_read,client,(long)&c,1,0)==0);
+        CHECK(call(__NR_close,client,0,0,0)==0 && query(0,0)==1);
+    }
+    CHECK(call(__NR_close,listener,0,0,0)==0 && query(0,0)==0);
+}
 void _start(void)
 {
     CHECK(query(0,0)==0);
@@ -178,7 +229,8 @@ void _start(void)
     CHECK(call(__NR_timerfd_create,CLOCK_MONOTONIC,0,0,0)==-ENOSPC);
     for(int i=0;i<127;i++)CHECK(call(__NR_close,fds[i],0,0,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0 && query(0,0)==0);
-    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd/epoll/timerfd/pipe2/socket/socketpair, lifecycle rejection and capacity\n";
+    check_accept();
+    static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd/epoll/timerfd/pipe2/socket/socketpair/accept/accept4, lifecycle rejection and capacity\n";
     call(__NR_write,1,(long)ok,sizeof(ok)-1,0);
     call(__NR_exit_group,0,0,0,0);for(;;){}
 }
