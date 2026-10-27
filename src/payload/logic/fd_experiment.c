@@ -61,7 +61,9 @@ long fd_experiment_dispatch(long n,long a[6])
     switch(n) {
     case __NR_clone: case __NR_clone3: case __NR_execve: case __NR_execveat:
     case __NR_close_range: case __NR_unshare: case __NR_openat2:
-    case __NR_io_uring_setup:
+#define FD_UNSUPPORTED(n) case n:
+#include "fd_unsupported_syscalls.inc"
+#undef FD_UNSUPPORTED
         return -ENOSYS;
     }
     if(n==__NR_close) { int bookkeeping;return fd_close_execute(&queue,&registry,&guard,owner,(int)a[0],&bookkeeping); }

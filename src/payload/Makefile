@@ -50,7 +50,7 @@ proot-build/runtime.o: $(PROOT_SRC)/svc/runtime.c | proot-build
 -include proot-build/*.d
 endif
 
-$(ARCH_DIR)/entry.o: $(ARCH_DIR)/syscall_nums.h $(ARCH_DIR)/slow_syscalls.inc $(ARCH_DIR)/fd_experiment_syscalls.inc
+$(ARCH_DIR)/entry.o: $(ARCH_DIR)/syscall_nums.h $(ARCH_DIR)/slow_syscalls.inc $(ARCH_DIR)/fd_experiment_syscalls.inc $(ARCH_DIR)/fd_unsupported_syscalls.inc
 
 all: $(TARGET)
 
@@ -69,3 +69,5 @@ $(TARGET): $(OBJ)
 clean:
 	rm -f $(OBJ) *.o $(TARGET)
 	rm -rf proot-build
+
+logic/fd_experiment.o: $(ARCH_DIR)/fd_unsupported_syscalls.inc

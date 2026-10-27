@@ -156,3 +156,15 @@ invalid handles/flags, full-table rejection and retry after releasing one slot.
 This does not enforce cross-process import policy. io_uring_setup remains refused
 in the experiment: a working setup call alone does not cover asynchronous FD
 creation or the host's blocked io_uring_enter/register paths.
+
+Unsupported direct FD creators now share one experimental-only routing/denial
+inventory: fanotify_init, userfaultfd, perf_event_open, bpf, mq_open, open_tree,
+fsopen, fsmount, fspick, open_by_handle_at, seccomp and io_uring_setup. Header-
+available landlock_create_ruleset and memfd_secret are included conditionally.
+The current target headers expose the first 12; the latter two were not exercised.
+The independent guest list tests zero and invalid arguments through patched SVCs,
+unchanged metadata, and continued supported IO. Ordinary builds are unchanged.
+BPF/seccomp are denied as whole multiplexed interfaces, including their non-FD
+commands; this is an explicit experimental compatibility restriction, not a
+claim that the host rejects those operations. FD-producing ioctls and other
+ancillary types remain outside coverage; this is not a complete syscall allowlist.

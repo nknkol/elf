@@ -465,3 +465,18 @@ pidfd_getfd 接入同样预检并以 UNKNOWN 来源、description=0 导入，不
 io_uring_setup 原生可成功，但 enter/register 已知受宿主限制；实验模式继续拒绝
 setup，不以创建成功冒充异步 FD 生命周期已覆盖。跨进程导入权限、多任务、exec
 与 close_range 完整语义仍未完成。
+
+### 实验模式直接 FD 创建入口审计
+
+发现 fanotify_init、userfaultfd、perf_event_open、bpf、mq_open 等可能走透传，
+而 fsopen/fsmount/fspick/open_tree 虽已在共享慢路径中，也并未登记返回 FD。
+新增实验专用拒绝清单，同一清单同时驱动汇编路由和 C 层 ENOSYS，避免只分流
+但未实现跟踪。清单还包括 open_by_handle_at、seccomp 和原已拒绝的 io_uring_setup。
+landlock_create_ruleset / memfd_secret 在目标头文件提供编号时条件启用；当前
+头文件未提供这两项，不能计为本机已测。普通构建路由和行为保持原样。
+
+真实 guest 独立枚举当前可用的 12 项，验证零参数/非法参数均返回 ENOSYS，
+元数据不变，正常 memfd/dup/read/write/close 仍可用。拒绝原因是适配器缺失，
+不是宿主能力判定；bpf/seccomp 包括不创建 FD 的命令也暂时拒绝，属于兼容性限制。
+FD-producing ioctl、其他携带 FD 的辅助消息、原始入口及多任务生命周期仍未覆盖，
+不能将该清单描述为完整的 syscall 安全边界。

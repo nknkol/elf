@@ -13,5 +13,8 @@ SLOW_SYSCALL(__NR_inotify_init1)
 SLOW_SYSCALL(__NR_signalfd4)
 SLOW_SYSCALL(__NR_timerfd_create)
 SLOW_SYSCALL(__NR_pidfd_getfd)
-SLOW_SYSCALL(__NR_io_uring_setup)
 SLOW_SYSCALL(__NR_unshare)
+
+#define FD_UNSUPPORTED(n) SLOW_SYSCALL(n)
+#include "fd_unsupported_syscalls.inc"
+#undef FD_UNSUPPORTED
