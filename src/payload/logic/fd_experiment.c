@@ -59,7 +59,6 @@ long fd_experiment_dispatch(long n,long a[6])
     switch(n) {
     case __NR_clone: case __NR_clone3: case __NR_execve: case __NR_execveat:
     case __NR_close_range: case __NR_unshare: case __NR_openat2:
-    case __NR_socket: case __NR_socketpair:
     case __NR_accept: case __NR_accept4: case __NR_recvmsg: case __NR_recvmmsg:
     case __NR_inotify_init1: case __NR_signalfd4:
     case __NR_pidfd_getfd: case __NR_io_uring_setup:
@@ -70,8 +69,8 @@ long fd_experiment_dispatch(long n,long a[6])
         (n==__NR_fcntl && (a[1]==F_DUPFD || a[1]==F_DUPFD_CLOEXEC));
     int setfd=n==__NR_fcntl && a[1]==F_SETFD;
     int create=n==__NR_openat || n==__NR_memfd_create || n==__NR_eventfd2 ||
-        n==__NR_epoll_create1 || n==__NR_timerfd_create;
-    int pair=n==__NR_pipe2;
+        n==__NR_epoll_create1 || n==__NR_timerfd_create || n==__NR_socket;
+    int pair=n==__NR_pipe2 || n==__NR_socketpair;
     if(!create && !pair && !duplicate && !setfd)return syscall_handle_common(n,a);
     /* The entry trampoline rejects same-TID nested slow calls in this build;
      * clone is denied, so no metadata writer can run across these syscalls.
@@ -91,16 +90,16 @@ long fd_experiment_dispatch(long n,long a[6])
         /* Read only after kernel success. This relies on the experimental
          * single-task AArch64 address space and nested slow-call exclusion;
          * it is not a general user-memory snapshot for concurrent guests. */
-        const int *fds=(const int *)a[0];
-        int read_end=fds[0],write_end=fds[1];
-        rc=fd_table_open(t,read_end,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
-        if(!rc)rc=fd_table_open(t,write_end,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
+        const int *fds=(const int *)a[n==__NR_pipe2?0:3];
+        int first=fds[0],second=fds[1];
+        rc=fd_table_open(t,first,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
+        if(!rc)rc=fd_table_open(t,second,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
     }
     else if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
         int cloexec=n==__NR_memfd_create?!!(a[1]&1):
             n==__NR_epoll_create1?!!(a[0]&O_CLOEXEC):
-            (n==__NR_eventfd2 || n==__NR_timerfd_create)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
+            (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
         rc=fd_table_open(t,(int)result,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
     }
     else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],!!(a[2]&FD_CLOEXEC));

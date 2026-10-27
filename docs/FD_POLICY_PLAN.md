@@ -366,3 +366,12 @@ pipe2 创建前预检两个空槽及两个序号的余量，再由内核创建�
 真实 guest 验证数据传输、非阻塞、EOF、CLOEXEC、错误参数及容量边界。
 仍限单任务实验模式：内核成功后读取 guest FD 数组，不提供并发用户内存快照，
 不启用权限隔离；socketpair、SCM_RIGHTS 与多任务生命周期尚未接入。
+
+### 实验运行时扩展：socket / socketpair
+
+socket 接入单 FD 创建，socketpair 复用双槽及双 generation 预检，成功后
+从第 4 个参数取得双端 FD；二者的 CLOEXEC 均来自第 2 个参数。
+AF_UNIX 实测覆盖双向读写、dup 后原端关闭、EOF、flags、失败及容量边界。
+原生探测发现本机 socketpair 接受 0x80000000/0x40000000 未知 type 位，
+但 socket 拒绝；不在适配层改写此行为，非法类型回归使用 type=15（EINVAL）。
+accept/accept4、SCM_RIGHTS 接收及多任务生命周期仍未接入，来源仍为 UNKNOWN。

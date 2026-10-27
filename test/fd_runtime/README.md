@@ -14,7 +14,7 @@ build also determines `src/elfloader`; prefer the named snapshots above.
 
 The experimental payload initializes a single-task registry on first slow call,
 tracks up to 128 descriptors from openat, memfd_create, eventfd2, epoll_create1,
-timerfd_create, pipe2, dup, dup3,
+timerfd_create, pipe2, socket, socketpair, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. All open provenance is
@@ -64,3 +64,10 @@ Tests cover CLOEXEC/nonblocking flags, a duplicated writer, EOF after the last
 writer closes, EFAULT, invalid flags, and 0/1/2 free-slot boundaries. Failed
 creation publishes no records. Reading the returned array relies on the current
 single-task AArch64 mode; this is not a concurrent user-memory snapshot guarantee.
+
+Socket coverage uses AF_UNIX stream sockets, including bidirectional socketpair
+IO, duplicated endpoint lifetime, EOF, CLOEXEC/nonblocking flags, EFAULT, invalid
+types, and pair capacity boundaries. Creation and IO retain host kernel behavior;
+accept/accept4 and recvmsg/recvmmsg (including SCM_RIGHTS) remain unsupported.
+On this host, raw socketpair accepts unknown high type bits that socket rejects;
+the invalid-type test uses type 15, which the host rejects with EINVAL.
