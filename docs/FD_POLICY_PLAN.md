@@ -534,3 +534,17 @@ clone/线程仍拒绝，通用 shell 创建子进程和权限隔离尚未实现�
 子 close 不影响父 FD，以及子进程再 exec 后的状态恢复。这里使用私有 VM 的真实复制，
 不启用共享 registry 的线程方案，也不按宿主有偏差的 CLONE_FILES 标志推断共享。
 权限隔离、共享 VM/线程和通用 shell/vfork 兼容仍未完成。
+
+### 真实 shell 工作流验证与下一处阻塞
+
+新增 `test/fd_runtime/shell.py` 并接入实验运行时套件。Alpine 和 Ubuntu 各通过
+外部 cat 管道、子 shell、后台任务退出码/wait、命令替换和跨 fork FD 重定向；
+Alpine 额外通过外部命令后继续执行 builtin，共 11 个成功场景。
+测试显式绑定 `/dev/null`，避免 minirootfs 缺少设备导致后台任务退出 2 的干扰。
+
+Ubuntu dash 普通外部命令后接 builtin 仍报 Cannot fork，单独标记 KNOWN LIMIT。
+该 rootfs libc 的 vfork 反汇编显示 clone flags=16657（0x4111），即
+CLONE_VM|CLONE_VFORK|SIGCHLD，当前门禁明确拒绝。现有 pipeline/subshell 的成功
+不能推出普通 shell 命令已完整兼容。下一步应处理 vfork 的共享 VM 生命周期、
+父任务挂起期间的元数据所有权、子 exec/exit 后父状态恢复，不能直接放开标志或
+把 fork 替代当作完整 vfork 语义。本轮只增加实际工作流回归和诊断，不改变门禁。

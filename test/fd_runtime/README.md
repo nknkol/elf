@@ -218,3 +218,15 @@ parent/child CLOEXEC independence, child close versus parent survival, and child
 exec with preserved records. Direct slow-entry clone stays rejected; the generated
 original-stack clone gate is required. A parent dying before its return can strand
 an active-call slot; automatic reclamation of that slot is not implemented.
+
+Real shell workflow coverage (`python3 test/fd_runtime/shell.py`) now checks
+Alpine busybox and Ubuntu dash pipelines with external cat, subshells, background
+exit/wait status, command substitution, and FD redirection across fork. It binds
+host /dev/null explicitly: extracted minirootfs fixtures lack the device, causing
+background jobs to fail independently of clone support. Alpine also passes an
+external command followed by a builtin. Ubuntu dash instead exits 2 with Cannot
+fork for that case; the suite reports KNOWN LIMIT, not PASS. Its libc vfork uses
+clone flags 0x4111 (CLONE_VM | CLONE_VFORK | SIGCHLD), which the experimental gate
+rejects. Do not enable these flags with the private-VM singleton registry, or
+silently substitute fork and claim shared-memory vfork semantics. Fixtures are
+optional and missing roots are reported as SKIP.

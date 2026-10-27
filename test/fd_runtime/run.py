@@ -187,3 +187,5 @@ for directory, shell, command, marker in [
                         '--', shell, *command], cwd=root, capture_output=True, text=True, timeout=20)
     assert p.returncode == 0 and marker in p.stdout, (directory, p.returncode, p.stdout, p.stderr)
     print('PASS: experimental runtime rootfs shell exec', directory)
+
+subprocess.run(['python3', str(repo / 'test/fd_runtime/shell.py')], check=True)
