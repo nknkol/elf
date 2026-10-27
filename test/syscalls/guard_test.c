@@ -106,6 +106,18 @@ int main(int argc,char **argv) {
     }
     for(int i=0;i<32;i++) {simulated_tid=100+i;held[i]=reentry_try_enter();assert((intptr_t)held[i]>0);}
     simulated_tid=999;assert((intptr_t)reentry_try_enter()==-EAGAIN);
+    /* A vfork child never borrows a pool slot, even at full capacity. Its
+     * abandoned acquisition can be retired without clearing any pool owner. */
+    reentry_vfork_begin(999);
+    struct reentry_slot *child=reentry_try_enter();assert((intptr_t)child>0);
+    assert(reentry_try_enter()==NULL);
+    reentry_leave(child);
+    child=reentry_try_enter();assert((intptr_t)child>0);
+    reentry_vfork_end(); /* Simulate terminal child: no normal leave. */
+    assert((intptr_t)reentry_try_enter()==-EAGAIN);
+    for(int i=0;i<32;i++) {
+        simulated_tid=100+i;assert(reentry_try_enter()==NULL);
+    }
     reentry_leave(held[0]);simulated_tid=131;
     assert(reentry_try_enter()==NULL); /* Existing owner after a free hole. */
     simulated_tid=999;held[0]=reentry_try_enter();assert((intptr_t)held[0]>0);

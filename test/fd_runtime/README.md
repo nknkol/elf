@@ -233,13 +233,14 @@ rewritten into fork. Before clone, the parent copies records into a separate
 child arena and repairs its internal pointers. Child operations select that
 arena by TID; the parent's arena stays untouched. Parent kernel return after
 child exec/exit discards the child state and unmaps exec scratch retained in the
-old shared VM, releasing the child's nonreturning exec entry slot. Failed exec
-cleans up normally and can be retried. Nested clone (including private fork),
+old shared VM. A dedicated child reentry slot is retired at the same boundary.
+Failed exec cleans up normally and can be retried. Nested clone (including private fork),
 CLONE_FILES, extra vfork flags and ordinary shared-VM threads remain unsupported.
 This is FD metadata support, not a claim that all legacy backend globals or
-arbitrary shared-VM guest operations are isolated. Death inside other slow calls
-can still strand active-call slots/temporary mappings; parent death before its
-clone return is also not reclaimed automatically.
+arbitrary shared-VM guest operations are isolated. The child's guard slot is now
+reclaimed even when a slow call never returns.
+Other temporary mappings interrupted by death still need separate accounting;
+parent death before its clone return is also not reclaimed automatically.
 
 The libc-free vfork guest runs both natively and through the loader. It checks
 shared memory visible immediately on parent return, independent kernel CLOEXEC,
@@ -247,3 +248,14 @@ child dup/close with unchanged parent records, first-call initialization, exit,
 SIGKILL outside a slow call, failed exec then successful exec, nested clone
 rejection, and 40 exec cycles (more than the 32 active-call slots). The real dash
 workflow additionally covers its same-stack libc vfork calling convention.
+
+The interruption regression adds 40 vfork children blocked in recvmsg on empty
+socketpairs, each terminated by default SIGALRM. Native and loader runs must both
+observe signal 14, and the parent must retain its FD generation/CLOEXEC and remain
+able to enter slow calls after every child. This failed on the previous backend
+as abandoned calls exhausted the 32-slot shared pool. The child now uses a
+private-payload dedicated guard slot for its entire vfork lifetime, including
+acquisition/return interruption windows. Only the suspended parent's kernel
+return authorizes retirement; no reusable public slot is reclaimed by TID.
+The guard test also fills the public pool and verifies child-slot retirement
+leaves all 32 owners intact. This does not implement general dead-task reaping.

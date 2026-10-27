@@ -10,6 +10,11 @@
 struct reentry_slot { long tid; };
 struct guard_table { struct reentry_slot slots[GUARD_SLOTS]; };
 static struct guard_table *g_table;
+/* Private payload storage, shared only by the supported vfork pair. Unlike a
+ * public pool slot, this slot cannot be reused by a fork sibling before the
+ * suspended parent completes retirement. */
+static struct reentry_slot vfork_slot;
+static long vfork_tid;
 extern long raw_syscall(long, long, long, long, long, long, long);
 
 /* Shared anonymous storage prevents fork from copying owners that only the
@@ -37,6 +42,12 @@ struct reentry_slot *reentry_try_enter(void)
     long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
     if (tid <= 0)
         return (struct reentry_slot *)(intptr_t)(tid < 0 ? tid : -EAGAIN);
+    if (__atomic_load_n(&vfork_tid, __ATOMIC_ACQUIRE) == tid) {
+        long empty = 0;
+        return __atomic_compare_exchange_n(&vfork_slot.tid, &empty, tid, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+            ? &vfork_slot : NULL;
+    }
     struct guard_table *table = guard_table_get();
     if ((uintptr_t)table >= (uintptr_t)-4095)
         return (struct reentry_slot *)table;
@@ -62,13 +73,16 @@ void reentry_leave(struct reentry_slot *slot)
         __atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
 }
 
-struct reentry_slot *reentry_current(void)
+void reentry_vfork_begin(long tid)
 {
-    long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
-    struct guard_table *table=__atomic_load_n(&g_table,__ATOMIC_ACQUIRE);
-    if(!table || tid<=0)return NULL;
-    for(int i=0;i<GUARD_SLOTS;i++)
-        if(__atomic_load_n(&table->slots[i].tid,__ATOMIC_ACQUIRE)==tid)
-            return &table->slots[i];
-    return NULL;
+    __atomic_store_n(&vfork_slot.tid, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vfork_tid, tid, __ATOMIC_RELEASE);
+}
+
+void reentry_vfork_end(void)
+{
+    /* Caller proves the child cannot execute in this VM again. No TID liveness
+     * guess or public slot lookup: even an interrupted acquisition is covered. */
+    __atomic_store_n(&vfork_tid, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vfork_slot.tid, 0, __ATOMIC_RELEASE);
 }

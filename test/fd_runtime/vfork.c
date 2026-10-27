@@ -2,6 +2,8 @@
 #include <asm/unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include "fd_experiment.h"
 static long call(long n,long a,long b,long c,long d) {
     register long x0 __asm__("x0")=a,x1 __asm__("x1")=b,x2 __asm__("x2")=c,x3 __asm__("x3")=d;
@@ -30,6 +32,18 @@ void child(void) {
         call(__NR_exit,42,0,0,0);for(;;){}
     }
     META(query(0,0)==1 && query(1,fd)==generation);
+    if(mode==100) {
+        int sockets[2];
+        CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)sockets)==0);
+        struct itimerval timer={{0,0},{0,50000}};
+        struct msghdr message={0};
+        char byte;struct iovec vector={&byte,1};
+        message.msg_iov=&vector;message.msg_iovlen=1;
+        CHECK(call(__NR_setitimer,ITIMER_REAL,(long)&timer,0,0)==0);
+        /* No sender exists. Default SIGALRM terminates the child inside the
+         * blocking receive adapter, bypassing its normal guard epilogue. */
+        call(__NR_recvmsg,sockets[0],(long)&message,0,0);CHECK(0);
+    }
 #if FD_TRACK
     /* Nested private fork and nested vfork both remain unsupported. */
     CHECK(call(__NR_clone,17,0,0,0)==-ENOSYS);
@@ -80,8 +94,15 @@ void run(long *sp) {
         status=0;CHECK(call(__NR_wait4,pid,(long)&status,0,0)==pid);
         CHECK(status==(round==1?9:(42<<8)));
     }
+    for(int round=0;round<40;round++) {
+        mode=100;marker=0;
+        pid=spawn(stack+sizeof(stack));CHECK(pid>0 && marker==1);
+        status=0;CHECK(call(__NR_wait4,pid,(long)&status,0,0)==pid && status==14);
+        META(query(0,0)==1 && query(1,fd)==generation && query(3,fd)==0);
+        CHECK(call(__NR_fcntl,fd,F_GETFD,0,0)==0);
+    }
     CHECK(call(__NR_close,fd,0,0,0)==0);
-    static const char pass[]="PASS: runtime FD vfork shared memory, copied FDs, exit/kill/failed exec and repeated exec\n";
+    static const char pass[]="PASS: runtime FD vfork shared memory, copied FDs, exit/kill/failed exec, repeated exec and interrupted recvmsg\n";
     call(__NR_write,1,(long)pass,sizeof(pass)-1,0);call(__NR_exit_group,0,0,0,0);for(;;){}
 }
 /* Keep the parent's C stack intact. Kernel selects the child-only stack before

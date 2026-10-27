@@ -5,7 +5,10 @@ struct reentry_slot;
 /* Slot on success; NULL for same-thread recursion; negative errno pointer
  * on failure/capacity exhaustion. Callers must distinguish all three. */
 struct reentry_slot *reentry_try_enter(void);
-/* Borrowed current slot; only a proven nonreturning owner may be released elsewhere. */
-struct reentry_slot *reentry_current(void);
+/* Single nonnested vfork child only. Begin before it can enter guest code;
+ * end only after kernel vfork return proves it left this VM (or clone failed).
+ * These manage a dedicated slot and never reclaim shared-pool owners by TID. */
+void reentry_vfork_begin(long tid);
+void reentry_vfork_end(void);
 void reentry_leave(struct reentry_slot *slot);
 #endif

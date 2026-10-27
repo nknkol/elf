@@ -28,7 +28,6 @@ static struct fd_runtime primary, vfork_child;
 static int vfork_active;
 static void *vfork_exec_scratch;
 static size_t vfork_exec_size;
-static struct reentry_slot *vfork_exec_slot;
 #define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
 extern long fd_receive_messages(struct fd_table *,long [6]);
 extern long fd_receive_message(struct fd_table *,long [6]);
@@ -77,14 +76,15 @@ void clone_observer_finish(const struct clone_event *event,long result)
              * or clone failed. Its FD changes never touched primary. */
             if(vfork_exec_scratch)
                 raw_syscall(__NR_munmap,(long)vfork_exec_scratch,vfork_exec_size,0,0,0,0);
-            reentry_leave(vfork_exec_slot);
-            vfork_exec_slot=0;vfork_exec_scratch=0;vfork_exec_size=0;
+            reentry_vfork_end();
+            vfork_exec_scratch=0;vfork_exec_size=0;
             vfork_active=0;
         }
         reentry_leave(event->cookie);return;
     }
     struct fd_runtime *s=vf?&vfork_child:&primary;
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
+    if(vf)reentry_vfork_begin(tid);
     s->tasks[s->owner.slot].clone.child_tid=0;
     int rc=fd_registry_publish(&s->registry,s->owner,tid);
     if(rc) {
@@ -94,14 +94,12 @@ void clone_observer_finish(const struct clone_event *event,long result)
     }
     s->owner_tid=tid;
 }
-/* Track only the exec scratch and its held entry slot. Failure returns through
- * the normal entry epilogue; successful vfork exec is cleaned by the parent.
- * Death inside other slow calls can still strand slots/temporary mappings. */
+/* Exec scratch survives successful exec in the parent's VM. Other internal
+ * temporary mappings interrupted by death still need separate accounting. */
 void fd_experiment_exec_scratch(void *address,size_t size)
 {
     if(current()!=&vfork_child)return;
     vfork_exec_scratch=address;vfork_exec_size=size;
-    vfork_exec_slot=address?reentry_current():0;
 }
 static int start(struct fd_runtime *s)
 {

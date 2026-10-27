@@ -563,3 +563,18 @@ Alpine/Ubuntu 共 12 个 shell 工作流现在全部通过，Ubuntu 普通外部
 KNOWN LIMIT。仍拒绝嵌套 clone、额外 vfork flags、CLONE_FILES 和普通共享 VM 线程。
 这只完成受限 FD 生命周期接入；其他旧后端全局状态及任意共享 VM 操作未全面审计。
 子在其他慢调用中死亡仍可能遗留活跃槽/临时映射；父提前死亡也未自动回收。
+
+### 回收 vfork 子在阻塞慢调用中遗留的活跃槽
+
+先新增原生/loader 对照：连续 40 次 vfork，子在空 socketpair 的 recvmsg 中阻塞，
+由默认 SIGALRM 终止，父验证信号退出、FD 记录不变且后续慢调用可用。
+旧版本原生通过、实验后端失败，证明仅回收成功 exec 的槽还不够。
+
+现在子从 clone 回调开始使用私有 payload 内的独立 reentry 槽；正常返回照常释放，
+父在内核 vfork 返回确认子离开共享 VM 后统一清空，包括 acquire/epilogue 中被杀
+的窗口。不按 TID 扫描并回收公共槽，避免误清 fork 兄弟任务可复用的槽。
+原有 exec 专用槽记录删除；exec scratch 回收保持。满公共池测试验证专用槽回收
+不改变 32 个既有 owner，真实 recvmsg 中断循环已通过。
+
+本步解决 vfork 子活跃槽泄漏；其他慢调用的临时 mmap、父提前死亡以及普通 fork
+子进程遗留公共槽仍需后续处理，不声称完成通用进程退出回收。
