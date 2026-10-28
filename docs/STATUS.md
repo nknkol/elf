@@ -7,6 +7,8 @@
 fork/vfork 原生对照及 exec 降级通过。现有 PRoot 路径 handlers 也已接每次调用
 上下文，rename/link 两端分别取来源。exec 目标/解释器与受限 BENEATH 也已接来源
 观察值，七个执行标记用例通过。两套回归继续通过。
+最新增量新增独立 [存储能力探测](STORAGE_CAPABILITIES.md)，实测三个 backing 并通过
+19 项规划器/探测测试；没有修改 ELF 运行时，本增量未重复构建两套 ELF。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

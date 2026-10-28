@@ -88,6 +88,7 @@ FD 计划后半部分保留历史增量记录，不应把早期“未接入”�
 - [FD 身份与只读策略实施顺序](docs/FD_POLICY_PLAN.md)
 - [PRoot 移植记录](vendor/proot/SVC_PORT.md)
 - [agent 配置规划器](tools/agent_sandbox/README.md)
+- [backing 存储能力与实测](docs/STORAGE_CAPABILITIES.md)
 - [Ubuntu auxv 故障与修复](test/ubuntu/AUXV_DIAGNOSIS.md)
 - [旧后端设计记录](docs/LEGACY_BACKEND.md)：历史材料，不是当前能力说明。
 

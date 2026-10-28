@@ -85,7 +85,11 @@ def compile_profile(profile, *, brew_prefix, workspace, state):
 
 
 def access_for(plan, canonical_guest_path):
-    """Policy model only; runtime must resolve symlinks before consulting policy."""
+    """String policy model only, not authorization on a host filesystem.
+
+    Runtime must account for symlinks, case aliases and retained mount identity;
+    lowercase conversion is not a substitute for that resolution.
+    """
     path = absolute(canonical_guest_path)
     for mount in plan['mounts']:
         if contains(mount['target'], path):

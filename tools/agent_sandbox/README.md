@@ -50,3 +50,31 @@ Next implementation steps:
 
 For the functioning experimental path backend and its tests, see
 [vendor/proot/SVC_PORT.md](../../vendor/proot/SVC_PORT.md).
+
+## Observe backing storage before selecting it
+
+```sh
+python3 tools/agent_sandbox/probe_storage.py \
+  /storage/Users/currentUser /tmp /data/storage/el2/base/files
+```
+
+This explicitly writes a private temporary subdirectory inside each existing
+argument, probes ASCII case lookup and hardlinks, then removes its own files.
+It does not create missing target directories, traverse entire trees, modify
+existing files, or run automatically while compiling a profile. Output is JSON,
+marked `enforcement: not-connected`. `denied` hardlinks are a valid observation;
+unknown/inconsistent results or incomplete cleanup cause a nonzero exit. Cleanup
+failure reports the remaining temporary path rather than pretending it vanished.
+
+Results are directory- and credential-specific. The application sandbox path
+names the current application's backing, not a universal shared location. ASCII
+case results do not establish Unicode folding/normalization rules, nor the
+behavior of nested mounts. Probe each chosen backing separately; no persistent
+capability cache or automatic policy decision is implemented.
+
+Current terminal observations: home is ASCII case-insensitive; /tmp and the
+application files directory are sensitive. Hardlinks are denied in all three.
+Choose sensitive persistent storage for Linux rootfs names; /tmp is temporary.
+Do not repair policy matching by lowercasing paths or emulate linkat with copies.
+The planner's `access_for` remains only a string model: case variants are not
+covered by a runtime permission guarantee. See [storage observations](../../docs/STORAGE_CAPABILITIES.md).
