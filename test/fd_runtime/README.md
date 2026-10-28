@@ -334,3 +334,10 @@ Explicit O_DIRECTORY allows trailing separators on a single directory component;
 symlink following remains unsupported. Both Alpine and Ubuntu pass shallow and
 nested tar extraction, with extracted contents verified on the host. This does
 not imply general multi-component openat2 support.
+
+`files.py` also verifies absolute-source, gzip, dot-source and symlink archives
+using host tarfile reads. Native hardlink fixture denial is an explicit SKIP.
+The restricted openat2 flags now also accept resolve=0 through the PRoot path
+backend; other resolve masks remain rejected rather than silently cleared.
+Fatal-syscall checks cover 14 calls, including mount/root/namespace operations
+and AArch64 kcmp(272); unshare is 97 on this ABI.

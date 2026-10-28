@@ -600,6 +600,13 @@ long syscall_handle_common(long sys_no, long args[6]) {
         /* Native isolated probes on this HarmonyOS sandbox terminate with
          * SIGSYS for these calls. Preserve passthrough on other platforms.
          * ENOSYS is explicit lack of support, not filesystem emulation. */
+        case __NR_mount:
+        case __NR_umount2:
+        case __NR_pivot_root:
+        case __NR_chroot:
+        case __NR_unshare:
+        case __NR_setns:
+        case __NR_kcmp:
         case SYS_fchmodat2:
         case __NR_close_range:
         case SYS_openat2:

@@ -695,3 +695,11 @@ Alpine 和 Ubuntu 的原归档以及新增 `a/sub/deep` 多层归档现在均解
 KNOWN LIMIT。归档多层目录可用不等于单次 openat2 多分量解析可用，后者仍拒绝。
 实际 SVC 测试覆盖目录 FD/AT_FDCWD 的尾部斜杠、重复斜杠、CLOEXEC/O_DIRECTORY
 保留，以及缺少 O_DIRECTORY、普通文件、`../`、中间分隔符、跨 bind、链接目录拒绝。
+
+### 无额外解析约束的 openat2 与打包回归
+
+FD 实验对相同受限 O_PATH flags 新增 resolve=0 分支，经 PRoot openat 解析支持
+绝对路径、多分量及 bind 视图；resolve=8 仍保持单分量 BENEATH 限制，其它 resolve
+位明确拒绝。直接 SVC 覆盖 resolve=0 FD/CLOEXEC 和相对多分量，并验证 resolve=16/9
+不会被忽略。Ubuntu 绝对源路径 tar 打包纳入回归，归档由宿主独立验证。
+公共 namespace/mount/kcmp SIGSYS 拒绝也已补齐，见 SYSCALL_ENGINE_LESSONS.md。

@@ -17,12 +17,15 @@ for key in values:
     if key.startswith('SYS_'):
         assert number(key) == number('__NR_'+key[4:]), key
 assert number('SYS_rt_sigaction') == 134
+assert number('__NR_unshare') == 97
+assert number('__NR_kcmp') == 272
 inventory = subprocess.check_output(['clang', '-E', '-P', '-I'+str(arch), '-'],
     input='#include "syscall_nums.h"\n#define SLOW_SYSCALL(n) selected(n)\n#include "slow_syscalls.inc"\n', text=True)
 selected = {int(n) for n in re.findall(r'selected\((\d+)\)', inventory)}
 for name in ('exit', 'exit_group', 'clone', 'rt_sigreturn', 'futex', 'getpid'):
     assert number('__NR_'+name) not in selected, name
-for name in ('openat', 'read', 'write', 'fchmodat', 'fchmodat2', 'io_uring_enter', 'openat2', 'inotify_add_watch', 'close_range'):
+for name in ('openat', 'read', 'write', 'fchmodat', 'fchmodat2', 'io_uring_enter', 'openat2', 'inotify_add_watch', 'close_range',
+             'unshare', 'mount', 'umount2', 'chroot', 'setns', 'pivot_root', 'kcmp'):
     assert number('__NR_'+name) in selected, name
 with tempfile.TemporaryDirectory() as temp:
     obj = Path(temp)/'entry.o'

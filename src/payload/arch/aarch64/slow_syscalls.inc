@@ -404,3 +404,7 @@ SLOW_SYSCALL(__NR_inotify_add_watch)
 #ifdef __NR_fchmodat2
 SLOW_SYSCALL(__NR_fchmodat2)
 #endif
+
+#ifdef __NR_kcmp
+SLOW_SYSCALL(__NR_kcmp)
+#endif

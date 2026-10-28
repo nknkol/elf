@@ -48,7 +48,12 @@ void _start(void)
     CHECK(beneath(dir,"../fd-data",flags,8)==-EOPNOTSUPP);
     CHECK(beneath(dir,"./fd-data",flags,8)==-EOPNOTSUPP);
     CHECK(beneath(dir,"",flags,8)==-ENOENT);
-    CHECK(beneath(dir,"fd-data",flags,0)==-EOPNOTSUPP);
+    fd=beneath(dir,"fd-data",flags,0);CHECK(fd>=0 && query(3,fd)==1);
+    CHECK(call(__NR_close,fd,0,0,0)==0);
+    fd=beneath(dir,"./fd-data",O_PATH|O_NOFOLLOW,0);CHECK(fd>=0 && query(3,fd)==0);
+    CHECK(call(__NR_close,fd,0,0,0)==0);
+    CHECK(beneath(dir,"fd-data",flags,16)==-EOPNOTSUPP);
+    CHECK(beneath(dir,"fd-data",flags,9)==-EOPNOTSUPP);
     CHECK(beneath(dir,"fd-data",O_PATH,8)==-EOPNOTSUPP);
     CHECK(beneath(dir,"fd-data",O_RDONLY,8)==-EOPNOTSUPP);
     CHECK(beneath(dir,"fd-data",flags|O_DIRECTORY,8)==-ENOTDIR);

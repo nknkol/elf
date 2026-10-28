@@ -3,6 +3,9 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import tarfile
+import os
+import errno
 
 build = Path(__file__).resolve().parents[2] / 'vendor/proot/svc/build'
 loader = build / 'elfloader-proot-fd-experiment'
@@ -50,3 +53,34 @@ for directory, shell, prefix in (
         assert (p.returncode, p.stdout) == (0, 'nested'), (p.returncode, p.stdout, p.stderr)
         assert (Path(temp) / 'deep-extracted/a/sub/deep').read_text() == 'nested'
         print('PASS: file workflow', directory, 'tar-extract-nested')
+
+        # Inspect archive bytes on the host, independently of guest tar listing.
+        for name, command, member in (
+                ('absolute', 'tar -cf /work/absolute.tar /work/a', 'work/a/file'),
+                ('gzip', 'tar -czf /work/gzip.tar -C /work a', 'a/file'),
+                ('dot', 'tar -cf /work/dot.tar -C /work/a .', './file'),
+                ('links', 'ln -s file /work/a/sym; '
+                 'tar -cf /work/links.tar -C /work a', 'a/file')):
+            p = run(command)
+            assert p.returncode == 0, (directory, name, p.returncode, p.stdout, p.stderr)
+            with tarfile.open(Path(temp) / (name + '.tar'), 'r:*') as archive:
+                assert archive.extractfile(member).read() == b'payload'
+                if name == 'links':
+                    assert archive.getmember('a/sym').issym()
+                    assert archive.getmember('a/sym').linkname == 'file'
+            print('PASS: file workflow', directory, 'tar-pack-' + name)
+        # Hardlink creation is denied by this host filesystem even natively.
+        # Do not disguise that restriction as a successful guest link test.
+        try:
+            os.link(Path(temp) / 'a/file', Path(temp) / 'a/hard')
+        except OSError as error:
+            if error.errno not in (errno.EPERM, errno.EACCES, errno.EOPNOTSUPP):
+                raise
+            print('SKIP: tar hardlink fixture denied natively', directory, error.errno)
+        else:
+            p = run('tar -cf /work/hardlinks.tar -C /work a')
+            assert p.returncode == 0, (directory, p.returncode, p.stdout, p.stderr)
+            with tarfile.open(Path(temp) / 'hardlinks.tar') as archive:
+                assert archive.extractfile('a/hard').read() == b'payload'
+                assert any(archive.getmember(n).islnk() for n in ('a/file', 'a/hard'))
+            print('PASS: file workflow', directory, 'tar-pack-hardlinks')

@@ -147,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
     p = subprocess.run([str(loader), '--mode', 'compat', '--', str(guards), 'b'],
                        capture_output=True, text=True, timeout=20)
     assert p.returncode == 0 and 'NR=452\nRET=-38\n' in p.stdout, (p.returncode, p.stdout, p.stderr)
-    assert p.stdout.count('RET=-38\n') == 7, p.stdout
+    assert p.stdout.count('RET=-38\n') == 14, p.stdout
     print('PASS: experimental fatal syscall guards including fchmodat2')
 
     bad_probe = work / 'restore-error'

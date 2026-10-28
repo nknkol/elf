@@ -219,17 +219,17 @@ long fd_experiment_dispatch(long n,long a[6])
      * Native success is not available in this sandbox, so keep it unsupported. */
     if(n==__NR_ioctl && (unsigned)a[1]==TIOCGPTPEER)return -ENOSYS;
     if(n==__NR_close) { int bookkeeping;return fd_close_execute(&s->queue,&s->registry,&s->guard,s->owner,(int)a[0],&bookkeeping); }
-    unsigned long beneath_flags=0;
+    unsigned long openat2_flags=0,openat2_resolve=0;
     if(n==__NR_openat2) {
         /* Snapshot before use. Only the published 24-byte ABI and this narrow
          * flag combination are supported; never silently discard resolve. */
         if(a[3]!=24)return -ENOSYS;
         if(!a[2])return -EFAULT;
         uint64_t how[3];memcpy(how,(void *)a[2],sizeof(how));
-        if(how[2]!=8 || how[1] ||
+        if((how[2]!=0 && how[2]!=8) || how[1] ||
            (how[0] & ~(uint64_t)(O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)) ||
            (how[0] & (O_PATH|O_NOFOLLOW))!=(O_PATH|O_NOFOLLOW))return -EOPNOTSUPP;
-        beneath_flags=how[0];
+        openat2_flags=how[0];openat2_resolve=how[2];
     }
     int duplicate=n==__NR_dup || n==__NR_dup3 ||
         (n==__NR_fcntl && (a[1]==F_DUPFD || a[1]==F_DUPFD_CLOEXEC));
@@ -260,7 +260,18 @@ long fd_experiment_dispatch(long n,long a[6])
         for(size_t i=0;i<t->capacity;i++)free_slots+=t->slots[i].fd<0;
         if(free_slots<2)return -ENOSPC;
     }
-    long result=n==__NR_openat2?proot_open_beneath((int)a[0],(const char *)a[1],beneath_flags):syscall_handle_common(n,a);
+    long result;
+    if(n==__NR_openat2) {
+        if(openat2_resolve==8)
+            result=proot_open_beneath((int)a[0],(const char *)a[1],openat2_flags);
+        else {
+            /* resolve=0 adds no traversal constraints. Validated O_PATH flags
+             * can use the existing guest path backend, including absolute
+             * paths and bindings; never send the guest spelling to the host. */
+            long open_args[6]={a[0],a[1],openat2_flags,0,0,0};
+            result=syscall_handle_common(__NR_openat,open_args);
+        }
+    } else result=syscall_handle_common(n,a);
     if(result<0)return result;
     if(pair) {
         /* Read only after kernel success. This relies on the experimental
@@ -273,7 +284,7 @@ long fd_experiment_dispatch(long n,long a[6])
     }
     else if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
-        int cloexec=n==__NR_openat2?!!(beneath_flags&O_CLOEXEC):(n==__NR_pidfd_open || n==__NR_pidfd_getfd)?1:n==__NR_accept?0:(n==__NR_accept4 || n==__NR_signalfd4)?!!(a[3]&O_CLOEXEC):
+        int cloexec=n==__NR_openat2?!!(openat2_flags&O_CLOEXEC):(n==__NR_pidfd_open || n==__NR_pidfd_getfd)?1:n==__NR_accept?0:(n==__NR_accept4 || n==__NR_signalfd4)?!!(a[3]&O_CLOEXEC):
             n==__NR_memfd_create?!!(a[1]&1):
             (n==__NR_epoll_create1 || n==__NR_inotify_init1)?!!(a[0]&O_CLOEXEC):
             (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);

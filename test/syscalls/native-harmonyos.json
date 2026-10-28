@@ -1574,6 +1574,118 @@
       "status": "returned",
       "return_value": -1,
       "errno": 22
+    },
+    {
+      "name": "unshare",
+      "number": 97,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "mount",
+      "number": 40,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "chroot",
+      "number": 51,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "setns",
+      "number": 268,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "pivot_root",
+      "number": 41,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "umount2",
+      "number": 39,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
+    },
+    {
+      "name": "kcmp",
+      "number": 272,
+      "arguments": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "recipe": "isolated-zero-arguments-2026-10-28",
+      "exit_code": -31,
+      "status": "signal",
+      "signal": "SIGSYS"
     }
   ]
 }

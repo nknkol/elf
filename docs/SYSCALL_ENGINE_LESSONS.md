@@ -450,3 +450,29 @@ ENOSYS；其他平台保持现有 passthrough 行为。此变更不模拟带 fla
 异常退出变为明确退出 2 并报告 ENOSYS；不能声称 extraction 已可用，也不能丢弃
 resolve 标志直接降级 openat。Alpine tar extraction 正常，两个 rootfs 的 ls、cp/mv、
 readlink、find、tar create/list 也正常。新增工作流回归区分 PASS 与 KNOWN LIMIT。
+
+### 2026-10-28：进入慢路径不等于避免原生 SIGSYS
+
+用户报告 namespace/root/mount 调用仍杀进程。复查发现 mount、umount2、pivot_root、
+chroot、unshare、setns 早已在共享慢路径表内，但公共处理器 default 又透传给了内核。
+FD 实验只有 unshare 单独拒绝。独立 Python 子进程以六个零参数重测：97、40、51、
+268、41、39、272 均退出 -31，原始结果补入 native-harmonyos.json。AArch64 unshare
+是 97，272 是 kcmp，不能混用其他架构编号；kcmp 本轮也加入慢路径。
+
+公共 HarmonyOS guard 对上述 7 个调用返回 ENOSYS，非 HarmonyOS 保留原行为。
+两种 loader 的实际 SVC 回归从 7 项扩展到 14 项；路由测试另外固定 ABI 编号。
+没有实现 namespace/chroot/mount，也不返回假成功。扫描清单应同时检查路由和最终
+处理分支，不能只统计 slow_syscalls.inc 中的覆盖率。其余未扫描参数/调用不因此获保。
+
+### 2026-10-28：GNU tar 绝对路径打包使用 resolve=0
+
+实测 Ubuntu `tar -cf /work/abs.tar /work/a` 失败，`-C /work a`、`.`、gzip 成功。
+临时跟踪确认 openat2 路径为 `/work/`，flags=0x28c000、mode=0、resolve=0；并非
+BENEATH。FD 实验允许经过原有严格 O_PATH|O_NOFOLLOW flags 校验的 resolve=0，
+转交现有 PRoot openat 路径后端，保留 guest root/bind 映射与 FD/CLOEXEC 登记。
+不把任意 resolve 位清零，不放宽 BENEATH 分支，不调用宿主原生 openat2。
+
+新增两套 rootfs 的绝对路径、gzip、`.`、符号链接打包，宿主 Python tarfile 独立
+读取内容及链接元数据。硬链接 fixture 在本机 workspace 原生 EPERM、cache EACCES，
+该项明确 SKIP，不假报通过；支持硬链接的宿主才执行其归档校验。当前 Alpine 缺 xz，
+Ubuntu 缺 xz/bzip2；相关压缩命令的“程序不存在”与本次路径语义缺陷独立。
