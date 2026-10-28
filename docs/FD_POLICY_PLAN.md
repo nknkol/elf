@@ -633,3 +633,20 @@ FD generation 并继续 fork；监督进程作为 subreaper 接收最后完成�
 返回 EIO，原有 observer 中死亡、并发回收、finalizer 保留测试继续通过。
 这消除的是占槽前可完成的身份查询窗口；占槽之后的初始化、before 回调中途死亡、
 未知 child、reaper pin 和 finalizer 遗留仍需不同的生命周期协议，不能推断可回收。
+
+### 区分已发布 BEFORE 阶段，回收回调中死亡的通知槽
+
+父身份和返回上下文写好后，原子发布 ACTIVE|BEFORE，再调用 observer。该阶段
+能证明 prepare 尚未返回、内核 clone 尚未执行。reaper 固定住槽后仅在 tgkill
+确认 ESRCH 且 CAS 再次确认 BEFORE 未变时，标记父完成及“无子”并回收通知槽。
+此时 cookie 尚未移交，不能调用完整 cleanup；observer 自己负责未移交资源。
+回调返回结果原子发布后才转交 cookie，拒绝分支也通过正常 reader-pin/finalizer
+流程保证 cleanup 一次执行，不在有 reader 时直接清空槽。
+
+竞态测试让 reaper 先读到 BEFORE，再在死亡查询期间推进回调返回并让调用方退出；
+它必须保留未知子状态，下一轮最多完成父角色，不能按旧阶段误判无子。
+另测试活回调不可回收、EPERM 不表示死亡，以及 cookie 分配前后各 67 次退出。
+通知槽恢复全部容量；分配后的 partial cookie 由测试中的 observer 责任方显式释放，
+验证 core 从未误调用 cleanup。原并发回收、回调死亡、拒绝和 finalizer 保留测试通过。
+仍保留占槽到 BEFORE 发布之间的 INIT 窗口，以及未知子、遗留 pin/finalizer 的限制。
+这不是通用资源回收；BEFORE 前后的未移交资源仍可能需要 observer 专属清理。

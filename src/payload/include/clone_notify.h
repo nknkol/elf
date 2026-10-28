@@ -16,13 +16,15 @@ struct clone_event {
  * A child may notify first. No libc/TLS dependencies or locks spanning clone.
  * Event storage survives fork and is valid only within these callbacks.
  * before may set cookie only; flags and parent identity remain immutable.
- * Once before returns (including rejection), cookie ownership passes to the
- * transaction until cleanup. finish must not free it. Partial allocation before
- * a nonlocal exit from before remains the observer's responsibility. */
+ * Once the returned before result is atomically published (including rejection),
+ * cookie ownership passes to the transaction until cleanup. finish must not
+ * free it. Before publication, partial resources remain observer-owned even
+ * if death interrupts the interval immediately after the callback returns. */
 int clone_observer_before(struct clone_event *event);
 void clone_observer_finish(const struct clone_event *event, long result);
-/* Exactly one invocation after both roles and all readers complete, or after
- * before rejects. reasons is a CLONE_CLEANUP_* mask (zero for normal completion
+/* For a published before result, exactly one invocation after both roles and
+ * all readers complete, including rejection (possibly deferred by reader pins).
+ * reasons is a CLONE_CLEANUP_* mask (zero for normal completion
  * and kernel failure). Reaper cleanup may run in any inheriting task/VM. A cookie
  * dereferenced by cleanup must reference inherited shared storage or a stable
  * arena handle, never private or post-fork-only mappings. Parent-only cookies
@@ -35,11 +37,12 @@ void clone_observer_finish(const struct clone_event *event, long result);
 void clone_observer_cleanup(const struct clone_event *event, unsigned reasons);
 /* Reclaim missing returns only when kernel tgkill(..., 0) confirms ESRCH.
  * Returns number of abandoned parent/child roles completed. Unknown child
- * identity, interrupted initialization and abandoned reaper pins cannot yet
- * be reclaimed. Pool exhaustion returns EAGAIN, never untracked passthrough. */
+ * identity, unpublished INIT and abandoned reaper pins cannot yet be reclaimed.
+ * Published BEFORE with a dead parent reclaims only the slot: no kernel child
+ * exists and no cookie ownership transferred, so cleanup is not invoked. Pool exhaustion returns EAGAIN, never untracked passthrough. */
 unsigned clone_notify_reap(void);
 /* Resolve/validate parent identity before pool allocation or reservation. Death
- * after reservation and inside before remains an unreclaimable INIT boundary. */
+ * before BEFORE publication remains an unreclaimable INIT boundary. */
 long clone_notify_prepare(unsigned long saved_x9, unsigned long continuation,
                           unsigned long flags);
 /* AAPCS64 returns the two words in x0/x1. */

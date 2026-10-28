@@ -9,11 +9,14 @@ extern long raw_syscall(long, long, long, long, long, long, long);
 
 /* A pin prevents reuse while a reaper inspects immutable fields. Completing
  * either task is lock-free; no lock may strand a live task behind a dead reaper.
- * INIT is unpublished and cannot be reclaimed without knowing its full state. */
+ * INIT is unpublished and cannot be reclaimed without knowing its full state.
+ * BEFORE publishes immutable identity but leaves the cookie observer-owned;
+ * no kernel clone can run until that phase is cleared by result publication. */
 #define PARENT_DONE CLONE_CLEANUP_PARENT_ABANDONED
 #define CHILD_DONE CLONE_CLEANUP_CHILD_ABANDONED
 #define ACTIVE 4u
-#define PIN 8u
+#define BEFORE 8u
+#define PIN 16u
 #define INIT 1u
 #define FINALIZING 2u
 struct clone_transaction {
@@ -79,15 +82,18 @@ static unsigned release(struct clone_transaction *t, unsigned done, unsigned dro
     uint64_t old = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
     for (;;) {
         uint64_t next = (old | done) - drop_pin;
-        if (next == (ACTIVE | PARENT_DONE | CHILD_DONE)) next = FINALIZING;
+        if ((next & ~BEFORE) == (ACTIVE | PARENT_DONE | CHILD_DONE)) next = FINALIZING;
         unsigned added = done & ~(unsigned)old;
         if (__atomic_compare_exchange_n(&t->state, &old, next, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             if (next == FINALIZING) {
                 /* Exclusive finalizer: no task role or reaper can still use
                  * the event, and reserve cannot reuse it until cleanup returns. */
-                clone_observer_cleanup(&t->event,
-                    __atomic_load_n(&t->abandoned, __ATOMIC_ACQUIRE));
+                /* BEFORE never transferred cookie ownership. Its partial
+                 * resources belong to the observer, not this finalizer. */
+                if (!(old & BEFORE))
+                    clone_observer_cleanup(&t->event,
+                        __atomic_load_n(&t->abandoned, __ATOMIC_ACQUIRE));
                 __atomic_store_n(&t->state, 0, __ATOMIC_RELEASE);
             }
             return added;
@@ -103,6 +109,29 @@ static int gone(long pid, long tid)
         raw_syscall(__NR_tgkill, pid, tid, 0, 0, 0, 0) == -ESRCH;
 }
 
+/* Our pin keeps the incarnation stable. Recheck BEFORE in the CAS: a stale
+ * phase read plus a later ESRCH must not classify a post-clone death as pre-clone. */
+static unsigned abandon_before(struct clone_transaction *t)
+{
+    uint64_t old=__atomic_load_n(&t->state,__ATOMIC_ACQUIRE);
+    while(old & BEFORE) {
+        uint64_t next=old|PARENT_DONE|CHILD_DONE;
+        if(__atomic_compare_exchange_n(&t->state,&old,next,0,
+                                      __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
+            return !(old & PARENT_DONE);
+    }
+    return 0;
+}
+static void publish_before_result(struct clone_transaction *t,int rejected)
+{
+    uint64_t old=__atomic_load_n(&t->state,__ATOMIC_ACQUIRE);
+    for(;;) {
+        uint64_t next=(old & ~BEFORE)|(rejected?CHILD_DONE:0);
+        if(__atomic_compare_exchange_n(&t->state,&old,next,0,
+                                      __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return;
+    }
+}
+
 unsigned clone_notify_reap(void)
 {
     struct clone_pool *p = __atomic_load_n(&pool, __ATOMIC_ACQUIRE);
@@ -112,6 +141,14 @@ unsigned clone_notify_reap(void)
         struct clone_transaction *t = &p->slots[i];
         if (!pin(t)) continue;
         uint64_t state = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+        if (state & BEFORE) {
+            if (gone(t->event.parent_pid,t->event.parent_tid))
+                reaped += abandon_before(t);
+            /* If publication raced the probe, leave the normal phase for a
+             * fresh pass; never reuse a pre-clone liveness decision there. */
+            release(t,0,PIN);
+            continue;
+        }
         unsigned done = 0;
         if (!(state & PARENT_DONE) && gone(t->event.parent_pid, t->event.parent_tid))
             done |= PARENT_DONE;
@@ -157,13 +194,15 @@ long clone_notify_prepare(unsigned long saved_x9, unsigned long continuation,
     t->event.cookie = 0;
     __atomic_store_n(&t->abandoned, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&t->child_tid, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&t->state,ACTIVE|BEFORE,__ATOMIC_RELEASE);
     int rc = clone_observer_before(&t->event);
     if (rc) {
-        clone_observer_cleanup(&t->event, CLONE_CLEANUP_REJECTED);
-        __atomic_store_n(&t->state, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&t->abandoned,CLONE_CLEANUP_REJECTED,__ATOMIC_RELAXED);
+        publish_before_result(t,1);
+        release(t,PARENT_DONE,0);
         return rc < 0 ? rc : -EINVAL;
     }
-    __atomic_store_n(&t->state, ACTIVE, __ATOMIC_RELEASE);
+    publish_before_result(t,0);
     return (long)t;
 }
 

@@ -19,9 +19,24 @@ static struct stats *stats;
 static int reject, fail_mapping, nested_init, probe_error, abort_child, pause_child, abort_parent;
 static long pid, wait_for_child, unpublished_tid;
 static long identity_exit, identity_fail, identity_result;
+static int before_exit;
+static long before_tid;
+static int before_pause, before_ready, before_release, probe_advance;
+static pthread_t phase_thread;
+static void *phase_transaction;
 static int cleanup_pause, cleanup_entered, cleanup_proceed, cleanup_exit, cleanup_nested;
 long raw_syscall(long n,long a,long b,long c,long d,long e,long f)
 {
+    if(n==SYS_tgkill && probe_advance) {
+        probe_advance=0;
+        __atomic_store_n(&before_release,1,__ATOMIC_RELEASE);
+        assert(pthread_join(phase_thread,&phase_transaction)==0);
+        for(unsigned i=0;i<10000;i++) {
+            if(syscall(SYS_tgkill,a,b,0)==-1 && errno==ESRCH)return -ESRCH;
+            usleep(100);
+        }
+        assert(0);
+    }
     if(n==identity_exit)pthread_exit((void *)1);
     if(n==identity_fail)return identity_result;
     if(n==SYS_mmap && fail_mapping){fail_mapping=0;return -ENOMEM;}
@@ -46,6 +61,7 @@ int clone_observer_before(struct clone_event *event)
 {
     assert(event->parent_pid==pid && event->parent_tid==syscall(SYS_gettid));
     event->cookie=NULL;
+    if(before_exit==1)pthread_exit(NULL);
     for(unsigned i=0;i<128;i++) {
         int empty=0;
         if(__atomic_compare_exchange_n(&stats->resources[i].live,&empty,1,0,
@@ -55,6 +71,11 @@ int clone_observer_before(struct clone_event *event)
     }
     assert(event->cookie);
     __atomic_add_fetch(&stats->before,1,__ATOMIC_RELAXED);
+    if(before_exit==2)pthread_exit(NULL);
+    if(before_pause) {
+        __atomic_store_n(&before_ready,1,__ATOMIC_RELEASE);
+        while(!__atomic_load_n(&before_release,__ATOMIC_ACQUIRE))syscall(SYS_sched_yield);
+    }
     clobber();return reject?-EACCES:0;
 }
 void clone_observer_finish(const struct clone_event *event,long result)
@@ -215,12 +236,82 @@ static void identity_checks(void)
     assert(stats->before==stats->cleaned && stats->maps==1);
     puts("PASS: identity-query death/errors reserve no clone slots; full capacity remains");
 }
+static void *before_worker(void *unused)
+{
+    (void)unused;before_tid=syscall(SYS_gettid);
+    clone_notify_prepare(0,0,SIGCHLD);assert(0);return NULL;
+}
+static void *phase_worker(void *unused)
+{
+    (void)unused;
+    long t=clone_notify_prepare(7,8,SIGCHLD);assert(t>0);
+    return (void *)t; /* Prepare returned, kernel outcome remains unknown. */
+}
+static void phase_race_checks(void)
+{
+    before_pause=1;
+    assert(pthread_create(&phase_thread,NULL,phase_worker,NULL)==0);
+    while(!__atomic_load_n(&before_ready,__ATOMIC_ACQUIRE))syscall(SYS_sched_yield);
+    assert(clone_notify_reap()==0); /* A live before callback keeps its slot. */
+    probe_advance=1;
+    assert(clone_notify_reap()==0); /* Stale BEFORE read must not prove no child. */
+    before_pause=0;
+    assert(stats->cleaned==0 && phase_transaction);
+    assert(clone_notify_reap()==1 && clone_notify_reap()==0);
+    assert(stats->cleaned==0); /* Unknown child still prevents reclamation. */
+    clone_notify_finish(phase_transaction,-EINVAL); /* Test knows no clone ran. */
+    assert(stats->cleaned==1);
+    capacity_check();
+    puts("PASS: live before callback and phase-publication race retain unknown child");
+}
+static void await_before_death(void)
+{
+    for(unsigned retry=0;retry<10000;retry++) {
+        if(syscall(SYS_tgkill,pid,before_tid,0)==-1 && errno==ESRCH)break;
+        usleep(100);
+    }
+    assert(syscall(SYS_tgkill,pid,before_tid,0)==-1 && errno==ESRCH);
+}
+static void before_checks(void)
+{
+    for(int stage=1;stage<=2;stage++) {
+        before_exit=stage;
+        for(unsigned i=0;i<CLONE_NOTIFY_CAPACITY+3;i++) {
+            pthread_t worker;
+            assert(pthread_create(&worker,NULL,before_worker,NULL)==0);
+            assert(pthread_join(worker,NULL)==0);
+            await_before_death();
+            probe_error=EPERM;assert(clone_notify_reap()==0);probe_error=0;
+            assert(clone_notify_reap()==1 && clone_notify_reap()==0);
+            assert(stats->cleaned==0); /* Partial cookies never enter cleanup. */
+            unsigned partial=0;
+            for(unsigned j=0;j<128;j++)
+                partial+=__atomic_exchange_n(&stats->resources[j].live,0,__ATOMIC_ACQ_REL);
+            assert(partial==(unsigned)(stage==2)); /* Observer-owned repair. */
+        }
+    }
+    /* No explicit reaping until capacity pressure triggers prepare's sweep. */
+    before_exit=1;
+    for(unsigned i=0;i<CLONE_NOTIFY_CAPACITY+3;i++) {
+        pthread_t worker;
+        assert(pthread_create(&worker,NULL,before_worker,NULL)==0);
+        assert(pthread_join(worker,NULL)==0);await_before_death();
+    }
+    before_exit=0;
+    assert(clone_notify_reap()==3 && clone_notify_reap()==0 && stats->cleaned==0);
+    long abandoned=stats->before;
+    capacity_check();
+    assert(stats->before==stats->cleaned+abandoned && stats->maps==1);
+    puts("PASS: before-callback death reclaims slots without claiming partial cookies");
+}
 int main(int argc,char **argv)
 {
     stats=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(stats!=MAP_FAILED);pid=getpid();
     void *stack=mmap(NULL,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     assert(stack!=MAP_FAILED);
+    if(argc>1 && !strcmp(argv[1],"--phase-race")) { phase_race_checks();return 0; }
+    if(argc>1 && !strcmp(argv[1],"--before-exit")) { before_checks();return 0; }
     if(argc>1 && !strcmp(argv[1],"--identity-exit")) { identity_checks();return 0; }
     if(argc>1 && (!strcmp(argv[1],"--cleanup-exit") || !strcmp(argv[1],"--cleanup-pause"))) {
         cleanup_checks(!strcmp(argv[1],"--cleanup-exit"));return 0;
