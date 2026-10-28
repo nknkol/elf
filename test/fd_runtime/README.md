@@ -316,3 +316,12 @@ checks the final child's completion and reaps all 81 processes. This exercises
 parent exit after normal clone return; it does not force death inside the clone
 callback or prove recovery of unknown-child/INIT/finalizer-abandoned transactions.
 Those conservative notification limits and non-guard resource cleanup remain.
+
+`files.py` exercises optional Alpine/Ubuntu rootfs ls, copy/rename, symlink
+readback/canonicalization, find, tar creation and listing, plus Alpine tar
+extraction (13 passing workflows). Ubuntu GNU tar extraction requests openat2
+RESOLVE_BENEATH and is reported as KNOWN LIMIT with exit 2/ENOSYS. Its request is
+not silently downgraded to openat. A separate runtime probe checks the new
+fchmodat2(452) fatal-syscall guard: old host headers omitted it, while guest glibc
+emits it for flagged fchmodat. HarmonyOS now returns ENOSYS instead of allowing
+SIGSYS. This is an unsupported-call fallback, not fchmodat2 emulation.

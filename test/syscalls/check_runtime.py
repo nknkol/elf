@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='dispatch-runtime-', dir=build) as temp:
             (build/'dispatch-runtime.json').write_text(json.dumps(results,indent=2))
             assert p.returncode == 0, results[-1]
             for item in expected: assert item+'\n' in p.stdout, results[-1]
-            if mode == 'b': assert p.stdout.count('RET=-38\n') == 6, results[-1]
+            if mode == 'b': assert p.stdout.count('RET=-38\n') == 7 and 'NR=452\nRET=-38\n' in p.stdout, results[-1]
             print('PASS:',backend,mode)
 
 with tempfile.TemporaryDirectory(prefix='range-runtime-', dir=build) as temp:

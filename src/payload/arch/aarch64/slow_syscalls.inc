@@ -400,3 +400,7 @@ SLOW_SYSCALL(__NR_pidfd_getfd)
 #ifdef __NR_inotify_add_watch
 SLOW_SYSCALL(__NR_inotify_add_watch)
 #endif
+
+#ifdef __NR_fchmodat2
+SLOW_SYSCALL(__NR_fchmodat2)
+#endif

@@ -1,8 +1,15 @@
 #ifndef SYSCALL_NUMS_H
 #define SYSCALL_NUMS_H
 
-/* Target headers are the authority for AArch64 ABI numbers (also in .S). */
+/* Prefer target AArch64 ABI headers (also in .S); explicitly supplement guest
+ * calls missing from older host headers below. */
 #include <asm/unistd.h>
+/* Older host headers omit this AArch64 entry. Ubuntu guest libc's fchmodat
+ * wrapper emits syscall 452 when flags are present. Keep it interceptable. */
+#ifndef __NR_fchmodat2
+#define __NR_fchmodat2 452
+#endif
+#define SYS_fchmodat2 __NR_fchmodat2
 #define SYS_getcwd           __NR_getcwd
 #define SYS_mknodat          __NR_mknodat
 #define SYS_mkdirat          __NR_mkdirat

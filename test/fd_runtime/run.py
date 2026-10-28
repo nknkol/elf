@@ -136,6 +136,16 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
         assert p.returncode == 0 and 'PASS: runtime FD' in p.stdout, (p.returncode,p.stdout,p.stderr)
         print(p.stdout, end='')
 
+    guards = work / 'syscall-guards'
+    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
+                    '-fno-builtin', '-fno-stack-protector',
+                    str(repo / 'test/syscalls/runtime_probe.c'), '-o', str(guards)], check=True)
+    p = subprocess.run([str(loader), '--mode', 'compat', '--', str(guards), 'b'],
+                       capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0 and 'NR=452\nRET=-38\n' in p.stdout, (p.returncode, p.stdout, p.stderr)
+    assert p.stdout.count('RET=-38\n') == 7, p.stdout
+    print('PASS: experimental fatal syscall guards including fchmodat2')
+
     bad_probe = work / 'restore-error'
     subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
                     '-fno-stack-protector', '-I' + str(repo / 'src/payload/include'),
@@ -206,3 +216,5 @@ for directory, shell, command, marker in [
     print('PASS: experimental runtime rootfs shell exec', directory)
 
 subprocess.run(['python3', str(repo / 'test/fd_runtime/shell.py')], check=True)
+
+subprocess.run(['python3', str(repo / 'test/fd_runtime/files.py')], check=True)

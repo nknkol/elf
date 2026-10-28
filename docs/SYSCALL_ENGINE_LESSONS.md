@@ -435,3 +435,18 @@ This does not implement close_range. Iterating the metadata table would omit
 inherited descriptors, and UNSHARE cannot be represented by merely deleting
 records. Any future emulation needs complete kernel-FD enumeration, concurrency
 and table ownership semantics, plus handling of loader-owned descriptors.
+
+### 2026-10-28：旧头文件漏掉 fchmodat2，GNU tar 触发 SIGSYS
+
+Ubuntu rootfs 的 libc fchmodat 反汇编确认 flags 非零时调用 AArch64 452，flags=0
+走旧 fchmodat(53)。宿主头文件没有 __NR_fchmodat2，原共享慢路径因此漏掉它。
+三个独立 Python 子进程调用 syscall(452,-1,"",0600,flags)，flags 分别 0、256、4096，
+均 returncode=-31（SIGSYS），不能因参数无效而假设会返回 EBADF/EINVAL。
+AArch64 syscall_nums.h 补条件定义 452，共享慢路径纳入 fchmodat2，HarmonyOS 返回
+ENOSYS；其他平台保持现有 passthrough 行为。此变更不模拟带 flags 的 chmod 语义。
+
+真实文件工作流显示 Ubuntu GNU tar extraction 调用 openat2，how.resolve=8
+（RESOLVE_BENEATH），这是独立的不支持项。修复 452 漏拦后，GNU tar 从 SIGSYS/
+异常退出变为明确退出 2 并报告 ENOSYS；不能声称 extraction 已可用，也不能丢弃
+resolve 标志直接降级 openat。Alpine tar extraction 正常，两个 rootfs 的 ls、cp/mv、
+readlink、find、tar create/list 也正常。新增工作流回归区分 PASS 与 KNOWN LIMIT。

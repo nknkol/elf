@@ -650,3 +650,15 @@ FD generation 并继续 fork；监督进程作为 subreaper 接收最后完成�
 验证 core 从未误调用 cleanup。原并发回收、回调死亡、拒绝和 finalizer 保留测试通过。
 仍保留占槽到 BEFORE 发布之间的 INIT 窗口，以及未知子、遗留 pin/finalizer 的限制。
 这不是通用资源回收；BEFORE 前后的未移交资源仍可能需要 observer 专属清理。
+
+### 实际文件工作流与 fchmodat2 漏拦修复
+
+转向 rootfs 实际操作检查：Alpine/Ubuntu 的 ls、cp/mv、readlink/-f、find、tar
+创建及列表均通过，Alpine 解包也通过，共 13 个成功场景。Ubuntu GNU tar 解包
+要求 openat2 RESOLVE_BENEATH，仍作为 KNOWN LIMIT，不能降低其目录边界要求。
+过程中还发现宿主旧头文件缺少 fchmodat2(452)，导致 Ubuntu libc 调用走快路径
+被系统 SIGSYS 杀死。原生三个 flags 组合独立探针均验证该行为，现补 AArch64
+条件编号和共享慢路径拦截，HarmonyOS 明确返回 ENOSYS。GNU tar 现在稳定返回
+错误 2，不再因该调用被杀；这不表示支持 fchmodat2 或 openat2。
+普通/实验运行时都验证 452 不会进入原生危险调用，工作流测试接入 FD 套件。
+后续兼容重点是有明确路径边界语义的 openat2 支持，不应继续扩展无条件降级。

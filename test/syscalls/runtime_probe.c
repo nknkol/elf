@@ -30,8 +30,8 @@ void run(long *sp) {
   long r=sc(134,10,(long)&act,0,8,0,0);text("ACTION=");num(r);
   if(!r){long pid=sc(172,0,0,0,0,0,0);sc(129,pid,10,0,0,0,0);text("SIGNAL=");num(delivered);}
  } else {
-  const long blocked[]={293,435,437,265,426,427};
-  for(int i=0;i<6;i++){text("NR=");num(blocked[i]);text("RET=");num(sc(blocked[i],0,0,0,0,0,0));}
+  const long blocked[]={293,435,437,265,426,427,452};
+  for(unsigned i=0;i<sizeof(blocked)/sizeof(blocked[0]);i++){text("NR=");num(blocked[i]);text("RET=");num(sc(blocked[i],0,0,0,0,0,0));}
  }
  done:sc(94,0,0,0,0,0,0);for(;;){}
 }
