@@ -15,8 +15,13 @@ fork/vfork 原生对照及 exec 降级通过。现有 PRoot 路径 handlers 也�
 没有修改 ELF 运行时，这两次增量未重复构建两套 ELF。
 2026-10-29 后续增量：新增独立 C 权限判定核心，按挂载编号处理 deny/ro/rw、
 未知来源拒绝、双路径修改与 EXDEV，并与真实 PRoot 挂载选择器联合测试通过。
-已纳入 `make check`，但尚未链接 payload 或接入 syscall，不能算运行时隔离完成。
+已纳入 `make check`；后续已链接 FD payload 的诊断入口，尚未执行文件权限检查。
 本次仅运行该核心测试、路径核心回归和 22 项 Python 测试，未重建 ELF。
+2026-10-29 配置传递增量：FD 实验版新增 `--observe-mount-access` 观察参数，
+root/bind 权限向量经 loader→payload→两次 exec 保留，非法配置拒绝，
+未指定时保持旧行为。实验 payload ABI 升至 4，普通 PRoot 仍为 3。
+真实 SVC 诊断与旧 ABI 拒绝测试、完整 FD 回归、普通版 `make check` 通过。
+此参数不限制实际读写，也不改变 FD 来源标签；传递未经身份认证，JSON 尚未接启动。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

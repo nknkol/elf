@@ -179,6 +179,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = "--exec-path";
     s->argv[pos++] = s->guest;
 #ifdef FD_EXPERIMENT
+    if (cfg->mount_access_observe[0]) {
+        s->argv[pos++] = "--observe-mount-access";
+        s->argv[pos++] = cfg->mount_access_observe;
+    }
     transport = fd_experiment_export();
     if (transport < 0) { ret = transport; goto done; }
     unsigned value = (unsigned)transport;

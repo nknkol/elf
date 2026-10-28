@@ -6,6 +6,7 @@
 #include <linux/sched.h>
 #include "reentry_guard.h"
 #include "fd_experiment.h"
+#include "fs_policy.h"
 #include "fd_handoff.h"
 #include "config.h"
 #include "fd_close_exec.h"
@@ -200,6 +201,22 @@ long fd_experiment_dispatch(long n,long a[6])
     int rc=start(s);if(rc)return rc;
     struct fd_table *t=fd_registry_table(&s->registry,s->owner);
     if(n==__NR_prctl && a[0]==PR_ELF_FD_QUERY) {
+        /* Diagnostic only: decision for a supplied mount ID, not an FD grant. */
+        if(a[1]==6) {
+            const char *v=g_payload_config.mount_access_observe;
+            if(!v[0])return -ENODATA;
+            enum fs_access access[CONFIG_MAX_BINDS+1];
+            size_t count=0;
+            for(;count<CONFIG_MAX_BINDS+1 && v[count];count++) {
+                if(v[count]!='d' && v[count]!='r' && v[count]!='w')return -EINVAL;
+                access[count]=v[count]=='d'?FS_DENY:v[count]=='r'?FS_READ_ONLY:FS_READ_WRITE;
+            }
+            if(v[count])return -EINVAL;
+            struct fs_policy policy={access,count};
+            int valid=fs_policy_validate(&policy,g_payload_config.bind_count);
+            if(valid)return valid;
+            return fs_policy_check(&policy,(size_t)a[2],true,(enum fs_operation)a[3]);
+        }
         if(a[1]==0) { long count=0;for(size_t i=0;i<t->capacity;i++)count+=t->slots[i].fd>=0;return count; }
         const struct fd_record *r=fd_table_get(t,(int)a[2]);if(!r)return -ENOENT;
         if(a[1]==1)return r->generation;

@@ -1412,6 +1412,19 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		}
 
 #ifdef FD_EXPERIMENT
+        if (z_strncmp(arg, "--observe-mount-access", 23) == 0) {
+            if (cfg->mount_access_observe[0]) z_errx(1, "duplicate mount access observation");
+            if (i + 1 >= argc) z_errx(1, "missing mount access observation");
+            const char *value = argv[++i];
+            size_t count = z_strlen(value);
+            if (!count || count > CONFIG_MAX_BINDS + 1)
+                z_errx(1, "invalid mount access observation length");
+            for (size_t j = 0; j < count; j++)
+                if (value[j] != 'd' && value[j] != 'r' && value[j] != 'w')
+                    z_errx(1, "invalid mount access observation value");
+            copy_cstr(cfg->mount_access_observe, sizeof(cfg->mount_access_observe), value);
+            continue;
+        }
         if (z_strncmp(arg, "--fd-state", 11) == 0) {
             if (i + 1 >= argc || !argv[i + 1][0]) z_errx(1, "missing fd state");
             unsigned value = 0;
@@ -1977,6 +1990,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
 			  &shell_mode, &child_proto);
 #ifdef FD_EXPERIMENT
+    if (bootstrap_cfg.mount_access_observe[0] &&
+        z_strlen(bootstrap_cfg.mount_access_observe) != (size_t)bootstrap_cfg.bind_count + 1)
+        z_errx(1, "mount access observation requires root plus every bind");
     if (bootstrap_cfg.fd_state >= 0 && !child_loader)
         z_errx(1, "fd state requires child loader");
 #endif

@@ -87,6 +87,8 @@ typedef struct payload_config {
 #ifdef PROOT_PATH
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
+    /* Diagnostic transport only: root then bind order, d/r/w; empty=legacy. */
+    char mount_access_observe[CONFIG_MAX_BINDS + 2];
 #endif
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];

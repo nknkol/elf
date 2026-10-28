@@ -95,9 +95,33 @@ Denied access returns EACCES; mutation on readonly returns EROFS. Rename/link
 require both operands writable and the same virtual mount, otherwise EXDEV.
 Nested and duplicate destination selection reuses the existing PRoot table.
 
-This core is not yet linked into the payload or called by syscall handlers.
+The FD experiment links this core for diagnostic decisions only; filesystem
+syscall handlers do not yet enforce it.
 No new sandbox CLI or runtime permission guarantee is introduced. Integration
 still needs policy transport across loader/exec, trusted mount observations,
 syscall-specific read/mutation classification (including open flags), complete
 FD write/mmap coverage, and safe pathname resolution. Directory visibility and
 ancestor traversal are separate from this mount-level decision.
+
+## Experimental policy transport (observation only)
+
+The FD build accepts `--observe-mount-access drw`: one character for root,
+followed by one per configured bind in insertion order (`d` deny, `r` readonly,
+`w` read/write). Length must match the final bind count plus one, up to nine
+characters; malformed, empty and duplicate options fail before guest startup.
+The ordinary build has no such option. Omission keeps legacy behavior.
+
+The vector is copied into payload configuration and forwarded on each chained
+exec. Diagnostic `prctl(PR_ELF_FD_QUERY, 6, mount_id, operation)` evaluates the
+standalone core (`operation=0` observe, `1` mutate); it returns ENODATA if no
+vector was supplied. This does not change open/write behavior or existing FD
+origin tags. It is an explicitly unauthenticated observation protocol, not a
+secure policy handoff: a guest can invoke the loader with different arguments.
+The JSON planner is still not connected to launch.
+
+The experimental payload ABI is now 4 (normal PRoot remains 3); older custom
+payload layouts are rejected. Build and test with `make check-fd-runtime`;
+its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
+successive execs with/without a vector, rejects invalid input, and verifies ABI
+mismatch rejection. Run it immediately after an experimental build because its
+custom-payload fixture uses the most recently built `src/payload/payload.bin`.

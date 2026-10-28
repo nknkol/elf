@@ -44,4 +44,5 @@ check-ubuntu:
 
 check-fd-runtime:
 	$(PYTHON) vendor/proot/svc/build_elf.py --fd-experiment
+	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fd_runtime/run.py
