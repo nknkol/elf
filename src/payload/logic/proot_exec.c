@@ -180,8 +180,8 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = s->guest;
 #ifdef FD_EXPERIMENT
     if (cfg->mount_access_observe[0]) {
-        s->argv[pos++] = cfg->guard_path_mutations ?
-            "--guard-path-mutations" : "--observe-mount-access";
+        s->argv[pos++] = cfg->guard_path_mutations == 2 ? "--guard-file-mutations" :
+            cfg->guard_path_mutations ? "--guard-path-mutations" : "--observe-mount-access";
         s->argv[pos++] = cfg->mount_access_observe;
     }
     transport = fd_experiment_export();

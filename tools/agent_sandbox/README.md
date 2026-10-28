@@ -96,7 +96,7 @@ require both operands writable and the same virtual mount, otherwise EXDEV.
 Nested and duplicate destination selection reuses the existing PRoot table.
 
 The FD experiment links this core for diagnostics and the opt-in path mutation
-guard described below. Descriptor IO permissions are not yet enforced.
+guard described below. Selected FD mutations can also be guarded in the file-mutation mode below.
 No new sandbox CLI or runtime permission guarantee is introduced. Integration
 still needs policy transport across loader/exec, trusted mount observations,
 syscall-specific read/mutation classification (including open flags), complete
@@ -119,7 +119,7 @@ origin tags. It is an explicitly unauthenticated observation protocol, not a
 secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
-The experimental payload ABI is now 5 (normal PRoot remains 3); older custom
+The experimental payload ABI is now 6 (normal PRoot remains 3); older custom
 payload layouts are rejected. Build and test with `make check-fd-runtime`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
@@ -156,3 +156,35 @@ writable success, both rename/link ends, symlink/nested mapping selection,
 cwd/dirfd origins and exec-import downgrade, then verifies host file contents,
 metadata and directory entries. It also proves observation and legacy modes
 still allow a write-access open. It is included in `make check-fd-runtime`.
+
+## Partial file mutation guard (path + FD)
+
+`--guard-file-mutations drw` includes the path guard and checks tracked FD
+origins against the same root/bind vector. It is mutually exclusive with the
+other two policy options and survives exec. Supported FD operations are write,
+writev, pwrite64, pwritev/pwritev2, ftruncate, fallocate, fchmod/fchown,
+fsetxattr/fremovexattr, utimensat with a null path, and fchownat with an empty
+path plus AT_EMPTY_PATH. Transfers check the output FD: sendfile/vmsplice arg0,
+tee arg1, copy_file_range/splice arg2. The kernel still performs all actual IO;
+the guard adds a bounded metadata lookup and permission decision without path
+resolution, allocation, or extra syscalls.
+
+Unknown origins return EACCES; readonly origins return EROFS. The guard runs
+before kernel validation, so these errors can precede EBADF or other native
+argument errors. Dup and private fork preserve known origins; exec imports
+still downgrade to unknown. A fresh absolute open can establish new provenance.
+FD access tags remain mapping observations; the permission vector is consulted
+separately on every guarded operation.
+
+There are no implicit stdio or pipe grants: inherited stdout/stderr, imported
+FDs and newly created pipes/sockets remain unknown. Consequently this mode is
+not yet suitable for a general shell/agent launch. The regression uses exit
+status and host-side file checks, including readonly content/metadata integrity,
+writable output, dup/fork/slot reuse and rejection of exec-imported FDs.
+
+This is still not a readonly sandbox: mmap/mprotect, arbitrary ioctl, async IO,
+unmigrated pathname handlers, read visibility, policy handoff authentication and
+path/alias races are outstanding. Existing mappings are not revoked. The
+observation and path-only modes retain their previous behavior. ABI 6 prevents
+an older custom payload from silently treating file protection as path-only.
+`test/fs_policy/fd_mutations.py` is included in `make check-fd-runtime`.

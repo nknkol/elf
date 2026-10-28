@@ -216,6 +216,39 @@ int fd_experiment_check_path_mutation(size_t mount, bool known)
     if(!g_payload_config.guard_path_mutations)return 0;
     return mount_decision(mount,known,FS_MUTATE);
 }
+/* File-content and metadata mutations only. No syscall, allocation or path
+ * lookup in this check. Kernel still owns the actual IO and access-mode checks.
+ * Unknown inherited/imported/non-file FDs have no implicit write grant. */
+static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, long a[6])
+{
+    if(g_payload_config.guard_path_mutations != 2)return 0;
+    int fd;
+    switch(n) {
+    case __NR_write: case __NR_writev: case __NR_pwrite64:
+    case __NR_pwritev: case __NR_pwritev2:
+    case __NR_ftruncate: case __NR_fallocate:
+    case __NR_fchmod: case __NR_fchown:
+    case __NR_fsetxattr: case __NR_fremovexattr:
+    case __NR_sendfile: case __NR_vmsplice:
+        fd=(int)a[0];break;
+    case __NR_tee:
+        fd=(int)a[1];break;
+    case __NR_copy_file_range: case __NR_splice:
+        fd=(int)a[2];break;
+    case __NR_utimensat:
+        if(a[1])return 0; /* Non-null paths use the PRoot guard. */
+        fd=(int)a[0];break;
+    case __NR_fchownat:
+        if(!a[1] || ((const char *)a[1])[0] || !(a[4]&AT_EMPTY_PATH))return 0;
+        fd=(int)a[0];break;
+    default:return 0;
+    }
+    if(fd==AT_FDCWD && (n==__NR_utimensat || n==__NR_fchownat))
+        return mount_decision(s->cwd.mount_id,s->cwd.known,FS_MUTATE);
+    const struct fd_record *r=fd_table_get(t,fd);
+    return mount_decision(r?r->origin.mount_id:0,
+                          r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
+}
 long fd_experiment_dispatch(long n,long a[6])
 {
     struct fd_runtime *s=current();
@@ -235,6 +268,7 @@ long fd_experiment_dispatch(long n,long a[6])
         if(a[1]==5)return r->origin.access;
         return -EINVAL;
     }
+    rc=check_fd_mutation(t,s,n,a);if(rc<0)return rc;
     if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
         struct proot_open_origin anchor=s->cwd,next={0,false};
         if(n==__NR_fchdir) {

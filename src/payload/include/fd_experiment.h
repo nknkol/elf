@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef ELF_FD_EXPERIMENT_H
 #define ELF_FD_EXPERIMENT_H
-/* Private fork/bounded vfork FD experiment with optional path mutation guard;
+/* Private fork/bounded vfork FD experiment with optional path/FD mutation guards;
  * NOT a complete filesystem isolation mode. */
 #include <stddef.h>
 #include <stdbool.h>

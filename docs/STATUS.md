@@ -29,6 +29,13 @@ root/bind 权限向量经 loader→payload→两次 exec 保留，非法配置�
 配置布局使实验 ABI 升至 5（普通版仍为 3）。传递/路径测试、完整 FD 回归和
 普通版 `make check` 通过。此开关不限制读取、FD 写入/mmap、FD 元数据或未迁移
 handler，不具备完整只读或默认拒绝隔离；路径竞争和未认证 exec 仍待解决。
+2026-10-29 FD 修改增量：`--guard-file-mutations` 包含路径保护，并检查 write/
+pwrite/向量写、truncate/fallocate、FD 元数据及数据转移的目标 FD。
+只读来源拒绝、可写来源原生 IO、dup/fork/槽位复用、exec 导入降为未知均已实测；
+未知 stdio/pipe 也拒绝写入，所以此模式尚不能用于通用 agent 启动。
+实验 ABI 升至 6，拒绝把新模式解释成只有路径保护的旧 payload。
+新增 FD 与既有路径/传递测试、完整 FD 回归及普通版 `make check` 通过。
+mmap/mprotect、任意 ioctl、异步 IO、读取可见性和可信执行交接仍未完成。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**
@@ -45,7 +52,7 @@ handler，不具备完整只读或默认拒绝隔离；路径竞争和未认证 
 | 同线程嵌套慢调用 | 保留重入透传 | 返回 EDEADLK；非拥有者任务拒绝 |
 | openat2 | HarmonyOS 返回 ENOSYS | 24 字节 how、O_PATH\|O_NOFOLLOW 子集；resolve=0 经 PRoot，BENEATH 仅单分量及受限尾斜杠 |
 | 已确认危险 syscall | 公共 guard 返回 ENOSYS | 同一公共 guard 加实验拒绝项 |
-| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径修改保护，FD 权限未执行 |
+| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径和部分 FD 修改保护，完整权限仍未实现 |
 | agent JSON 配置 | 只输出计划 | 同样未连接执行层 |
 
 `src/elfloader` 是最后一次构建的产物，不能用它的名称判断启用了哪种能力。
