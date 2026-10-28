@@ -281,7 +281,16 @@ long fd_experiment_dispatch(long n,long a[6])
      * Never generalize this to a multithreaded permission mode. */
     rc=fd_close_drain(&s->queue,&s->registry);if(rc<0)return rc;
     if(fd_close_pending(&s->queue,t,-1))return -EBUSY;
-    if(execute)return syscall_handle_common(n,a);
+    if(execute) {
+        struct proot_path_context context={.cwd=s->cwd,.fd={AT_FDCWD,AT_FDCWD}};
+        if(n==__NR_execveat && (int)a[0]!=AT_FDCWD) {
+            context.fd[0]=(int)a[0];
+            const struct fd_record *r=fd_table_get(t,context.fd[0]);
+            if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
+                context.directory[0]=(struct proot_open_origin){r->origin.mount_id,true};
+        }
+        return proot_execve_context(n,a,&context);
+    }
     if(receive)return n==__NR_recvmsg?fd_receive_message(t,a):fd_receive_messages(t,a);
     rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1,!setfd);if(rc)return rc;
     if(pair) {
@@ -300,7 +309,7 @@ long fd_experiment_dispatch(long n,long a[6])
     long result;
     if(n==__NR_openat2) {
         if(openat2_resolve==8)
-            result=proot_open_beneath((int)a[0],(const char *)a[1],openat2_flags);
+            result=proot_open_beneath((int)a[0],(const char *)a[1],openat2_flags,&anchor,&opened);
         else {
             /* resolve=0 adds no traversal constraints. Validated O_PATH flags
              * can use the existing guest path backend, including absolute

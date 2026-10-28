@@ -21,7 +21,8 @@ F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. Absolute guest openat and supported resolve=0 openat2 record the resolved mount
 ID and current writable configuration tag. Opens relative to a tracked directory FD now retain its mount view; cwd-relative
 opens use the cwd mount once established by chdir/fchdir. Unknown directory/cwd
-anchors, BENEATH opens and imports remain UNKNOWN; exec restore still downgrades origins to UNKNOWN. These
+anchors and imports remain UNKNOWN; supported BENEATH opens now preserve known
+anchor origins and refuse configured bind crossings; exec restore still downgrades origins to UNKNOWN. These
 observations are not trusted permission grants: no readonly/default-deny policy
 is enforced, and path races/full mount identity semantics remain unresolved.
 
@@ -368,7 +369,8 @@ exec preservation. Successful exec clears cwd provenance: physical cwd survives,
 but no guest alias or access tag is authenticated by the current handoff.
 The runtime owns cwd metadata per private task arena, copied for fork/vfork;
 no extra cwd FD or persistent path cache is introduced. The common PRoot path dispatcher now receives this context as described below;
-exec path preflight and restricted BENEATH still use separate adapters.
+exec path preflight and restricted BENEATH use the same observations via their
+separate adapters.
 
 `path_context.c` checks the shared path context for existing PRoot handlers.
 Same-host aliases with different nested bindings must stat/readlink/create/remove
@@ -378,3 +380,13 @@ return EXDEV. Relative truncate must change only the selected backing file.
 The host independently verifies surviving file contents and symlink targets.
 No permission policy or new xattr/ACL implementation is implied. Native hardlink
 creation is not required: the cross-mount link case must reject before the kernel.
+
+`exec_context.c` runs seven fork/exec cases against distinct ELF markers in the
+backing and nested bind: cwd-relative execve, directory-relative execveat, and
+relative shebang interpreters. Interpreter resolution uses cwd independently of
+the script's directory FD. The host asserts the exact marker sequence NSNSNSS,
+so executing a same-named file from the wrong alias cannot count as a pass.
+`path_context.c` additionally checks BENEATH rejects a nested bind through its
+known cwd/dirfd while the other alias opens its ordinary directory and retains
+mount metadata. This does not broaden the supported openat2 flags/path subset,
+authenticate exec handoff, or remove path replacement races.

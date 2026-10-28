@@ -3,14 +3,19 @@
 #define PROOT_BRIDGE_H
 #include <stddef.h>
 #include <stdbool.h>
+struct proot_path_context;
+struct proot_open_origin;
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
-                            char *guest, char *host, size_t capacity);
+                            char *guest, char *host, size_t capacity,
+                            const struct proot_path_context *context);
 size_t proot_bridge_scratch_size(void);
 size_t proot_exec_scratch_size(void);
 long proot_get_auxv(long args[6]);
 long proot_execve(long number, long args[6]);
+long proot_execve_context(long number, long args[6], const struct proot_path_context *context);
 /* Restricted single-component, non-following O_PATH open beneath a dirfd. */
-long proot_open_beneath(int dirfd, const char *path, unsigned long flags);
+long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
+                       const struct proot_open_origin *anchor, struct proot_open_origin *origin);
 /* Resolution observation, not an authorization grant. Known dirfd origins
  * and established cwd select the reverse mapping; unknown/imported anchors
  * stay unknown. Exec does not authenticate or restore cwd provenance. */

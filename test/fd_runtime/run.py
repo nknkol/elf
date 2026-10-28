@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
     os.mkfifo(fifo, 0o600)
     (work / 'vfork-fifo').symlink_to(fifo)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'cwd', 'path_context', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'cwd', 'path_context', 'exec_context', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -156,6 +156,18 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             command = [str(loader), '--mode', 'container', '--root', str(work),
                        '-v', f'{source}:/one', '-v', f'{source}:/two',
                        '-v', f'{overlay}:/one/nested', '--', './path_context']
+        if name == 'exec_context':
+            source = work / 'exec-context-source'; source.mkdir(); (source / 'nested').mkdir()
+            overlay = work / 'exec-context-overlay'; overlay.mkdir()
+            for destination, marker in ((source / 'nested/program', 83), (overlay / 'program', 78)):
+                subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
+                                '-fno-builtin', '-fno-stack-protector', f'-DMARK={marker}',
+                                str(repo / 'test/fd_runtime/exec_marker.c'), '-o', str(destination)], check=True)
+            for script in (source / 'script', work / 'entryscript'):
+                script.write_text('#!nested/program\n'); script.chmod(0o755)
+            command = [str(loader), '--mode', 'container', '--root', str(work),
+                       '-v', f'{source}:/one', '-v', f'{source}:/two',
+                       '-v', f'{overlay}:/one/nested', '--', './exec_context']
         if name == 'exec':
             private_loader = work / 'exec-loader'
             private_loader.write_bytes(loader.read_bytes()); private_loader.chmod(0o755)
@@ -171,6 +183,8 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             if inherited is not None:
                 os.close(inherited)
         assert p.returncode == 0 and 'PASS: runtime FD' in p.stdout, (p.returncode,p.stdout,p.stderr)
+        if name == 'exec_context':
+            assert p.stdout.startswith('NSNSNSS\n'), p.stdout
         print(p.stdout, end='')
         if name == 'path_context':
             assert (source / 'nested/value').read_text() == 'SSSS'

@@ -518,7 +518,8 @@ long proot_context_syscall(long number, long args[6], const struct proot_path_co
 }
 
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
-                            char *guest, char *host, size_t capacity)
+                            char *guest, char *host, size_t capacity,
+                            const struct proot_path_context *context)
 {
     if (!guest || !host || !capacity)
         return -EINVAL;
@@ -526,6 +527,7 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
     long ret = bridge_create(&b);
     if (ret < 0)
         return (int)ret;
+    b->context = context;
     ret = resolve(b, dirfd, path, follow);
     if (!ret) {
         if (strlen(b->guest) >= capacity || strlen(b->host) >= capacity)
@@ -543,8 +545,11 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
  * directory FD and opening one non-followed component keeps the actual lookup
  * in the kernel; canonicalizing then opening an absolute path would lose the
  * BENEATH constraint. Cross-bind targets require retained mount identities. */
-long proot_open_beneath(int dirfd, const char *path, unsigned long flags)
+long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
+                       const struct proot_open_origin *hint, struct proot_open_origin *origin)
 {
+    if (!origin) return -EINVAL;
+    *origin = (struct proot_open_origin){0, false};
     if (!path) return -EFAULT;
     char name[PATH_MAX];
     size_t length = strnlen(path, sizeof(name));
@@ -571,6 +576,7 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags)
                              O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
         if (anchor < 0) { ret = anchor; goto out; }
     }
+    if (hint) { b->anchor = *hint; b->anchor_fd = (int)anchor; }
     ret = host_fd(b, (int)anchor, b->first_guest);
     if (ret < 0) goto close_anchor;
     size_t base_mount, target_mount;
@@ -583,6 +589,8 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags)
     if (base_mount != target_mount) { ret = -EOPNOTSUPP; goto close_anchor; }
     ret = raw_syscall(SYS_openat, anchor, (long)name, flags, 0, 0, 0);
     if (trailing && ret == -ENOTDIR) ret = -EOPNOTSUPP;
+    if (ret >= 0 && b->anchor.known)
+        *origin = (struct proot_open_origin){target_mount, true};
 close_anchor:
     if (dirfd == AT_FDCWD) raw_syscall(__NR_close, anchor, 0, 0, 0, 0, 0);
 out:

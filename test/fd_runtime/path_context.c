@@ -28,6 +28,12 @@ void _start(void) {
     size(a,"nested/value",2);size(b,"nested/value",4);
     CHECK(call(__NR_chdir,(long)"/one",0,0,0)==0);
     size(AT_FDCWD,"nested/value",2);
+    unsigned long how[3]={O_PATH|O_NOFOLLOW|O_DIRECTORY,0,8};
+    CHECK(call(437,a,(long)"nested",(long)how,sizeof(how))==-EOPNOTSUPP);
+    CHECK(call(437,AT_FDCWD,(long)"nested/",(long)how,sizeof(how))==-EOPNOTSUPP);
+    long bounded=call(437,b,(long)"nested",(long)how,sizeof(how));CHECK(bounded>=0);
+    CHECK(query(4,bounded)==2 && query(5,bounded)==FD_ACCESS_RW);
+    CHECK(call(__NR_close,bounded,0,0,0)==0);
     CHECK(call(__NR_faccessat,AT_FDCWD,(long)"nested/value",0,0)==0);
     char link[16];
     CHECK(call(__NR_readlinkat,a,(long)"nested/link",(long)link,sizeof(link))==1 && link[0]=='N');

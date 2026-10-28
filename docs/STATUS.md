@@ -5,7 +5,8 @@
 后续更新：绝对路径及已知目录 FD 相对 open 的挂载来源已接入实验 FD 表；
 同源别名的嵌套挂载视图已测；cwd 已接 chdir/fchdir/getcwd 与相对 open，
 fork/vfork 原生对照及 exec 降级通过。现有 PRoot 路径 handlers 也已接每次调用
-上下文，rename/link 两端分别取来源。两套回归继续通过。
+上下文，rename/link 两端分别取来源。exec 目标/解释器与受限 BENEATH 也已接来源
+观察值，七个执行标记用例通过。两套回归继续通过。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**
@@ -66,7 +67,7 @@ fork/vfork 原生对照及 exec 降级通过。现有 PRoot 路径 handlers 也�
 ## 下一步顺序与验收标准
 
 1. **先落地最小挂载身份和只读来源模型**：绝对路径的解析来源已交给 FD 表，
-   目录 FD/cwd 及现有 PRoot 路径操作已接入；下一步检查独立 exec/BENEATH 入口，完善可信来源链。继承、SCM_RIGHTS
+   目录 FD/cwd、现有 PRoot 路径操作及 exec/BENEATH 已接观察值；下一步处理可信来源链、未知来源和只读配置边界。继承、SCM_RIGHTS
    和 exec 当前保守清除/保留 UNKNOWN。后续验证同一宿主文件
    经 ro/rw 两个 bind 打开时不会合并权限，并覆盖 dup、改名和 exec。
 2. **再接入受限策略执行**：选择明确的单线程进程支持范围；同时覆盖路径写入、

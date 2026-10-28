@@ -781,3 +781,19 @@ cwd 与最多两个目录 FD 的 mount 观察值。host_fd/guest_cwd 每次解�
 exec 路径预检、受限 BENEATH、尚未移植的 xattr/ACL 等仍有独立缺口；RO/default-deny
 未启用，挂载观察值仍不等于可信权限。下一步检查独立 exec/BENEATH 入口的一致性，
 避免同一视图在打开与执行时分叉，再推进配置与权限判定。
+
+### exec 与受限 BENEATH 接入来源上下文
+
+FD 实验的 execve/execveat 预检把 cwd 与 execveat 目录 FD 的观察值传入解析器；
+脚本目标与 shebang 解释器分别解析，解释器的相对路径使用 cwd，不误用脚本目录 FD。
+普通构建的 proot_execve wrapper 仍传 NULL，保持原行为。成功 exec 后新 payload
+仍清除来源，只把执行前选择的 guest/host 目标交给既有 loader；未引入可信标签交接。
+
+受限 BENEATH 接受已知 cwd/目录 FD 的提示，AT_FDCWD 固定的内部目录 FD 同样使用
+该提示。目标跨配置 bind 继续拒绝，成功的同挂载单分量打开发布对应 mount 元数据。
+没有改成绝对路径 open，也没有放宽 flags、尾斜杠、符号链接跟随或多分量限制。
+
+七个实际执行用例覆盖两种别名的 cwd 相对 ELF、dirfd 相对 ELF、相对 shebang，
+以及脚本 dirfd 与解释器 cwd 来自不同入口的情况。分别编译 N/S 标记 ELF，宿主校验
+NSNSNSS，防止仅凭退出 0 误判。BENEATH 测试验证已知入口的嵌套 bind 拒绝与另一别名
+普通目录的成功/来源记录。两套回归通过，权限策略、未知来源和路径替换竞态仍未解决。

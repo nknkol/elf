@@ -77,7 +77,7 @@ static int elf_magic(const char *p, int n)
         h.e_phentsize == sizeof(Elf64_Phdr) && h.e_phnum > 0;
 }
 
-long proot_execve(long number, long a[6])
+long proot_execve_context(long number, long a[6], const struct proot_path_context *context)
 {
     int at = number == SYS_execveat;
     int dirfd = at ? (int)a[0] : AT_FDCWD;
@@ -110,7 +110,7 @@ long proot_execve(long number, long a[6])
     long transport = -1;
 #endif
     long ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
-                                       s->guest, s->host, sizeof(s->host));
+                                       s->guest, s->host, sizeof(s->host), context);
     if (ret < 0)
         goto done;
     if (!strcmp(s->host, cfg->loader_path)) {
@@ -144,7 +144,7 @@ long proot_execve(long number, long a[6])
         if (!*interpreter) { ret = -ENOEXEC; goto done; }
         ret = proot_resolve_exec_path(AT_FDCWD, interpreter, true,
                                       s->interpreter_guest, s->interpreter_host,
-                                      sizeof(s->interpreter_host));
+                                      sizeof(s->interpreter_host), context);
         if (ret < 0) goto done;
         /* Nested script interpreters require a bounded interpreter stack. */
         char magic[256];
@@ -214,4 +214,9 @@ long proot_execve(long number, long a[6])
 #endif
     proot_scratch_free((void *)mem,sizeof(ExecScratch));
     return ret;
+}
+
+long proot_execve(long number, long args[6])
+{
+    return proot_execve_context(number, args, NULL);
 }
