@@ -5,7 +5,7 @@
 元数据功能。两者都没有接入只读/默认拒绝权限执行，agent JSON 仍只生成计划。
 
 当前已为绝对路径 openat/受支持的 resolve=0 openat2 保存解析所得 mount ID 和
-现有可写配置标签；已知目录 FD 的相对 open 同样保留入口挂载，cwd/未知目录 FD、
+现有可写配置标签；已知目录 FD 及经 chdir/fchdir 建立的 cwd 相对 open 保留入口挂载；未知目录/cwd、
 导入和 exec 恢复仍为 UNKNOWN。此标签不是可信授权。
 
 以下保留按实施阶段累积的设计与验证记录。早期“尚未接入 loader/payload”等描述
@@ -747,3 +747,21 @@ ID 与正向映射一致。宿主路径已离开原挂载或被嵌套挂载遮�
 cwd 必须单独跨 chdir/fchdir、fork/vfork、exec 维护，当前 AT_FDCWD 相对打开仍为
 UNKNOWN。BENEATH 及其它目录 FD 路径 syscall 尚未接这个来源提示，不应宣称所有
 相对路径操作已统一。下一步优先补 cwd 生命周期和其针对性 native/loader 对照。
+
+### cwd 来源与进程生命周期
+
+实验运行时新增每个私有任务 arena 的 cwd mount 观察值。chdir 绝对路径建立来源，
+已知 cwd 的相对 chdir 更新到最终 mount，fchdir 取目录 FD 来源；未知目录 FD 的
+fchdir 清除旧来源。仅内核成功后发布，失败 chdir/fchdir 保留旧状态。getcwd 和
+AT_FDCWD openat/resolve=0 openat2 经 retained mount 还原视图，复用正反向一致性检查。
+没有持久路径字符串、额外 cwd FD 或内容代理。
+
+私有 fork 的 arena 复制及受限 vfork 的预留子 arena 自然复制 cwd 标签。新用例先
+原生验证 fork/vfork 子进程改变到不同物理目录后父 cwd 不变，再验证 loader 同样
+行为；child 有自己的标签。成功 exec 的新 payload 初始化为 UNKNOWN，保留内核
+物理 cwd，但不承诺原 guest 别名；失败 exec 保留原状态，不新增不可信 cwd 交接。
+
+实际测试覆盖同源 bind 的 getcwd/fchdir、相对嵌套 bind 进入及 `..` 返回、相对打开
+的内容与 mount、未知 fchdir 降级、失败 chdir/fchdir/getcwd/exec、fork/vfork 和
+成功 exec 降级。两套回归通过。仍没有权限执行；stat/mkdir/unlink 等其余相对路径
+操作和 BENEATH 尚未使用此上下文，下一步应统一这些入口，再讨论最小只读策略。

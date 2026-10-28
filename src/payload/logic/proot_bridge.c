@@ -97,6 +97,31 @@ static int visible_guest_path(Bridge *b, const char *host, char *guest)
     return strcmp(host, mapped) ? -EXDEV : 0;
 }
 
+static int observed_guest_path(Bridge *b, const char *host, char *guest)
+{
+    int rc;
+    /* Reverse through the retained mount, never whichever host alias
+     * happens to win the global reverse map. Refuse a moved/overmounted
+     * object when this immutable mount can no longer name it faithfully. */
+    size_t id = b->anchor.mount_id, mapped_id;
+    if (id > b->table.count) return -EXDEV;
+    const char *host_prefix = id ? b->table.entries[id-1].host : b->table.root;
+    const char *guest_prefix = id ? b->table.entries[id-1].guest : "/";
+    Comparison prefix_match = compare_paths(host_prefix, host);
+    if (prefix_match != PATHS_ARE_EQUAL && prefix_match != PATH1_IS_PREFIX)
+        return -EXDEV;
+    strcpy(guest, host);
+    rc = binding_replace_core(guest, host_prefix, guest_prefix);
+    if (rc < 0) return rc;
+    rc = binding_table_mount_id(&b->table, guest, &mapped_id);
+    if (rc < 0) return rc;
+    if (mapped_id != id) return -EXDEV;
+    char mapped[PATH_MAX];
+    rc = binding_table_map(&b->table, GUEST, guest, mapped);
+    if (rc < 0) return rc;
+    return strcmp(host, mapped) ? -EXDEV : 0;
+}
+
 static int host_fd(void *opaque, int fd, char *guest)
 {
     Bridge *b = opaque;
@@ -124,28 +149,8 @@ static int host_fd(void *opaque, int fd, char *guest)
     if (rc >= PATH_MAX)
         return -ENAMETOOLONG;
     host[rc] = 0;
-    if (b->anchor.known && fd == b->anchor_fd) {
-        /* Reverse through the retained mount, never whichever host alias
-         * happens to win the global reverse map. Refuse a moved/overmounted
-         * object when this immutable mount can no longer name it faithfully. */
-        size_t id = b->anchor.mount_id, mapped_id;
-        if (id > b->table.count) return -EXDEV;
-        const char *host_prefix = id ? b->table.entries[id-1].host : b->table.root;
-        const char *guest_prefix = id ? b->table.entries[id-1].guest : "/";
-        Comparison prefix_match = compare_paths(host_prefix, host);
-        if (prefix_match != PATHS_ARE_EQUAL && prefix_match != PATH1_IS_PREFIX)
-            return -EXDEV;
-        strcpy(guest, host);
-        rc = binding_replace_core(guest, host_prefix, guest_prefix);
-        if (rc < 0) return rc;
-        rc = binding_table_mount_id(&b->table, guest, &mapped_id);
-        if (rc < 0) return rc;
-        if (mapped_id != id) return -EXDEV;
-        char mapped[PATH_MAX];
-        rc = binding_table_map(&b->table, GUEST, guest, mapped);
-        if (rc < 0) return rc;
-        return strcmp(host, mapped) ? -EXDEV : 0;
-    }
+    if (b->anchor.known && fd == b->anchor_fd)
+        return observed_guest_path(b, host, guest);
     return visible_guest_path(b, host, guest);
 }
 
@@ -154,6 +159,8 @@ static long guest_cwd(Bridge *b)
     long ret = raw_syscall(SYS_getcwd, (long)b->host, sizeof(b->host), 0, 0, 0, 0);
     if (ret < 0)
         return ret;
+    if (b->anchor.known && b->anchor_fd == AT_FDCWD)
+        return observed_guest_path(b, b->host, b->cwd);
     return visible_guest_path(b, b->host, b->cwd);
 }
 
@@ -334,13 +341,23 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         ret = host_fd(b, (int)a[0], b->guest);
         if (ret < 0)
             return ret;
-        return raw_syscall(SYS_fchdir, a[0], 0, 0, 0, 0, 0);
+        ret = raw_syscall(SYS_fchdir, a[0], 0, 0, 0, 0, 0);
+        if (ret >= 0 && origin) *origin = b->anchor;
+        return ret;
     }
     if (number == SYS_chdir) {
         ret = resolve(b, AT_FDCWD, (const char *)a[0], true);
         if (ret < 0)
             return ret;
-        return raw_syscall(SYS_chdir, (long)b->host, 0, 0, 0, 0, 0);
+        bool known = origin && (((const char *)a[0])[0] == '/' || b->anchor.known);
+        size_t id = 0;
+        if (known) {
+            ret = binding_table_mount_id(&b->table, b->guest, &id);
+            if (ret < 0) return ret;
+        }
+        ret = raw_syscall(SYS_chdir, (long)b->host, 0, 0, 0, 0, 0);
+        if (ret >= 0 && known) *origin = (struct proot_open_origin){id, true};
+        return ret;
     }
 
     const char *path = (const char *)a[1];
@@ -386,7 +403,7 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         return raw_syscall(number, a[0], a[1], a[2], a[3], 0, 0);
 
     bool observed_open = number == SYS_openat && origin &&
-        (path[0] == '/' || (a[0] != AT_FDCWD && b->anchor.known));
+        (path[0] == '/' || b->anchor.known);
     ret = resolve(b, (int)a[0], path, follow);
     if (ret < 0)
         return ret;
@@ -443,7 +460,10 @@ static long bridge_syscall(long number, long args[6], const struct proot_open_or
     long ret = bridge_create(&b);
     if (ret < 0)
         return ret;
-    if (anchor) { b->anchor = *anchor; b->anchor_fd = (int)args[0]; }
+    if (anchor) {
+        b->anchor = *anchor;
+        b->anchor_fd = (number == SYS_chdir || number == SYS_getcwd) ? AT_FDCWD : (int)args[0];
+    }
     ret = dispatch(b, number, args, origin);
     proot_scratch_free(b,sizeof(Bridge));
     return ret;
@@ -460,6 +480,15 @@ long proot_openat(long args[6], const struct proot_open_origin *anchor,
     if (!origin) return -EINVAL;
     *origin = (struct proot_open_origin){0, false};
     return bridge_syscall(SYS_openat, args, anchor, origin);
+}
+
+long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,
+               struct proot_open_origin *origin)
+{
+    if (!origin || (number != SYS_chdir && number != SYS_fchdir && number != SYS_getcwd))
+        return -EINVAL;
+    *origin = (struct proot_open_origin){0, false};
+    return bridge_syscall(number, args, anchor, origin);
 }
 
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,

@@ -12,10 +12,13 @@ long proot_execve(long number, long args[6]);
 /* Restricted single-component, non-following O_PATH open beneath a dirfd. */
 long proot_open_beneath(int dirfd, const char *path, unsigned long flags);
 /* Resolution observation, not an authorization grant. Known dirfd origins
- * select the reverse mapping; cwd and unknown/imported descriptors stay unknown. */
+ * and established cwd select the reverse mapping; unknown/imported anchors
+ * stay unknown. Exec does not authenticate or restore cwd provenance. */
 struct proot_open_origin { size_t mount_id; bool known; };
 long proot_openat(long args[6], const struct proot_open_origin *anchor,
                   struct proot_open_origin *origin);
+long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,
+               struct proot_open_origin *origin);
 int proot_handles_syscall(long number);
 long proot_syscall(long number, long args[6]);
 #endif

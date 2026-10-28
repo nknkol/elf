@@ -25,6 +25,7 @@ struct fd_runtime {
     struct fd_task_handle owner;
     int initialized, init_error;
     long owner_tid;
+    struct proot_open_origin cwd;
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
@@ -208,6 +209,18 @@ long fd_experiment_dispatch(long n,long a[6])
         if(a[1]==5)return r->origin.access;
         return -EINVAL;
     }
+    if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
+        struct proot_open_origin anchor=s->cwd,next={0,false};
+        if(n==__NR_fchdir) {
+            anchor=(struct proot_open_origin){0,false};
+            const struct fd_record *r=fd_table_get(t,(int)a[0]);
+            if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
+                anchor=(struct proot_open_origin){r->origin.mount_id,true};
+        }
+        long result=proot_cwd(n,a,&anchor,&next);
+        if(result>=0 && n!=__NR_getcwd)s->cwd=next;
+        return result;
+    }
     /* No partial support for lifecycle or alternate FD creation in this mode. */
     switch(n) {
     case __NR_clone: case __NR_clone3:
@@ -262,8 +275,9 @@ long fd_experiment_dispatch(long n,long a[6])
         for(size_t i=0;i<t->capacity;i++)free_slots+=t->slots[i].fd<0;
         if(free_slots<2)return -ENOSPC;
     }
-    struct proot_open_origin opened={0,false},anchor={0,false};
+    struct proot_open_origin opened={0,false},anchor=s->cwd;
     if((n==__NR_openat || n==__NR_openat2) && (int)a[0]!=AT_FDCWD) {
+        anchor=(struct proot_open_origin){0,false};
         const struct fd_record *directory=fd_table_get(t,(int)a[0]);
         if(directory && directory->origin.access!=FD_ACCESS_UNKNOWN)
             anchor=(struct proot_open_origin){directory->origin.mount_id,true};

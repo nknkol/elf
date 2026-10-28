@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
     os.mkfifo(fifo, 0o600)
     (work / 'vfork-fifo').symlink_to(fifo)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'cwd', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -134,6 +134,20 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
                        '-v', f'{source}:/one', '-v', f'{source}:/two',
                        '-v', f'{nested}:/one/nested', '-v', f'{nested}:/shadow',
                        '-v', f'{source}:/shadow', '--', './origin']
+        if name == 'cwd':
+            first = work / 'cwd-a'; first.mkdir(); (first / 'value').write_text('A')
+            second = work / 'cwd-b'; second.mkdir(); (second / 'value').write_text('B')
+            native = work / 'cwd-native'
+            subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
+                            '-fno-builtin', '-fno-stack-protector', '-DFD_TRACK=0',
+                            '-I' + str(repo / 'src/payload/include'),
+                            str(repo / 'test/fd_runtime/cwd.c'), '-o', str(native)], check=True)
+            reference = subprocess.run([str(native)], cwd=work, capture_output=True, text=True, timeout=20)
+            assert reference.returncode == 0, (reference.returncode, reference.stdout, reference.stderr)
+            print(reference.stdout, end='')
+            command = [str(loader), '--mode', 'container', '--root', str(work),
+                       '-v', f'{first}:/one', '-v', f'{first}:/two',
+                       '-v', f'{second}:/one/nested', '-v', f'{second}:/other', '--', './cwd']
         if name == 'exec':
             private_loader = work / 'exec-loader'
             private_loader.write_bytes(loader.read_bytes()); private_loader.chmod(0o755)

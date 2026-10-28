@@ -20,7 +20,8 @@ F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. Absolute guest openat and supported resolve=0 openat2 record the resolved mount
 ID and current writable configuration tag. Opens relative to a tracked directory FD now retain its mount view; cwd-relative
-opens, unknown directory anchors, BENEATH opens and imports remain UNKNOWN; exec restore still downgrades origins to UNKNOWN. These
+opens use the cwd mount once established by chdir/fchdir. Unknown directory/cwd
+anchors, BENEATH opens and imports remain UNKNOWN; exec restore still downgrades origins to UNKNOWN. These
 observations are not trusted permission grants: no readonly/default-deny policy
 is enforced, and path races/full mount identity semantics remain unresolved.
 
@@ -358,5 +359,14 @@ Known directory-FD openat/resolve=0 openat2 uses its retained mount ID to revers
 the live host FD path, then validates the forward mapping and current mount.
 Tests distinguish nested bind contents through same-host aliases, preserve the
 view through dup and in-mount rename, reject a directory moved under an overmount
-with EXDEV, and check relative symlink and parent traversal origins. Cwd tracking
-and retained identity for other path syscalls are not implemented by this change.
+with EXDEV, and check relative symlink and parent traversal origins. Cwd tracking is described below; retained identity for other path syscalls is
+not yet implemented.
+
+`cwd.c` compares native and loader private-fork/bounded-vfork cwd independence,
+then checks alias-preserving getcwd and relative open, known/unknown fchdir,
+relative chdir into/out of a nested bind, failed chdir/fchdir/getcwd and failed
+exec preservation. Successful exec clears cwd provenance: physical cwd survives,
+but no guest alias or access tag is authenticated by the current handoff.
+The runtime owns cwd metadata per private task arena, copied for fork/vfork;
+no extra cwd FD or persistent path cache is introduced. Other relative path
+operations still need this context wired in before claiming a unified view.
