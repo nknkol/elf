@@ -6,7 +6,8 @@
 
 **当前是可运行的兼容性后端，尚未完成 agent 文件隔离。** root/bind、动态 ELF、
 链式 exec 已有测试；只读绑定、默认拒绝、完整 FD 生命周期和 `/proc` 尚未完成。
-已知直接进入 raw syscall 和同线程重入绕过仍存在，不能作为恶意代码的独立隔离边界。
+默认构建仍有 raw syscall 入口及同线程重入透传风险；实验构建拒绝同线程嵌套慢调用，
+但也尚未完成恶意代码隔离验收。
 `container` 模式名称也不代表这些隔离能力已完成。
 
 ## 从哪里开始
@@ -69,8 +70,8 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 | `src/payload/logic/proot_bridge.c` | syscall 参数适配、路径和目录 FD 解析 |
 | `src/payload/logic/proot_exec.c` | 保留配置的 exec 链 |
 | `src/payload/logic/proot_auxv.c` | guest PR_GET_AUXV |
-| `src/payload/logic/fd_table.c` | FD 元数据核心，尚未接入运行时 |
-| `src/payload/logic/fd_snapshot.c`、`fd_handoff.c` | exec 元数据快照与封存 memfd 传输，尚未接入 loader |
+| `src/payload/logic/fd_table.c` | FD 元数据核心，已接入独立实验运行时 |
+| `src/payload/logic/fd_snapshot.c`、`fd_handoff.c` | exec 元数据快照与封存 memfd 传输，已接入实验 loader |
 | `test/fd_table/` | 元数据模型、exec 交接、native/loader clone 共享行为对照 |
 | `vendor/proot/src/path/` | 从原版 PRoot 提取的共享路径核心 |
 | `vendor/proot/port-tests/` | 核心与 ELF 集成回归 |
@@ -79,6 +80,9 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 | `tools/agent_sandbox/`、`profiles/` | agent 策略规划原型，尚未连接执行层 |
 
 ## 实现状态与下一步
+
+先看 [当前进度与验收快照](docs/STATUS.md)，其中区分默认/实验构建及本轮测试；
+FD 计划后半部分保留历史增量记录，不应把早期“未接入”描述当作当前状态。
 
 - [底层约束和历史经验](docs/SYSCALL_ENGINE_LESSONS.md)
 - [FD 身份与只读策略实施顺序](docs/FD_POLICY_PLAN.md)
