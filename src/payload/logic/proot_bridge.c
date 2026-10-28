@@ -23,6 +23,8 @@ _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 1
 
 typedef struct {
     BindingTable table;
+    int anchor_fd;
+    struct proot_open_origin anchor;
     PathBinding bindings[CONFIG_MAX_BINDS];
     char cwd[PATH_MAX], guest[PATH_MAX], host[PATH_MAX];
     char first_guest[PATH_MAX], first_host[PATH_MAX];
@@ -122,6 +124,28 @@ static int host_fd(void *opaque, int fd, char *guest)
     if (rc >= PATH_MAX)
         return -ENAMETOOLONG;
     host[rc] = 0;
+    if (b->anchor.known && fd == b->anchor_fd) {
+        /* Reverse through the retained mount, never whichever host alias
+         * happens to win the global reverse map. Refuse a moved/overmounted
+         * object when this immutable mount can no longer name it faithfully. */
+        size_t id = b->anchor.mount_id, mapped_id;
+        if (id > b->table.count) return -EXDEV;
+        const char *host_prefix = id ? b->table.entries[id-1].host : b->table.root;
+        const char *guest_prefix = id ? b->table.entries[id-1].guest : "/";
+        Comparison prefix_match = compare_paths(host_prefix, host);
+        if (prefix_match != PATHS_ARE_EQUAL && prefix_match != PATH1_IS_PREFIX)
+            return -EXDEV;
+        strcpy(guest, host);
+        rc = binding_replace_core(guest, host_prefix, guest_prefix);
+        if (rc < 0) return rc;
+        rc = binding_table_mount_id(&b->table, guest, &mapped_id);
+        if (rc < 0) return rc;
+        if (mapped_id != id) return -EXDEV;
+        char mapped[PATH_MAX];
+        rc = binding_table_map(&b->table, GUEST, guest, mapped);
+        if (rc < 0) return rc;
+        return strcmp(host, mapped) ? -EXDEV : 0;
+    }
     return visible_guest_path(b, host, guest);
 }
 
@@ -361,7 +385,8 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (number == SYS_readlinkat && !path[0])
         return raw_syscall(number, a[0], a[1], a[2], a[3], 0, 0);
 
-    bool absolute_open = number == SYS_openat && origin && path[0] == '/';
+    bool observed_open = number == SYS_openat && origin &&
+        (path[0] == '/' || (a[0] != AT_FDCWD && b->anchor.known));
     ret = resolve(b, (int)a[0], path, follow);
     if (ret < 0)
         return ret;
@@ -373,12 +398,12 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
          * and invalid output addresses. Do not rewrite a relative target. */
     }
     size_t mount_id = 0;
-    if (absolute_open) {
+    if (observed_open) {
         ret = binding_table_mount_id(&b->table, b->guest, &mount_id);
         if (ret < 0) return ret;
     }
     ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
-    if (ret >= 0 && absolute_open)
+    if (ret >= 0 && observed_open)
         *origin = (struct proot_open_origin){mount_id, true};
     return ret;
 }
@@ -394,6 +419,8 @@ static long bridge_create(Bridge **out)
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     Bridge *b = (void *)mem;
+    b->anchor_fd = AT_FDCWD;
+    b->anchor = (struct proot_open_origin){0, false};
     b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings,
                              (size_t)cfg->bind_count};
     for (int i = 0; i < cfg->bind_count; i++)
@@ -407,7 +434,8 @@ static long bridge_create(Bridge **out)
     return 0;
 }
 
-static long bridge_syscall(long number, long args[6], struct proot_open_origin *origin)
+static long bridge_syscall(long number, long args[6], const struct proot_open_origin *anchor,
+                           struct proot_open_origin *origin)
 {
     if (!proot_handles_syscall(number))
         return -ENOSYS;
@@ -415,6 +443,7 @@ static long bridge_syscall(long number, long args[6], struct proot_open_origin *
     long ret = bridge_create(&b);
     if (ret < 0)
         return ret;
+    if (anchor) { b->anchor = *anchor; b->anchor_fd = (int)args[0]; }
     ret = dispatch(b, number, args, origin);
     proot_scratch_free(b,sizeof(Bridge));
     return ret;
@@ -422,14 +451,15 @@ static long bridge_syscall(long number, long args[6], struct proot_open_origin *
 
 long proot_syscall(long number, long args[6])
 {
-    return bridge_syscall(number, args, NULL);
+    return bridge_syscall(number, args, NULL, NULL);
 }
 
-long proot_openat(long args[6], struct proot_open_origin *origin)
+long proot_openat(long args[6], const struct proot_open_origin *anchor,
+                  struct proot_open_origin *origin)
 {
     if (!origin) return -EINVAL;
     *origin = (struct proot_open_origin){0, false};
-    return bridge_syscall(SYS_openat, args, origin);
+    return bridge_syscall(SYS_openat, args, anchor, origin);
 }
 
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,

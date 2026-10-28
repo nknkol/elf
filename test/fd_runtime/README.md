@@ -19,10 +19,10 @@ accept, accept4, pidfd_open, pidfd_getfd, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
 start untracked; dup of one remains unknown provenance. Absolute guest openat and supported resolve=0 openat2 record the resolved mount
-ID and current writable configuration tag. Relative opens, BENEATH opens and
-imports remain UNKNOWN; exec restore still downgrades origins to UNKNOWN. These
+ID and current writable configuration tag. Opens relative to a tracked directory FD now retain its mount view; cwd-relative
+opens, unknown directory anchors, BENEATH opens and imports remain UNKNOWN; exec restore still downgrades origins to UNKNOWN. These
 observations are not trusted permission grants: no readonly/default-deny policy
-is enforced, and path races/retained directory mount identity remain unresolved.
+is enforced, and path races/full mount identity semantics remain unresolved.
 
 General shared-VM/shared-FD clone (except bounded vfork below), close_range, unshare and selected alternate FD creation/transfer
 interfaces return ENOSYS. Same-task nested slow calls return EDEADLK, other task
@@ -353,3 +353,10 @@ non-followed symlinks, resolve=0 openat2, failed-open bookkeeping, unknown relat
 opens, dup, rename, private fork and exec downgrade. It does not test RO bindings:
 those are not yet configured or enforced. Tags are acquired during the existing
 resolution; the runtime does not re-resolve a successful open to infer its origin.
+
+Known directory-FD openat/resolve=0 openat2 uses its retained mount ID to reverse
+the live host FD path, then validates the forward mapping and current mount.
+Tests distinguish nested bind contents through same-host aliases, preserve the
+view through dup and in-mount rename, reject a directory moved under an overmount
+with EXDEV, and check relative symlink and parent traversal origins. Cwd tracking
+and retained identity for other path syscalls are not implemented by this change.

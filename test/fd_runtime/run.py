@@ -127,6 +127,8 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             source = work / 'origin-source'; source.mkdir()
             (source / 'file').write_text('Q shared bind file')
             (source / 'to-two').symlink_to('/two/file')
+            (source / 'nested').mkdir(); (source / 'nested/value').write_text('S')
+            (source / 'moving').mkdir(); (source / 'moving/value').write_text('M')
             nested = work / 'origin-nested'; nested.mkdir(); (nested / 'value').write_text('N')
             command = [str(loader), '--mode', 'container', '--root', str(work),
                        '-v', f'{source}:/one', '-v', f'{source}:/two',

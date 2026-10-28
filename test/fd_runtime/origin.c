@@ -47,7 +47,35 @@ void run(long *stack)
     long newer=call(437,AT_FDCWD,(long)"/two/file",(long)how,sizeof(how));
     origin(newer,2,FD_ACCESS_RW);CHECK(query(3,newer)==1);
     long directory=open_file("/one",O_PATH|O_DIRECTORY);origin(directory,1,FD_ACCESS_RW);
-    long relative=call(__NR_openat,directory,(long)"file",O_RDONLY,0);origin(relative,0,FD_ACCESS_UNKNOWN);
+    long relative=call(__NR_openat,directory,(long)"file",O_RDONLY,0);origin(relative,1,FD_ACCESS_RW);
+    long otherdir=open_file("/two",O_PATH|O_DIRECTORY);origin(otherdir,2,FD_ACCESS_RW);
+    long fromone=call(__NR_openat,directory,(long)"nested/value",O_RDONLY,0);
+    long fromtwo=call(__NR_openat,otherdir,(long)"nested/value",O_RDONLY,0);
+    origin(fromone,3,FD_ACCESS_RW);origin(fromtwo,2,FD_ACCESS_RW);
+    CHECK(call(__NR_read,fromone,(long)&byte,1,0)==1 && byte=='N');
+    CHECK(call(__NR_read,fromtwo,(long)&byte,1,0)==1 && byte=='S');
+    close_fd(fromone);close_fd(fromtwo);
+    long dircopy=call(__NR_dup,directory,0,0,0);origin(dircopy,1,FD_ACCESS_RW);
+    fromone=call(__NR_openat,dircopy,(long)"nested/value",O_RDONLY,0);
+    origin(fromone,3,FD_ACCESS_RW);close_fd(fromone);close_fd(dircopy);
+    long moving=open_file("/one/moving",O_PATH|O_DIRECTORY);origin(moving,1,FD_ACCESS_RW);
+    CHECK(call(__NR_renameat,directory,(long)"moving",directory,(long)"moved")==0);
+    long moved=call(__NR_openat,moving,(long)"value",O_RDONLY,0);origin(moved,1,FD_ACCESS_RW);
+    CHECK(call(__NR_read,moved,(long)&byte,1,0)==1 && byte=='M');close_fd(moved);
+    unsigned long relative_how[3]={O_PATH|O_NOFOLLOW,0,0};
+    moved=call(437,moving,(long)"value",(long)relative_how,sizeof(relative_how));
+    origin(moved,1,FD_ACCESS_RW);close_fd(moved);
+    /* Move through the other alias into an area hidden by /one/nested.
+     * The old /one origin must reject, rather than switch to the overmount. */
+    CHECK(call(__NR_renameat,otherdir,(long)"moved",otherdir,(long)"nested/shadow")==0);
+    long before=query(0,0);
+    CHECK(call(__NR_openat,moving,(long)"value",O_RDONLY,0)==-EXDEV && query(0,0)==before);
+    close_fd(moving);close_fd(otherdir);
+    moved=call(__NR_openat,directory,(long)"../fd-data",O_RDONLY,0);
+    origin(moved,0,FD_ACCESS_RW);close_fd(moved);
+    moved=call(__NR_openat,directory,(long)"to-two",O_RDONLY,0);
+    origin(moved,2,FD_ACCESS_RW);close_fd(moved);
+    long cwdrelative=open_file("fd-data",O_RDONLY);origin(cwdrelative,0,FD_ACCESS_UNKNOWN);close_fd(cwdrelative);
     long copied=call(__NR_dup,a,0,0,0);origin(copied,1,FD_ACCESS_RW);
     CHECK(query(2,copied)==query(2,a));
     long count=query(0,0);

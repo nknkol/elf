@@ -262,7 +262,12 @@ long fd_experiment_dispatch(long n,long a[6])
         for(size_t i=0;i<t->capacity;i++)free_slots+=t->slots[i].fd<0;
         if(free_slots<2)return -ENOSPC;
     }
-    struct proot_open_origin opened={0,false};
+    struct proot_open_origin opened={0,false},anchor={0,false};
+    if((n==__NR_openat || n==__NR_openat2) && (int)a[0]!=AT_FDCWD) {
+        const struct fd_record *directory=fd_table_get(t,(int)a[0]);
+        if(directory && directory->origin.access!=FD_ACCESS_UNKNOWN)
+            anchor=(struct proot_open_origin){directory->origin.mount_id,true};
+    }
     long result;
     if(n==__NR_openat2) {
         if(openat2_resolve==8)
@@ -272,9 +277,9 @@ long fd_experiment_dispatch(long n,long a[6])
              * can use the existing guest path backend, including absolute
              * paths and bindings; never send the guest spelling to the host. */
             long open_args[6]={a[0],a[1],openat2_flags,0,0,0};
-            result=proot_openat(open_args,&opened);
+            result=proot_openat(open_args,&anchor,&opened);
         }
-    } else if(n==__NR_openat)result=proot_openat(a,&opened);
+    } else if(n==__NR_openat)result=proot_openat(a,&anchor,&opened);
     else result=syscall_handle_common(n,a);
     if(result<0)return result;
     if(pair) {
@@ -294,7 +299,7 @@ long fd_experiment_dispatch(long n,long a[6])
             (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
         rc=n==__NR_pidfd_getfd?fd_table_import_unknown(t,(int)result,cloexec):
             /* Existing root/bind configuration is writable. This is a source
-             * tag, not O_ACCMODE or permission enforcement; relative paths,
+             * tag, not O_ACCMODE or permission enforcement; unknown anchors,
              * imported FDs and exec restore deliberately remain UNKNOWN. */
             fd_table_open(t,(int)result,(struct fd_origin){opened.mount_id,
                           opened.known?FD_ACCESS_RW:FD_ACCESS_UNKNOWN},cloexec);
