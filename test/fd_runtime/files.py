@@ -41,11 +41,11 @@ for directory, shell, prefix in (
         p = run('mkdir /work/extracted; tar -xf /work/archive.tar -C /work/extracted; '
                 'cat /work/extracted/a/file')
         if directory == 'ubuntu-root':
-            # This guest GNU tar requires openat2 RESOLVE_BENEATH. Do not relax
-            # its confinement request or count ENOSYS as working extraction.
-            assert p.returncode == 2 and 'Function not implemented' in p.stderr, (
+            # This guest GNU tar exceeds the single-component openat2 subset. Do not relax
+            # its confinement request or count EOPNOTSUPP as working extraction.
+            assert p.returncode == 2 and 'Operation not supported' in p.stderr, (
                 directory, p.returncode, p.stdout, p.stderr)
-            print('KNOWN LIMIT: GNU tar extraction requires openat2 RESOLVE_BENEATH')
+            print('KNOWN LIMIT: GNU tar extraction exceeds restricted openat2 RESOLVE_BENEATH support')
         else:
             assert (p.returncode, p.stdout) == (0, 'payload'), (p.returncode, p.stdout, p.stderr)
             assert (Path(temp) / 'extracted/a/file').read_text() == 'payload'

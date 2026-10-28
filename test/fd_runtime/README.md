@@ -325,3 +325,9 @@ not silently downgraded to openat. A separate runtime probe checks the new
 fchmodat2(452) fatal-syscall guard: old host headers omitted it, while guest glibc
 emits it for flagged fchmodat. HarmonyOS now returns ENOSYS instead of allowing
 SIGSYS. This is an unsupported-call fallback, not fchmodat2 emulation.
+
+`beneath.c` exercises the experimental openat2 single-component O_PATH |
+O_NOFOLLOW + RESOLVE_BENEATH subset through real patched SVCs: explicit dirfd,
+AT_FDCWD, CLOEXEC/accounting, rejected escapes and multi-component names,
+symlink identity, missing/non-directory targets, and configured bind crossings.
+Ubuntu GNU tar extraction still exceeds this subset (EOPNOTSUPP, exit 2).

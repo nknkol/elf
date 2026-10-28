@@ -432,3 +432,44 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
     proot_scratch_free(b,sizeof(Bridge));
     return (int)ret;
 }
+
+/* This deliberately does not emulate general openat2 resolution. Holding the
+ * directory FD and opening one non-followed component keeps the actual lookup
+ * in the kernel; canonicalizing then opening an absolute path would lose the
+ * BENEATH constraint. Cross-bind targets require retained mount identities. */
+long proot_open_beneath(int dirfd, const char *path, unsigned long flags)
+{
+    if (!path) return -EFAULT;
+    char name[PATH_MAX];
+    size_t length = strnlen(path, sizeof(name));
+    if (length == sizeof(name)) return -ENAMETOOLONG;
+    memcpy(name, path, length + 1);
+    if (!length) return -ENOENT;
+    if (name[0] == '/' || !strcmp(name, "..")) return -EXDEV;
+    if (strchr(name, '/')) return -EOPNOTSUPP;
+    Bridge *b;
+    long ret = bridge_create(&b);
+    if (ret < 0) return ret;
+    long anchor = dirfd;
+    if (dirfd == AT_FDCWD) {
+        anchor = raw_syscall(SYS_openat, AT_FDCWD, (long)".",
+                             O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
+        if (anchor < 0) { ret = anchor; goto out; }
+    }
+    ret = host_fd(b, (int)anchor, b->first_guest);
+    if (ret < 0) goto close_anchor;
+    size_t base_mount, target_mount;
+    ret = binding_table_mount_id(&b->table, b->first_guest, &base_mount);
+    if (ret < 0) goto close_anchor;
+    ret = resolve(b, (int)anchor, name, false);
+    if (ret < 0) goto close_anchor;
+    ret = binding_table_mount_id(&b->table, b->guest, &target_mount);
+    if (ret < 0) goto close_anchor;
+    if (base_mount != target_mount) { ret = -EOPNOTSUPP; goto close_anchor; }
+    ret = raw_syscall(SYS_openat, anchor, (long)name, flags, 0, 0, 0);
+close_anchor:
+    if (dirfd == AT_FDCWD) raw_syscall(__NR_close, anchor, 0, 0, 0, 0, 0);
+out:
+    proot_scratch_free(b, sizeof(Bridge));
+    return ret;
+}

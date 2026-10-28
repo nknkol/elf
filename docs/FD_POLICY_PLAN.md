@@ -662,3 +662,22 @@ FD generation 并继续 fork；监督进程作为 subreaper 接收最后完成�
 错误 2，不再因该调用被杀；这不表示支持 fchmodat2 或 openat2。
 普通/实验运行时都验证 452 不会进入原生危险调用，工作流测试接入 FD 套件。
 后续兼容重点是有明确路径边界语义的 openat2 支持，不应继续扩展无条件降级。
+
+### openat2 的单分量 BENEATH 子集
+
+FD 实验后端现在接受 24 字节 open_how、resolve=RESOLVE_BENEATH、mode=0，
+flags 必须包含 O_PATH|O_NOFOLLOW，且只能另外包含 O_DIRECTORY/O_CLOEXEC。
+仅支持非空单个相对路径分量；绝对路径及 `..` 返回 EXDEV，多级路径返回
+EOPNOTSUPP。其它 how/resolve/flags 组合不降级，普通后端仍保持原 ENOSYS。
+
+实际打开使用原目录 FD 的内核 openat；AT_FDCWD 先打开 `.` 固定目录身份，
+完成后关闭内部锚点。检查 guest mount identity，跨配置 bind 的目标拒绝。
+O_PATH|O_NOFOLLOW 可以返回符号链接自身，不能把链接作为目录跟随；打开结果
+接入 FD 容量预检、generation/description 和 CLOEXEC 登记。名称与 how 在使用前
+复制，但仍沿用现有单任务用户指针访问假设，不增加通用 EFAULT 安全复制能力。
+
+新增实际 SVC 测试覆盖目录 FD/AT_FDCWD、绝对路径/父目录/多级路径拒绝、空名、
+缺失文件、非目录、符号链接自身身份、跨 bind 拒绝、FD 数量及 CLOEXEC。
+Ubuntu GNU tar 解包仍超出此子集并返回 EOPNOTSUPP（退出 2），保留 KNOWN LIMIT。
+本增量不实现通用 BENEATH、不解决外部并发改名下的完整挂载视图一致性，也不启用
+FD 访问权限策略；多级路径不能用“字符串归一化后绝对路径打开”直接扩展。

@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
     os.mkfifo(fifo, 0o600)
     (work / 'vfork-fifo').symlink_to(fifo)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -119,6 +119,10 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             print('PASS: native vfork sharing/suspension/FD/exec baseline')
         inherited = os.memfd_create('range-inherited', flags=0) if name in ('range', 'ioctl') else None
         command = [str(loader), '--mode', 'compat', '--', str(probe)]
+        if name == 'beneath':
+            outside = work / 'beneath-outside'; outside.mkdir()
+            command = [str(loader), '--mode', 'compat', '-v',
+                       f'{outside}:{work}/beneath-mount', '--', str(probe)]
         if name == 'exec':
             private_loader = work / 'exec-loader'
             private_loader.write_bytes(loader.read_bytes()); private_loader.chmod(0o755)
