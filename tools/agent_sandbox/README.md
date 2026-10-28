@@ -26,7 +26,10 @@ directories. Unknown paths default to deny. Explicit nested mappings use the
 longest component prefix. Symlinks must be resolved by the runtime before policy
 checking; the Python access model operates only on canonical guest paths.
 Private state must be outside exposed source trees. Planning resolves existing
-host symlinks, but does not guarantee safety against later pathname races.
+host symlinks and compares device/inode identities against existing ancestors
+to reject case aliases, including missing state tails. Inspection errors reject
+the plan; distinct case-sensitive names remain distinct. This read-only snapshot
+does not guarantee safety against later pathname races or all bind-mount aliases.
 
 Add platform system libraries/interpreters/resources explicitly to `mounts`
 with `access: ro`. The sample is a policy example, not a complete tested brew

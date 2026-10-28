@@ -40,6 +40,32 @@ def contains(parent, child):
     return parent == '/' or parent == child or child.startswith(parent + '/')
 
 
+def host_contains(parent, child):
+    """Snapshot containment including existing filesystem aliases.
+
+    Missing child tails are permitted without creating them. Identity checks
+    preserve distinct case-sensitive names; they are not runtime authorization.
+    """
+    if contains(parent, child):
+        return True
+    try:
+        identity = os.stat(parent)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ProfileError(f'Cannot inspect host path: {parent}') from exc
+    for ancestor in (Path(child), *Path(child).parents):
+        try:
+            candidate = os.stat(ancestor)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ProfileError(f'Cannot inspect host path: {ancestor}') from exc
+        if os.path.samestat(identity, candidate):
+            return True
+    return False
+
+
 def compile_profile(profile, *, brew_prefix, workspace, state):
     fields(profile, {'version', 'default', 'mounts', 'private'}, {'version', 'default', 'mounts', 'private'})
     if type(profile['version']) is not int or profile['version'] != 1 or profile['default'] != 'deny':
@@ -66,7 +92,7 @@ def compile_profile(profile, *, brew_prefix, workspace, state):
         except (OSError, RuntimeError) as exc:
             raise ProfileError(f'Cannot resolve source: {source}') from exc
         # Keep the source spelling as guest destination, important for brew symlinks.
-        if contains(host, state) or contains(state, host):
+        if host_contains(host, state) or host_contains(state, host):
             raise ProfileError('Private state must be separate from all exposed host trees')
         add(host, target, mount['access'], 'bind')
     for private in profile['private']:

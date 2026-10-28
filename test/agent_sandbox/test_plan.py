@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('plan', ROOT/'tools/agent_sandbox/plan.py')
@@ -51,6 +52,40 @@ class PolicyTests(unittest.TestCase):
     def test_state_cannot_be_exposed(self):
         for state in (self.root/'workspace/state', self.root):
             with self.assertRaises(plan.ProfileError): self.compile(state=str(state))
+
+    def test_case_sensitive_siblings_remain_separate(self):
+        upper = self.root/'Case'
+        lower = self.root/'case'
+        upper.mkdir()
+        if lower.exists():
+            self.skipTest('Temporary backing is case insensitive')
+        lower.mkdir()
+        self.compile(workspace=str(upper), state=str(lower))
+
+    def test_case_alias_state_overlap_on_home(self):
+        home = Path('/storage/Users/currentUser')
+        if not home.is_dir():
+            self.skipTest('HarmonyOS home backing unavailable')
+        with tempfile.TemporaryDirectory(prefix='.elf-plan-test-', dir=home) as tmp:
+            base = Path(tmp)
+            (base/'Case').mkdir()
+            alias = base/'case'
+            if not alias.exists():
+                self.skipTest('Home backing is case sensitive')
+            (base/'Case/child').mkdir()
+            for source, state in ((base/'Case', alias),
+                                  (base/'Case', alias/'future/deep'),
+                                  (base/'Case/child', alias)):
+                with self.subTest(source=source, state=state):
+                    with self.assertRaises(plan.ProfileError):
+                        self.compile(workspace=str(source), state=str(state))
+            self.assertFalse((alias/'future').exists())
+
+    def test_identity_errors_fail_closed(self):
+        for error in (PermissionError('denied'), NotADirectoryError('not a directory')):
+            with mock.patch.object(plan.os, 'stat', side_effect=error):
+                with self.assertRaises(plan.ProfileError):
+                    plan.host_contains('/one', '/other/future')
 
     def test_unsafe_paths(self):
         for value in ('relative', '/a/../b', '/a//b', '/a/.', '//a', '/a\0b'):
