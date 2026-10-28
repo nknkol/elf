@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
     os.mkfifo(fifo, 0o600)
     (work / 'vfork-fifo').symlink_to(fifo)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -123,6 +123,15 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             outside = work / 'beneath-outside'; outside.mkdir()
             command = [str(loader), '--mode', 'compat', '-v',
                        f'{outside}:{work}/beneath-mount', '--', str(probe)]
+        if name == 'origin':
+            source = work / 'origin-source'; source.mkdir()
+            (source / 'file').write_text('Q shared bind file')
+            (source / 'to-two').symlink_to('/two/file')
+            nested = work / 'origin-nested'; nested.mkdir(); (nested / 'value').write_text('N')
+            command = [str(loader), '--mode', 'container', '--root', str(work),
+                       '-v', f'{source}:/one', '-v', f'{source}:/two',
+                       '-v', f'{nested}:/one/nested', '-v', f'{nested}:/shadow',
+                       '-v', f'{source}:/shadow', '--', './origin']
         if name == 'exec':
             private_loader = work / 'exec-loader'
             private_loader.write_bytes(loader.read_bytes()); private_loader.chmod(0o755)

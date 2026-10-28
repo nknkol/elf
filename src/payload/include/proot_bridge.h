@@ -11,6 +11,10 @@ long proot_get_auxv(long args[6]);
 long proot_execve(long number, long args[6]);
 /* Restricted single-component, non-following O_PATH open beneath a dirfd. */
 long proot_open_beneath(int dirfd, const char *path, unsigned long flags);
+/* Resolution observation, not an authorization grant. Relative paths retain
+ * unknown identity until directory FD/cwd mount identity is retained. */
+struct proot_open_origin { size_t mount_id; bool known; };
+long proot_openat(long args[6], struct proot_open_origin *origin);
 int proot_handles_syscall(long number);
 long proot_syscall(long number, long args[6]);
 #endif

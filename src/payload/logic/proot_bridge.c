@@ -255,7 +255,7 @@ static long mutate(Bridge *b, long number, long a[6])
                        AT_FDCWD, (long)b->host, a[4], 0);
 }
 
-static long dispatch(Bridge *b, long number, long a[6])
+static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
     long ret;
     if (number == __NR_inotify_add_watch) {
@@ -361,6 +361,7 @@ static long dispatch(Bridge *b, long number, long a[6])
     if (number == SYS_readlinkat && !path[0])
         return raw_syscall(number, a[0], a[1], a[2], a[3], 0, 0);
 
+    bool absolute_open = number == SYS_openat && origin && path[0] == '/';
     ret = resolve(b, (int)a[0], path, follow);
     if (ret < 0)
         return ret;
@@ -371,7 +372,15 @@ static long dispatch(Bridge *b, long number, long a[6])
         /* Preserve ordinary symlink bytes. Kernel handles truncation, no NUL
          * and invalid output addresses. Do not rewrite a relative target. */
     }
-    return raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
+    size_t mount_id = 0;
+    if (absolute_open) {
+        ret = binding_table_mount_id(&b->table, b->guest, &mount_id);
+        if (ret < 0) return ret;
+    }
+    ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
+    if (ret >= 0 && absolute_open)
+        *origin = (struct proot_open_origin){mount_id, true};
+    return ret;
 }
 
 static long bridge_create(Bridge **out)
@@ -398,7 +407,7 @@ static long bridge_create(Bridge **out)
     return 0;
 }
 
-long proot_syscall(long number, long args[6])
+static long bridge_syscall(long number, long args[6], struct proot_open_origin *origin)
 {
     if (!proot_handles_syscall(number))
         return -ENOSYS;
@@ -406,9 +415,21 @@ long proot_syscall(long number, long args[6])
     long ret = bridge_create(&b);
     if (ret < 0)
         return ret;
-    ret = dispatch(b, number, args);
+    ret = dispatch(b, number, args, origin);
     proot_scratch_free(b,sizeof(Bridge));
     return ret;
+}
+
+long proot_syscall(long number, long args[6])
+{
+    return bridge_syscall(number, args, NULL);
+}
+
+long proot_openat(long args[6], struct proot_open_origin *origin)
+{
+    if (!origin) return -EINVAL;
+    *origin = (struct proot_open_origin){0, false};
+    return bridge_syscall(SYS_openat, args, origin);
 }
 
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,

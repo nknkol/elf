@@ -204,6 +204,8 @@ long fd_experiment_dispatch(long n,long a[6])
         if(a[1]==1)return r->generation;
         if(a[1]==2)return r->description;
         if(a[1]==3)return r->cloexec;
+        if(a[1]==4)return r->origin.mount_id;
+        if(a[1]==5)return r->origin.access;
         return -EINVAL;
     }
     /* No partial support for lifecycle or alternate FD creation in this mode. */
@@ -260,6 +262,7 @@ long fd_experiment_dispatch(long n,long a[6])
         for(size_t i=0;i<t->capacity;i++)free_slots+=t->slots[i].fd<0;
         if(free_slots<2)return -ENOSPC;
     }
+    struct proot_open_origin opened={0,false};
     long result;
     if(n==__NR_openat2) {
         if(openat2_resolve==8)
@@ -269,9 +272,10 @@ long fd_experiment_dispatch(long n,long a[6])
              * can use the existing guest path backend, including absolute
              * paths and bindings; never send the guest spelling to the host. */
             long open_args[6]={a[0],a[1],openat2_flags,0,0,0};
-            result=syscall_handle_common(__NR_openat,open_args);
+            result=proot_openat(open_args,&opened);
         }
-    } else result=syscall_handle_common(n,a);
+    } else if(n==__NR_openat)result=proot_openat(a,&opened);
+    else result=syscall_handle_common(n,a);
     if(result<0)return result;
     if(pair) {
         /* Read only after kernel success. This relies on the experimental
@@ -289,7 +293,11 @@ long fd_experiment_dispatch(long n,long a[6])
             (n==__NR_epoll_create1 || n==__NR_inotify_init1)?!!(a[0]&O_CLOEXEC):
             (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
         rc=n==__NR_pidfd_getfd?fd_table_import_unknown(t,(int)result,cloexec):
-            fd_table_open(t,(int)result,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
+            /* Existing root/bind configuration is writable. This is a source
+             * tag, not O_ACCMODE or permission enforcement; relative paths,
+             * imported FDs and exec restore deliberately remain UNKNOWN. */
+            fd_table_open(t,(int)result,(struct fd_origin){opened.mount_id,
+                          opened.known?FD_ACCESS_RW:FD_ACCESS_UNKNOWN},cloexec);
     }
     else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
     else rc=fd_table_dup(t,(int)a[0],(int)result,n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC);

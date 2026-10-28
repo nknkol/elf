@@ -4,6 +4,9 @@
 关闭、SCM_RIGHTS、私有 fork、受限 vfork 和 exec 状态交接；默认构建仍未启用这些
 元数据功能。两者都没有接入只读/默认拒绝权限执行，agent JSON 仍只生成计划。
 
+当前已为绝对路径 openat/受支持的 resolve=0 openat2 保存解析所得 mount ID 和
+现有可写配置标签；相对路径、导入和 exec 恢复仍为 UNKNOWN。此标签不是可信授权。
+
 以下保留按实施阶段累积的设计与验证记录。早期“尚未接入 loader/payload”等描述
 表示当时阶段，不代表当前实验构建；后续小节记录接入结果。
 
@@ -707,3 +710,21 @@ FD 实验对相同受限 O_PATH flags 新增 resolve=0 分支，经 PRoot openat
 位明确拒绝。直接 SVC 覆盖 resolve=0 FD/CLOEXEC 和相对多分量，并验证 resolve=16/9
 不会被忽略。Ubuntu 绝对源路径 tar 打包纳入回归，归档由宿主独立验证。
 公共 namespace/mount/kcmp SIGSYS 拒绝也已补齐，见 SYSCALL_ENGINE_LESSONS.md。
+
+### 绝对路径打开的挂载来源接入
+
+新增 proot_openat 输出接口，在同一次路径解析中取得最终 guest 路径的 mount ID，
+成功打开后才发布来源；普通 proot_syscall 不请求输出，行为不变。FD 实验对绝对路径
+openat 和受支持的 resolve=0 openat2 记录来源。当前 root/bind 只有可写配置，因此
+记录 FD_ACCESS_RW；它不表示该 FD 以 O_RDWR 打开，也不执行授权。
+
+root ID=0，bind ID=配置索引+1；取最终解析路径，最长匹配/同目标最后一项覆盖。
+同一宿主文件经不同 bind 打开不会合并 mount 或打开描述身份。相对路径及 BENEATH
+暂不填来源，因为 /proc/self/fd 的反向路径不能证明入口 mount 身份；继承/SCM_RIGHTS
+等继续 UNKNOWN，exec 导入也继续清除来源标签。私有 fork/dup 保留已有记录。
+
+新增实际 SVC 用例覆盖 root、同源多 bind、嵌套及重复目标 bind、符号链接跟随与
+O_NOFOLLOW、失败打开不增加记录、改名后来源保留、私有 fork 与 exec 降级。
+诊断 selector 4/5 暴露 mount/access，便于验收。没有新增只读配置或只读执行，
+并发宿主改名和解析后路径替换仍未解决，不能把观察到的标签当作权限凭证。
+下一步保留目录 FD/cwd 的 guest mount 身份，之后再引入经过明确验收的权限判断。

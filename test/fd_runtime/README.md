@@ -18,8 +18,11 @@ timerfd_create, inotify_init1, signalfd4 creation, pipe2, socket, socketpair,
 accept, accept4, pidfd_open, pidfd_getfd, dup, dup3,
 F_DUPFD/F_DUPFD_CLOEXEC and
 F_SETFD, and routes close through reserved outcome bookkeeping. Inherited FDs
-start untracked; dup of one remains unknown provenance. All open provenance is
-UNKNOWN: there is no readonly/default-deny permission policy in this experiment.
+start untracked; dup of one remains unknown provenance. Absolute guest openat and supported resolve=0 openat2 record the resolved mount
+ID and current writable configuration tag. Relative opens, BENEATH opens and
+imports remain UNKNOWN; exec restore still downgrades origins to UNKNOWN. These
+observations are not trusted permission grants: no readonly/default-deny policy
+is enforced, and path races/retained directory mount identity remain unresolved.
 
 General shared-VM/shared-FD clone (except bounded vfork below), close_range, unshare and selected alternate FD creation/transfer
 interfaces return ENOSYS. Same-task nested slow calls return EDEADLK, other task
@@ -34,7 +37,9 @@ For validation only, prctl(PR_ELF_FD_QUERY=0x46445452, selector, fd) returns:
 - selector 0: tracked record count;
 - selector 1: descriptor generation;
 - selector 2: open-description identity;
-- selector 3: CLOEXEC bit.
+- selector 3: CLOEXEC bit;
+- selector 4: observed mount ID (0=root or unknown; inspect selector 5);
+- selector 5: source access tag (0=unknown, 1=ro, 2=rw; current mapped opens use rw).
 
 Missing records return ENOENT. This diagnostic interface is absent from the
 normal payload and exposes no permission grants. It is not a stable public ABI.
@@ -341,3 +346,10 @@ The restricted openat2 flags now also accept resolve=0 through the PRoot path
 backend; other resolve masks remain rejected rather than silently cleared.
 Fatal-syscall checks cover 14 calls, including mount/root/namespace operations
 and AArch64 kcmp(272); unshare is 97 on this ABI.
+
+`origin.c` checks absolute-open mount observations through real SVCs: root,
+shared-host bind aliases, nested and duplicate-destination binds, followed and
+non-followed symlinks, resolve=0 openat2, failed-open bookkeeping, unknown relative
+opens, dup, rename, private fork and exec downgrade. It does not test RO bindings:
+those are not yet configured or enforced. Tags are acquired during the existing
+resolution; the runtime does not re-resolve a successful open to infer its origin.
