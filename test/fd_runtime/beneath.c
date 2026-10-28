@@ -30,6 +30,18 @@ void _start(void)
     CHECK(call(__NR_close,fd,0,0,0)==0);
     fd=beneath(AT_FDCWD,"fd-data",O_PATH|O_NOFOLLOW,8);CHECK(fd>=0 && query(3,fd)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0);
+    CHECK(call(__NR_mkdirat,dir,(long)"beneath-dir",0700,0)==0);
+    fd=beneath(dir,"beneath-dir///",flags|O_DIRECTORY,8);CHECK(fd>=0);
+    CHECK(query(3,fd)==1 && (call(__NR_fcntl,fd,F_GETFL,0,0)&O_DIRECTORY));
+    CHECK(call(__NR_close,fd,0,0,0)==0);
+    fd=beneath(AT_FDCWD,"beneath-dir/",flags|O_DIRECTORY,8);CHECK(fd>=0);
+    CHECK(call(__NR_close,fd,0,0,0)==0);
+    CHECK(beneath(dir,"beneath-dir/",flags,8)==-EOPNOTSUPP);
+    CHECK(beneath(dir,"fd-data/",flags|O_DIRECTORY,8)==-EOPNOTSUPP);
+    CHECK(beneath(dir,"..///",flags|O_DIRECTORY,8)==-EXDEV);
+    CHECK(beneath(dir,"beneath-dir/../",flags|O_DIRECTORY,8)==-EOPNOTSUPP);
+    CHECK(beneath(dir,"beneath-mount/",flags|O_DIRECTORY,8)==-EOPNOTSUPP);
+    CHECK(call(__NR_unlinkat,dir,(long)"beneath-dir",AT_REMOVEDIR,0)==0);
     CHECK(beneath(dir,"beneath-mount",flags|O_DIRECTORY,8)==-EOPNOTSUPP);
     CHECK(beneath(dir,"..",flags,8)==-EXDEV);
     CHECK(beneath(dir,"/etc",flags,8)==-EXDEV);
@@ -46,6 +58,7 @@ void _start(void)
     char value[8];CHECK(call(__NR_readlinkat,fd,(long)"",(long)value,sizeof(value))==1 && value[0]=='/');
     CHECK(call(__NR_close,fd,0,0,0)==0);
     CHECK(beneath(dir,"beneath-link",flags|O_DIRECTORY,8)==-ENOTDIR);
+    CHECK(beneath(dir,"beneath-link/",flags|O_DIRECTORY,8)==-EOPNOTSUPP);
     CHECK(call(__NR_unlinkat,dir,(long)"beneath-link",0,0)==0);
     CHECK(query(0,0)==base+1);
     CHECK(call(__NR_close,dir,0,0,0)==0 && query(0,0)==base);

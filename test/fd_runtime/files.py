@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real rootfs file workflows, with unsupported GNU tar extraction explicit."""
+"""Real rootfs file workflows, including shallow and nested archive extraction."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -40,13 +40,13 @@ for directory, shell, prefix in (
         assert not (Path(temp) / 'copy').exists()
         p = run('mkdir /work/extracted; tar -xf /work/archive.tar -C /work/extracted; '
                 'cat /work/extracted/a/file')
-        if directory == 'ubuntu-root':
-            # This guest GNU tar exceeds the single-component openat2 subset. Do not relax
-            # its confinement request or count EOPNOTSUPP as working extraction.
-            assert p.returncode == 2 and 'Operation not supported' in p.stderr, (
-                directory, p.returncode, p.stdout, p.stderr)
-            print('KNOWN LIMIT: GNU tar extraction exceeds restricted openat2 RESOLVE_BENEATH support')
-        else:
-            assert (p.returncode, p.stdout) == (0, 'payload'), (p.returncode, p.stdout, p.stderr)
-            assert (Path(temp) / 'extracted/a/file').read_text() == 'payload'
-            print('PASS: file workflow', directory, 'tar-extract')
+        assert (p.returncode, p.stdout) == (0, 'payload'), (p.returncode, p.stdout, p.stderr)
+        assert (Path(temp) / 'extracted/a/file').read_text() == 'payload'
+        print('PASS: file workflow', directory, 'tar-extract')
+        p = run('mkdir -p /work/a/sub; printf nested >/work/a/sub/deep; '
+                'tar -cf /work/nested.tar -C /work a; mkdir /work/deep-extracted; '
+                'tar -xf /work/nested.tar -C /work/deep-extracted; '
+                'cat /work/deep-extracted/a/sub/deep')
+        assert (p.returncode, p.stdout) == (0, 'nested'), (p.returncode, p.stdout, p.stderr)
+        assert (Path(temp) / 'deep-extracted/a/sub/deep').read_text() == 'nested'
+        print('PASS: file workflow', directory, 'tar-extract-nested')

@@ -446,6 +446,15 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags)
     memcpy(name, path, length + 1);
     if (!length) return -ENOENT;
     if (name[0] == '/' || !strcmp(name, "..")) return -EXDEV;
+    /* Trailing separators require directory resolution. Only accept them
+     * with explicit O_DIRECTORY; keep NOFOLLOW at the actual kernel lookup.
+     * Following a trailing symlink is outside this restricted subset. */
+    int trailing = name[length - 1] == '/';
+    if (trailing) {
+        if (!(flags & O_DIRECTORY)) return -EOPNOTSUPP;
+        while (length && name[length - 1] == '/') name[--length] = 0;
+        if (!strcmp(name, "..")) return -EXDEV;
+    }
     if (strchr(name, '/')) return -EOPNOTSUPP;
     Bridge *b;
     long ret = bridge_create(&b);
@@ -467,6 +476,7 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags)
     if (ret < 0) goto close_anchor;
     if (base_mount != target_mount) { ret = -EOPNOTSUPP; goto close_anchor; }
     ret = raw_syscall(SYS_openat, anchor, (long)name, flags, 0, 0, 0);
+    if (trailing && ret == -ENOTDIR) ret = -EOPNOTSUPP;
 close_anchor:
     if (dirfd == AT_FDCWD) raw_syscall(__NR_close, anchor, 0, 0, 0, 0, 0);
 out:

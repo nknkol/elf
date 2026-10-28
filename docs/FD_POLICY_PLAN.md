@@ -681,3 +681,17 @@ O_PATH|O_NOFOLLOW 可以返回符号链接自身，不能把链接作为目录�
 Ubuntu GNU tar 解包仍超出此子集并返回 EOPNOTSUPP（退出 2），保留 KNOWN LIMIT。
 本增量不实现通用 BENEATH、不解决外部并发改名下的完整挂载视图一致性，也不启用
 FD 访问权限策略；多级路径不能用“字符串归一化后绝对路径打开”直接扩展。
+
+### 尾部目录分隔符与 Ubuntu tar 解包
+
+实际参数跟踪确认前一轮简单归档的失败路径是 `a/`，而非多级路径；临时跟踪已移除。
+现对显式 O_DIRECTORY 的单分量名称允许尾部重复 `/`，去掉分隔符后仍以原目录 FD
+执行 O_PATH|O_NOFOLLOW|O_DIRECTORY 打开。`../` 拒绝，内部 `/`、跨 bind 和尾部
+符号链接仍不支持。尾部分隔符下的内核 ENOTDIR 返回 EOPNOTSUPP，明确保留未实现
+的链接跟随/非目录错误细分；不把尾部斜杠当作允许跟随符号链接的理由。
+
+Alpine 和 Ubuntu 的原归档以及新增 `a/sub/deep` 多层归档现在均解包成功，退出 0，
+宿主检查解出的内容一致。文件工作流共 16 个成功场景，撤销先前 GNU tar 解包的
+KNOWN LIMIT。归档多层目录可用不等于单次 openat2 多分量解析可用，后者仍拒绝。
+实际 SVC 测试覆盖目录 FD/AT_FDCWD 的尾部斜杠、重复斜杠、CLOEXEC/O_DIRECTORY
+保留，以及缺少 O_DIRECTORY、普通文件、`../`、中间分隔符、跨 bind、链接目录拒绝。

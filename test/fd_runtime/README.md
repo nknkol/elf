@@ -330,4 +330,7 @@ SIGSYS. This is an unsupported-call fallback, not fchmodat2 emulation.
 O_NOFOLLOW + RESOLVE_BENEATH subset through real patched SVCs: explicit dirfd,
 AT_FDCWD, CLOEXEC/accounting, rejected escapes and multi-component names,
 symlink identity, missing/non-directory targets, and configured bind crossings.
-Ubuntu GNU tar extraction still exceeds this subset (EOPNOTSUPP, exit 2).
+Explicit O_DIRECTORY allows trailing separators on a single directory component;
+symlink following remains unsupported. Both Alpine and Ubuntu pass shallow and
+nested tar extraction, with extracted contents verified on the host. This does
+not imply general multi-component openat2 support.
