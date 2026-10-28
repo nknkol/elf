@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
     os.mkfifo(fifo, 0o600)
     (work / 'vfork-fifo').symlink_to(fifo)
     (work / 'fd-data').write_text('Q runtime file\n')
-    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'cwd', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
+    for name in ('probe', 'rights', 'batch', 'notify', 'range', 'pidfd', 'unsupported', 'beneath', 'origin', 'cwd', 'path_context', 'ioctl', 'exec', 'fork', 'vfork', 'orphan'):
         probe = work / name
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
@@ -148,6 +148,14 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             command = [str(loader), '--mode', 'container', '--root', str(work),
                        '-v', f'{first}:/one', '-v', f'{first}:/two',
                        '-v', f'{second}:/one/nested', '-v', f'{second}:/other', '--', './cwd']
+        if name == 'path_context':
+            source = work / 'context-source'; source.mkdir(); (source / 'nested').mkdir()
+            (source / 'nested/value').write_text('SSSS'); (source / 'nested/link').symlink_to('S')
+            overlay = work / 'context-overlay'; overlay.mkdir()
+            (overlay / 'value').write_text('NN'); (overlay / 'link').symlink_to('N')
+            command = [str(loader), '--mode', 'container', '--root', str(work),
+                       '-v', f'{source}:/one', '-v', f'{source}:/two',
+                       '-v', f'{overlay}:/one/nested', '--', './path_context']
         if name == 'exec':
             private_loader = work / 'exec-loader'
             private_loader.write_bytes(loader.read_bytes()); private_loader.chmod(0o755)
@@ -164,6 +172,13 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
                 os.close(inherited)
         assert p.returncode == 0 and 'PASS: runtime FD' in p.stdout, (p.returncode,p.stdout,p.stderr)
         print(p.stdout, end='')
+        if name == 'path_context':
+            assert (source / 'nested/value').read_text() == 'SSSS'
+            assert not (overlay / 'value').exists()
+            assert os.readlink(overlay / 'newlink') == 'literal-target'
+            assert not (source / 'nested/newlink').exists()
+            assert not (source / 'nested/wrong').exists()
+            assert not (source / 'nested/wronglink').exists()
 
     guards = work / 'syscall-guards'
     subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',

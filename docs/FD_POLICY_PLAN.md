@@ -765,3 +765,19 @@ AT_FDCWD openat/resolve=0 openat2 经 retained mount 还原视图，复用正反
 的内容与 mount、未知 fchdir 降级、失败 chdir/fchdir/getcwd/exec、fork/vfork 和
 成功 exec 降级。两套回归通过。仍没有权限执行；stat/mkdir/unlink 等其余相对路径
 操作和 BENEATH 尚未使用此上下文，下一步应统一这些入口，再讨论最小只读策略。
+
+### 现有 PRoot 路径操作的统一上下文
+
+实验 dispatcher 对已由 PRoot 接管的非 FD 创建路径操作传入不可变的每次调用上下文：
+cwd 与最多两个目录 FD 的 mount 观察值。host_fd/guest_cwd 每次解析分别选择对应
+来源，复用同一反向映射及正向一致性检查。symlinkat 的目录参数取 a[1]，目标字符串
+仍为不解析的链接内容；rename/link 的 a[0]/a[2] 独立处理，不能共用源目录身份。
+普通构建不传上下文，保持原行为。没有新建持久映射表或额外路径解析轮次。
+
+新实际 SVC 用例覆盖 fstatat、faccessat、readlinkat、mkdirat、symlinkat、renameat、
+跨挂载 linkat 拒绝、truncate、unlinkat；通过同源 bind 的不同嵌套视图验证数据/目录
+变化，宿主再独立检查文件内容、链接目标和失败操作没有留下目标。两套回归通过。
+这覆盖现有 PRoot handlers 的公共解析入口，并非新增所有路径 syscall 支持。
+exec 路径预检、受限 BENEATH、尚未移植的 xattr/ACL 等仍有独立缺口；RO/default-deny
+未启用，挂载观察值仍不等于可信权限。下一步检查独立 exec/BENEATH 入口的一致性，
+避免同一视图在打开与执行时分叉，再推进配置与权限判定。

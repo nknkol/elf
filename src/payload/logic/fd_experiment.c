@@ -260,7 +260,22 @@ long fd_experiment_dispatch(long n,long a[6])
     int pair=n==__NR_pipe2 || n==__NR_socketpair;
     int execute=n==__NR_execve || n==__NR_execveat;
     int receive=n==__NR_recvmsg || n==__NR_recvmmsg;
-    if(!create && !pair && !duplicate && !setfd && !receive && !execute)return syscall_handle_common(n,a);
+    if(!create && !pair && !duplicate && !setfd && !receive && !execute) {
+        if(proot_handles_syscall(n)) {
+            struct proot_path_context context={.cwd=s->cwd,
+                .fd={(int)a[n==__NR_symlinkat?1:0],AT_FDCWD}};
+            if(n==__NR_linkat || n==__NR_renameat || n==__NR_renameat2)
+                context.fd[1]=(int)a[2];
+            for(size_t i=0;i<2;i++) {
+                if(context.fd[i]==AT_FDCWD)continue;
+                const struct fd_record *r=fd_table_get(t,context.fd[i]);
+                if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
+                    context.directory[i]=(struct proot_open_origin){r->origin.mount_id,true};
+            }
+            return proot_context_syscall(n,a,&context);
+        }
+        return syscall_handle_common(n,a);
+    }
     /* The entry trampoline rejects same-TID nested slow calls in this build;
      * each supported task has its own metadata arena across these syscalls.
      * Never generalize this to a multithreaded permission mode. */

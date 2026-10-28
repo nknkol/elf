@@ -19,6 +19,12 @@ long proot_openat(long args[6], const struct proot_open_origin *anchor,
                   struct proot_open_origin *origin);
 long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,
                struct proot_open_origin *origin);
+/* Immutable per-call observations for cwd and up to two directory operands. */
+struct proot_path_context {
+    struct proot_open_origin cwd, directory[2];
+    int fd[2];
+};
+long proot_context_syscall(long number, long args[6], const struct proot_path_context *context);
 int proot_handles_syscall(long number);
 long proot_syscall(long number, long args[6]);
 #endif

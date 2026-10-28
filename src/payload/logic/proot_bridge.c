@@ -23,6 +23,7 @@ _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 1
 
 typedef struct {
     BindingTable table;
+    const struct proot_path_context *context;
     int anchor_fd;
     struct proot_open_origin anchor;
     PathBinding bindings[CONFIG_MAX_BINDS];
@@ -122,9 +123,20 @@ static int observed_guest_path(Bridge *b, const char *host, char *guest)
     return strcmp(host, mapped) ? -EXDEV : 0;
 }
 
+static void select_anchor(Bridge *b, int fd)
+{
+    if (!b->context) return;
+    b->anchor_fd = fd;
+    b->anchor = (struct proot_open_origin){0, false};
+    if (fd == AT_FDCWD) b->anchor = b->context->cwd;
+    else for (size_t i = 0; i < 2; i++)
+        if (b->context->fd[i] == fd) { b->anchor = b->context->directory[i]; break; }
+}
+
 static int host_fd(void *opaque, int fd, char *guest)
 {
     Bridge *b = opaque;
+    select_anchor(b, fd);
     struct stat st;
     long ret = raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0);
     if (ret < 0)
@@ -156,6 +168,7 @@ static int host_fd(void *opaque, int fd, char *guest)
 
 static long guest_cwd(Bridge *b)
 {
+    select_anchor(b, AT_FDCWD);
     long ret = raw_syscall(SYS_getcwd, (long)b->host, sizeof(b->host), 0, 0, 0, 0);
     if (ret < 0)
         return ret;
@@ -436,6 +449,7 @@ static long bridge_create(Bridge **out)
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     Bridge *b = (void *)mem;
+    b->context = NULL;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
     b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings,
@@ -489,6 +503,18 @@ long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor
         return -EINVAL;
     *origin = (struct proot_open_origin){0, false};
     return bridge_syscall(number, args, anchor, origin);
+}
+
+long proot_context_syscall(long number, long args[6], const struct proot_path_context *context)
+{
+    if (!context || !proot_handles_syscall(number)) return -EINVAL;
+    Bridge *b;
+    long ret = bridge_create(&b);
+    if (ret < 0) return ret;
+    b->context = context;
+    ret = dispatch(b, number, args, NULL);
+    proot_scratch_free(b, sizeof(Bridge));
+    return ret;
 }
 
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,

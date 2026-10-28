@@ -359,8 +359,7 @@ Known directory-FD openat/resolve=0 openat2 uses its retained mount ID to revers
 the live host FD path, then validates the forward mapping and current mount.
 Tests distinguish nested bind contents through same-host aliases, preserve the
 view through dup and in-mount rename, reject a directory moved under an overmount
-with EXDEV, and check relative symlink and parent traversal origins. Cwd tracking is described below; retained identity for other path syscalls is
-not yet implemented.
+with EXDEV, and check relative symlink and parent traversal origins. Cwd tracking and the common path context are described below.
 
 `cwd.c` compares native and loader private-fork/bounded-vfork cwd independence,
 then checks alias-preserving getcwd and relative open, known/unknown fchdir,
@@ -368,5 +367,14 @@ relative chdir into/out of a nested bind, failed chdir/fchdir/getcwd and failed
 exec preservation. Successful exec clears cwd provenance: physical cwd survives,
 but no guest alias or access tag is authenticated by the current handoff.
 The runtime owns cwd metadata per private task arena, copied for fork/vfork;
-no extra cwd FD or persistent path cache is introduced. Other relative path
-operations still need this context wired in before claiming a unified view.
+no extra cwd FD or persistent path cache is introduced. The common PRoot path dispatcher now receives this context as described below;
+exec path preflight and restricted BENEATH still use separate adapters.
+
+`path_context.c` checks the shared path context for existing PRoot handlers.
+Same-host aliases with different nested bindings must stat/readlink/create/remove
+in their own views. Both operands of rename/link select their own directory
+observations, including mixed explicit-dirfd/AT_FDCWD calls; cross-mount attempts
+return EXDEV. Relative truncate must change only the selected backing file.
+The host independently verifies surviving file contents and symlink targets.
+No permission policy or new xattr/ACL implementation is implied. Native hardlink
+creation is not required: the cross-mount link case must reject before the kernel.
