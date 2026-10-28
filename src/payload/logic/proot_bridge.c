@@ -10,6 +10,9 @@
 #include "config.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
+#ifdef FD_EXPERIMENT
+#include "fd_experiment.h"
+#endif
 #include "proot_scratch.h"
 #include "path/resolve_core.h"
 #include "path/binding_core.h"
@@ -23,6 +26,7 @@ _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 1
 
 typedef struct {
     BindingTable table;
+    bool mutation;
     const struct proot_path_context *context;
     int anchor_fd;
     struct proot_open_origin anchor;
@@ -195,7 +199,17 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
     ops.detranslate = ordinary_link;
     ops.proc_link = proc_link;
     PathResolver resolver = {{b, &ops}, b->cwd, host_fd, host_map};
-    return resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
+    int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
+#ifdef FD_EXPERIMENT
+    if (rc >= 0 && b->mutation && g_payload_config.guard_path_mutations) {
+        size_t mount;
+        rc = binding_table_mount_id(&b->table, b->guest, &mount);
+        if (rc < 0) return rc;
+        /* Do not turn inferred reverse mappings of imported FDs/cwd into grants. */
+        rc = fd_experiment_check_path_mutation(mount, path[0] == '/' || b->anchor.known);
+    }
+#endif
+    return rc;
 }
 
 int proot_handles_syscall(long number)
@@ -299,8 +313,25 @@ static long mutate(Bridge *b, long number, long a[6])
                        AT_FDCWD, (long)b->host, a[4], 0);
 }
 
+static bool path_mutation(long number, long a[6])
+{
+    switch (number) {
+    case SYS_openat:
+        /* O_PATH ignores ordinary access/create/truncate flags. */
+        if (a[2] & O_PATH) return false;
+        return (a[2] & (O_ACCMODE | O_CREAT | O_TRUNC)) ||
+               ((a[2] & O_TMPFILE) == O_TMPFILE);
+    case SYS_mknodat: case SYS_mkdirat: case SYS_unlinkat: case SYS_symlinkat:
+    case SYS_linkat: case SYS_renameat: case SYS_renameat2:
+    case SYS_fchmodat: case SYS_fchownat: case SYS_utimensat: case __NR_truncate:
+        return true;
+    default: return false;
+    }
+}
+
 static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
+    b->mutation = path_mutation(number, a);
     long ret;
     if (number == __NR_inotify_add_watch) {
         if (!a[1]) return -EFAULT;
@@ -450,6 +481,7 @@ static long bridge_create(Bridge **out)
         return mem;
     Bridge *b = (void *)mem;
     b->context = NULL;
+    b->mutation = false;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
     b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings,

@@ -4,7 +4,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 /* Immutable permissions indexed by binding_table_mount_id: root=0, bind=i+1.
- * This standalone core is not connected to syscall interception yet.
+ * The FD experiment uses this for diagnostics and an opt-in path mutation
+ * guard; descriptor IO and full filesystem isolation are not yet enforced.
  * Caller must supply authenticated provenance in THIS policy/table incarnation,
  * after symlink resolution. Unknown origins and imported exec state are no grant.
  * No host path lookup, allocation, file IO or FD ownership lives here. */

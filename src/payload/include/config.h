@@ -87,8 +87,9 @@ typedef struct payload_config {
 #ifdef PROOT_PATH
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
-    /* Diagnostic transport only: root then bind order, d/r/w; empty=legacy. */
+    /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
     char mount_access_observe[CONFIG_MAX_BINDS + 2];
+    int32_t guard_path_mutations; /* Partial path-only experiment, not isolation. */
 #endif
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];

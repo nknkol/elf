@@ -19,9 +19,16 @@ fork/vfork 原生对照及 exec 降级通过。现有 PRoot 路径 handlers 也�
 本次仅运行该核心测试、路径核心回归和 22 项 Python 测试，未重建 ELF。
 2026-10-29 配置传递增量：FD 实验版新增 `--observe-mount-access` 观察参数，
 root/bind 权限向量经 loader→payload→两次 exec 保留，非法配置拒绝，
-未指定时保持旧行为。实验 payload ABI 升至 4，普通 PRoot 仍为 3。
+未指定时保持旧行为。当时实验 payload ABI 升至 4，普通 PRoot 仍为 3。
 真实 SVC 诊断与旧 ABI 拒绝测试、完整 FD 回归、普通版 `make check` 通过。
 此参数不限制实际读写，也不改变 FD 来源标签；传递未经身份认证，JSON 尚未接启动。
+2026-10-29 路径修改增量：新增独立 `--guard-path-mutations` 开关，将权限核心
+接到 PRoot 写方式 open、创建/删除、rename/link 双端、路径截断和元数据修改。
+真实 guest 测试覆盖软链接最终目标、嵌套覆盖、cwd/dirfd 与 exec 未知来源拒绝，
+并核对宿主文件及目录没有被拒绝调用修改；观察模式保持原行为。
+配置布局使实验 ABI 升至 5（普通版仍为 3）。传递/路径测试、完整 FD 回归和
+普通版 `make check` 通过。此开关不限制读取、FD 写入/mmap、FD 元数据或未迁移
+handler，不具备完整只读或默认拒绝隔离；路径竞争和未认证 exec 仍待解决。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**
@@ -38,7 +45,7 @@ root/bind 权限向量经 loader→payload→两次 exec 保留，非法配置�
 | 同线程嵌套慢调用 | 保留重入透传 | 返回 EDEADLK；非拥有者任务拒绝 |
 | openat2 | HarmonyOS 返回 ENOSYS | 24 字节 how、O_PATH\|O_NOFOLLOW 子集；resolve=0 经 PRoot，BENEATH 仅单分量及受限尾斜杠 |
 | 已确认危险 syscall | 公共 guard 返回 ENOSYS | 同一公共 guard 加实验拒绝项 |
-| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN，无权限执行 |
+| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径修改保护，FD 权限未执行 |
 | agent JSON 配置 | 只输出计划 | 同样未连接执行层 |
 
 `src/elfloader` 是最后一次构建的产物，不能用它的名称判断启用了哪种能力。

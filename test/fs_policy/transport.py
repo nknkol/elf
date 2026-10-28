@@ -35,6 +35,8 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         assert p.returncode != 0 and 'mount access observation' in p.stdout+p.stderr, (options, p.stdout, p.stderr)
     p = run(['--observe-mount-access', 'drw', '--observe-mount-access', 'drw'])
     assert p.returncode != 0 and 'duplicate mount access observation' in p.stdout+p.stderr
+    p = run(['--observe-mount-access', 'drw', '--guard-path-mutations', 'drw'])
+    assert p.returncode != 0 and 'duplicate mount access observation' in p.stdout+p.stderr
     print('PASS: reject empty, malformed, oversized, mismatched and duplicate policies')
     # Verify the actual experimental payload layout has its own ABI version,
     # and old custom payload headers are rejected before guest startup.
@@ -47,8 +49,8 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         if kind == 1 and addr <= entry and entry+16 <= addr+size:
             offset = off+entry-addr
             break
-    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 4
-    for version in (3, 2):
+    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 5
+    for version in (4, 3, 2):
         old = bytearray(blob)
         struct.pack_into('<I', old, offset+12, version)
         payload = root / f'old-{version}.bin'
@@ -58,4 +60,4 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         p = subprocess.run([str(loader), '-c', str(config), '--mode', 'compat',
                             '--', str(root / 'probe')], capture_output=True, text=True, timeout=20)
         assert p.returncode != 0 and 'payload ABI mismatch' in p.stdout+p.stderr, (p.stdout, p.stderr)
-    print('PASS: experimental ABI 4 rejects older payload layouts')
+    print('PASS: experimental ABI 5 rejects older payload layouts')

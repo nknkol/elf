@@ -195,6 +195,27 @@ static int room(struct fd_table *t,int target,int assign)
     for(size_t i=0;i<t->capacity;i++)if(t->slots[i].fd<0)return 0;
     return -ENOSPC;
 }
+static int mount_decision(size_t mount, bool known, enum fs_operation operation)
+{
+    const char *v=g_payload_config.mount_access_observe;
+    if(!v[0])return -ENODATA;
+    enum fs_access access[CONFIG_MAX_BINDS+1];
+    size_t count=0;
+    for(;count<CONFIG_MAX_BINDS+1 && v[count];count++) {
+        if(v[count]!='d' && v[count]!='r' && v[count]!='w')return -EINVAL;
+        access[count]=v[count]=='d'?FS_DENY:v[count]=='r'?FS_READ_ONLY:FS_READ_WRITE;
+    }
+    if(v[count])return -EINVAL;
+    struct fs_policy policy={access,count};
+    int valid=fs_policy_validate(&policy,g_payload_config.bind_count);
+    if(valid)return valid;
+    return fs_policy_check(&policy,mount,known,operation);
+}
+int fd_experiment_check_path_mutation(size_t mount, bool known)
+{
+    if(!g_payload_config.guard_path_mutations)return 0;
+    return mount_decision(mount,known,FS_MUTATE);
+}
 long fd_experiment_dispatch(long n,long a[6])
 {
     struct fd_runtime *s=current();
@@ -203,19 +224,7 @@ long fd_experiment_dispatch(long n,long a[6])
     if(n==__NR_prctl && a[0]==PR_ELF_FD_QUERY) {
         /* Diagnostic only: decision for a supplied mount ID, not an FD grant. */
         if(a[1]==6) {
-            const char *v=g_payload_config.mount_access_observe;
-            if(!v[0])return -ENODATA;
-            enum fs_access access[CONFIG_MAX_BINDS+1];
-            size_t count=0;
-            for(;count<CONFIG_MAX_BINDS+1 && v[count];count++) {
-                if(v[count]!='d' && v[count]!='r' && v[count]!='w')return -EINVAL;
-                access[count]=v[count]=='d'?FS_DENY:v[count]=='r'?FS_READ_ONLY:FS_READ_WRITE;
-            }
-            if(v[count])return -EINVAL;
-            struct fs_policy policy={access,count};
-            int valid=fs_policy_validate(&policy,g_payload_config.bind_count);
-            if(valid)return valid;
-            return fs_policy_check(&policy,(size_t)a[2],true,(enum fs_operation)a[3]);
+            return mount_decision((size_t)a[2],true,(enum fs_operation)a[3]);
         }
         if(a[1]==0) { long count=0;for(size_t i=0;i<t->capacity;i++)count+=t->slots[i].fd>=0;return count; }
         const struct fd_record *r=fd_table_get(t,(int)a[2]);if(!r)return -ENOENT;

@@ -95,8 +95,8 @@ Denied access returns EACCES; mutation on readonly returns EROFS. Rename/link
 require both operands writable and the same virtual mount, otherwise EXDEV.
 Nested and duplicate destination selection reuses the existing PRoot table.
 
-The FD experiment links this core for diagnostic decisions only; filesystem
-syscall handlers do not yet enforce it.
+The FD experiment links this core for diagnostics and the opt-in path mutation
+guard described below. Descriptor IO permissions are not yet enforced.
 No new sandbox CLI or runtime permission guarantee is introduced. Integration
 still needs policy transport across loader/exec, trusted mount observations,
 syscall-specific read/mutation classification (including open flags), complete
@@ -119,9 +119,40 @@ origin tags. It is an explicitly unauthenticated observation protocol, not a
 secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
-The experimental payload ABI is now 4 (normal PRoot remains 3); older custom
+The experimental payload ABI is now 5 (normal PRoot remains 3); older custom
 payload layouts are rejected. Build and test with `make check-fd-runtime`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
 mismatch rejection. Run it immediately after an experimental build because its
 custom-payload fixture uses the most recently built `src/payload/payload.bin`.
+
+## Partial path mutation guard
+
+`--guard-path-mutations drw` enables a separate experiment using the same root /
+bind permission vector; it is mutually exclusive with `--observe-mount-access`.
+It survives chained exec and checks the resolved final mount immediately before
+supported PRoot pathname operations reach the kernel. Unknown relative cwd or
+dirfd provenance returns EACCES; chdir to an absolute guest path or a fresh
+absolute directory open can establish a new observation. Exec-imported directory
+FDs deliberately remain unknown. No implicit lowercase matching is introduced.
+
+Covered operations: write-access/create/truncate/tmpfile openat, mkdirat,
+mknodat, unlinkat, symlinkat destination, both renameat/renameat2/linkat operands,
+truncate, and pathname forms of fchmodat/fchownat/utimensat. O_PATH ignores the
+ordinary write/create/truncate flags. Final symlinks obey each operation's
+follow/no-follow semantics. Existing cross-mount EXDEV and mountpoint EBUSY
+checks remain. The narrow supported openat2 is O_PATH-only and cannot write.
+
+This is **path mutation protection only**, not full readonly/default-deny
+isolation. Reads remain allowed even for `d`; the flag does not check descriptor
+writes, writable mappings, FD metadata operations/empty-path forms, or the
+unmigrated xattr and socket handlers. The existing pathname race, case-alias,
+raw-entry and unauthenticated loader/exec limitations remain. FD access tags
+still describe the legacy mapping observation, not a grant from this vector.
+The ordinary build and observation mode do not enable these checks.
+
+`test/fs_policy/path_mutations.py` runs real SVC probes, checks readonly errors,
+writable success, both rename/link ends, symlink/nested mapping selection,
+cwd/dirfd origins and exec-import downgrade, then verifies host file contents,
+metadata and directory entries. It also proves observation and legacy modes
+still allow a write-access open. It is included in `make check-fd-runtime`.
