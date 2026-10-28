@@ -81,3 +81,23 @@ Choose sensitive persistent storage for Linux rootfs names; /tmp is temporary.
 Do not repair policy matching by lowercasing paths or emulate linkat with copies.
 The planner's `access_for` remains only a string model: case variants are not
 covered by a runtime permission guarantee. See [storage observations](../../docs/STORAGE_CAPABILITIES.md).
+
+## Native permission decision core
+
+`src/payload/logic/fs_policy.c` supplies a standalone allocation-free decision
+core, tested by `python3 test/fs_policy/run.py` and included in `make check`.
+An immutable permission array has exactly one entry per mount (root at 0,
+then PRoot binding index + 1). It can represent deny, readonly and read/write.
+Path callers must resolve symlinks and select the final mount first; descriptor
+callers must retain trusted provenance from the same policy incarnation.
+Unknown provenance is denied, regardless of the supplied numeric mount ID.
+Denied access returns EACCES; mutation on readonly returns EROFS. Rename/link
+require both operands writable and the same virtual mount, otherwise EXDEV.
+Nested and duplicate destination selection reuses the existing PRoot table.
+
+This core is not yet linked into the payload or called by syscall handlers.
+No new sandbox CLI or runtime permission guarantee is introduced. Integration
+still needs policy transport across loader/exec, trusted mount observations,
+syscall-specific read/mutation classification (including open flags), complete
+FD write/mmap coverage, and safe pathname resolution. Directory visibility and
+ancestor traversal are separate from this mount-level decision.

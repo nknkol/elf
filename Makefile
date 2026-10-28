@@ -15,6 +15,7 @@ help:
 build:
 	$(PYTHON) vendor/proot/svc/build_elf.py
 check: build
+	$(PYTHON) test/fs_policy/run.py
 	$(PYTHON) test/fd_table/run.py
 	$(PYTHON) test/fd_table/check_clone.py
 	$(PYTHON) test/fd_table/check_notify.py
