@@ -420,3 +420,36 @@ verifies actual file zeroing in native/compatibility modes and EACCES with
 unchanged bytes/size/mtime/ctime in protected mode. MADV_NORMAL and invalid
 negative advice retain their native behavior. Other mapping/admission and
 executable-code limitations remain as documented above.
+
+
+## Asynchronous IO is unsupported in file-mutation mode
+
+`--guard-file-mutations` returns ENOSYS for io_setup, io_destroy, io_submit,
+io_cancel, io_getevents, io_pgetevents, io_uring_setup, io_uring_enter and
+io_uring_register before accessing request structures or entering the kernel.
+This is unconditional in protected mode, including operations that purport to
+use an existing context/ring. Slow routing alone did not authorize IOCB file
+access: a reproduced PWRITE request changed a private readonly-bind fixture
+through an inherited writable FD whose ordinary write was rejected.
+
+This closes those syscall submission/control entries; it does not implement
+asynchronous IO, authenticate inherited resources, revoke previously submitted
+external IO, or establish complete hostile-code isolation. Other experimental
+modes retain their previous Linux AIO behavior and existing io_uring restrictions.
+No new configuration layout or slow-path selection is introduced.
+
+`test/fs_policy/async_io.py` uses isolated native AIO as a capability/control run,
+verifies compatibility modes when native PWRITE completes, and always tests the
+nine protected entries with valid structures and invalid/empty arguments. Host
+content/size/mtime/ctime must remain unchanged. Native capability unavailability
+is reported separately and never skips the mandatory protected-mode checks.
+
+
+This is an asynchronous-interface support limit, not a network isolation policy.
+io_uring can also carry network requests; rejecting it may require applications
+to fall back to synchronous/socket APIs. In the current HarmonyOS FD experiment,
+setup was already unsupported and enter/register already returned ENOSYS. This
+change adds no address, protocol, endpoint or Internet-access filtering. Local
+AF_UNIX FD-transfer/lifecycle tests validate file capability transport, not a
+network sandbox. A system security notification must be diagnosed separately;
+a passing local regression does not identify its source.

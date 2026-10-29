@@ -497,3 +497,26 @@ AArch64 syscall 参数寄存器是 64 位，但内核参数不全是 64 位。�
 规则：在选择权限分支和记录内核效果之前，先按每个参数实际 ABI 规范化；后续处理
 使用同一份解释。不能全局截断所有参数——指针、offset、size 和部分 flags 仍为 64 位。
 回归需使用原始 SVC 构造 libc 原型不会生成的高位值，并核对真实副作用，而非只看返回码。
+
+
+### 2026-10-29：AIO 能绕过普通 write 的 FD 授权
+
+在当前宿主上，真实 io_setup → io_submit(IOCB_CMD_PWRITE) → io_getevents → io_destroy
+返回 0、1、1、0，completion.res 为 4。保护模式中的继承 O_RDWR FD 没有可信写来源，
+普通 write 返回 EACCES，但旧实现把上述 AIO 调用从慢路径透传给内核，仍把只读 bind
+对应的私有测试文件从 seed 改为 AIO!。这次有实际宿主字节变化证据，不仅是路由推断。
+
+文件修改模式现统一拒绝六个 Linux AIO 入口和三个 io_uring 入口，返回 ENOSYS；拒绝
+发生在读取 guest 请求结构或调用原生 syscall 之前，不受 HarmonyOS 检测结果影响。
+io_uring_setup 原本在 FD 实验版就拒绝，enter/register 原本有 HarmonyOS 专用拒绝；
+本次使保护模式不依赖这些零散规则。共享慢路径台账核对也固定了完整九项。
+
+`test/fs_policy/async_io.py` 用独立原生子进程验证实际能力，保留兼容/观察/仅路径保护
+模式的 AIO 对照，随后验证保护模式的有效 iocb、继承可写 FD、空参数和无效指针请求。
+宿主核对内容、大小、mtime、ctime。宿主不支持 AIO 时只跳过原生兼容对照，保护模式
+拒绝测试仍必须执行；本次宿主原生写入和全部保护测试实际通过。
+
+未来若实现 AIO，需要请求内 FD/缓冲区快照、权限来源、提交后生命周期、完成/取消、
+FD 关闭复用、fork/exec 与上下文所有权的整体设计。不能只检查 io_setup 或只把调用
+放进慢路径。拒绝这些入口也不证明所有异步/设备/raw-entry 通道已封闭，不负责撤销
+宿主或其他进程已经提交的 IO。

@@ -450,6 +450,19 @@ long fd_experiment_dispatch(long n,long a[6])
     struct fd_runtime *s=current();
     int rc=start(s);if(rc)return rc;
     struct fd_table *t=fd_registry_table(&s->registry,s->owner);
+    /* No request/context ownership model exists for asynchronous IO. Deny
+     * the whole family before reading guest structures or reaching the kernel,
+     * including operations on inherited rings/contexts. Slow routing alone
+     * does not authorize an iocb's FD or protect its completion lifetime. */
+    if(g_payload_config.guard_path_mutations==2) {
+        switch(n) {
+        case __NR_io_setup: case __NR_io_destroy:
+        case __NR_io_submit: case __NR_io_cancel:
+        case __NR_io_getevents: case __NR_io_pgetevents:
+        case __NR_io_uring_setup: case __NR_io_uring_enter: case __NR_io_uring_register:
+            return -ENOSYS;
+        }
+    }
     if(n==__NR_prctl && a[0]==PR_ELF_FD_QUERY) {
         /* Diagnostic only: decision for a supplied mount ID, not an FD grant. */
         if(a[1]==6) {
