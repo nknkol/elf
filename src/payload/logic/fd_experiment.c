@@ -527,6 +527,18 @@ long fd_experiment_dispatch(long n,long a[6])
             return -ENOSYS;
         }
     }
+    /* Per-message pathname destinations would each need translation; refuse
+     * them in guarded modes rather than let raw guest paths reach the host.
+     * Connected and abstract/non-UNIX destinations keep native behavior. */
+    if(n==__NR_sendmmsg && g_payload_config.mount_access_observe[0] && a[1]) {
+        unsigned count=(unsigned)a[2]>1024?1024:(unsigned)a[2];
+        for(unsigned i=0;i<count;i++) {
+            const unsigned char *entry=(const unsigned char *)a[1]+i*64ul;
+            const unsigned char *name;int length;
+            memcpy(&name,entry,sizeof(name));memcpy(&length,entry+8,sizeof(length));
+            if(name && length>2 && name[0]==1 && name[1]==0 && name[2])return -EOPNOTSUPP;
+        }
+    }
     /* Not bridged: the raw guest path would reach the host and reveal
      * existence/identity of hidden names. Handles have no read model. */
     if(g_payload_config.guard_file_reads && n==__NR_name_to_handle_at)return -ENOSYS;

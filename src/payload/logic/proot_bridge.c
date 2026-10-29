@@ -4,6 +4,10 @@
 #include <asm/unistd.h>
 #include <linux/fcntl.h>
 #include <linux/inotify.h>
+#include <linux/un.h>
+#ifndef AF_UNIX
+#define AF_UNIX 1 /* linux/socket.h does not export address families. */
+#endif
 #include <stddef.h>
 #include <errno.h>
 #include <string.h>
@@ -25,6 +29,17 @@
 extern long raw_syscall(long, long, long, long, long, long, long);
 _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 16,
                "Adapter requires Linux AArch64 kernel stat ABI");
+/* AArch64 user msghdr; only the name fields are rewritten, in a private copy. */
+struct guest_msghdr {
+    void *name;
+    int name_length;
+    void *iov;
+    size_t iov_length;
+    void *control;
+    size_t control_length;
+    unsigned int flags;
+};
+_Static_assert(sizeof(struct guest_msghdr) == 56, "AArch64 msghdr ABI");
 
 typedef struct {
     BindingTable table;
@@ -46,6 +61,8 @@ typedef struct {
     PathBinding bindings[CONFIG_MAX_BINDS];
     char cwd[PATH_MAX], guest[PATH_MAX], host[PATH_MAX];
     char first_guest[PATH_MAX], first_host[PATH_MAX];
+    struct sockaddr_un address;
+    struct guest_msghdr message;
 } Bridge;
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
@@ -291,6 +308,7 @@ int proot_handles_syscall(long number)
     case __NR_listxattr: case __NR_llistxattr:
     case __NR_removexattr: case __NR_lremovexattr:
     case __NR_inotify_add_watch:
+    case __NR_bind: case __NR_connect: case __NR_sendto: case __NR_sendmsg:
     case SYS_fchmodat:
     case SYS_fchownat:
     case SYS_utimensat:
@@ -403,6 +421,7 @@ static bool path_mutation(long number, long a[6])
     case SYS_mknodat: case SYS_mkdirat: case SYS_unlinkat: case SYS_symlinkat:
     case SYS_linkat: case SYS_renameat: case SYS_renameat2:
     case SYS_fchmodat: case SYS_fchownat: case SYS_utimensat: case __NR_truncate:
+    case __NR_bind: /* Creates the socket inode at the resolved path. */
         return true;
     default: return false;
     }
@@ -426,6 +445,84 @@ static bool path_traversal(long number, long a[6])
     }
 }
 
+/* Translate a pathname AF_UNIX address with guest semantics. bind creates
+ * the final name (no follow, mutation policy); connect/sendto/sendmsg reach an
+ * existing socket (follow, read visibility). Abstract and non-UNIX addresses,
+ * and malformed lengths the kernel will reject, pass through unchanged. A host
+ * path longer than sun_path is reached through its parent directory FD. */
+static long socket_address(Bridge *b, long number, long a[6])
+{
+    int sending = number == __NR_sendto, message = number == __NR_sendmsg;
+    const void *name;
+    unsigned long length;
+    if (message) {
+        if (!a[1]) return raw_syscall(number, a[0], a[1], a[2], 0, 0, 0);
+        memcpy(&b->message, (const void *)a[1], sizeof(b->message));
+        name = b->message.name;
+        length = (unsigned int)b->message.name_length;
+    } else {
+        name = (const void *)a[sending ? 4 : 1];
+        length = (unsigned int)a[sending ? 5 : 2];
+    }
+    size_t prefix = offsetof(struct sockaddr_un, sun_path);
+    if (!name || length <= prefix || length > sizeof(b->address))
+        return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+    memset(&b->address, 0, sizeof(b->address));
+    memcpy(&b->address, name, length);
+    if (b->address.sun_family != AF_UNIX || !b->address.sun_path[0])
+        return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+    /* Linux accepts an unterminated sun_path filling the given length. */
+    char path[sizeof(b->address.sun_path) + 1];
+    size_t size = strnlen(b->address.sun_path, length - prefix);
+    memcpy(path, b->address.sun_path, size);
+    path[size] = 0;
+    long ret = resolve(b, AT_FDCWD, path, number != __NR_bind);
+    if (ret < 0) return ret;
+    long directory = -1;
+    size_t host = strlen(b->host);
+    memset(&b->address, 0, sizeof(b->address));
+    b->address.sun_family = AF_UNIX;
+    if (host < sizeof(b->address.sun_path)) {
+        memcpy(b->address.sun_path, b->host, host + 1);
+    } else {
+        size_t slash = host;
+        while (slash && b->host[slash - 1] != '/') slash--;
+        if (!slash) return -ENAMETOOLONG;
+        char *base = b->host + slash;
+        b->host[slash - 1] = 0;
+        directory = raw_syscall(SYS_openat, AT_FDCWD, (long)(slash == 1 ? "/" : b->host),
+                                O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
+        if (directory < 0) return directory;
+        char *out = b->address.sun_path, *end = out + sizeof(b->address.sun_path) - 1;
+        const char *proc = "/proc/self/fd/";
+        while (*proc && out < end) *out++ = *proc++;
+        char digits[16];
+        size_t count = 0;
+        unsigned long value = (unsigned long)directory;
+        do { digits[count++] = '0' + value % 10; value /= 10; } while (value);
+        while (count && out < end) *out++ = digits[--count];
+        if (out < end) *out++ = '/';
+        size_t left = strlen(base);
+        if (count || out + left >= end) {
+            raw_syscall(__NR_close, directory, 0, 0, 0, 0, 0);
+            return -ENAMETOOLONG;
+        }
+        memcpy(out, base, left + 1);
+    }
+    long address_length = (long)(prefix + strlen(b->address.sun_path) + 1);
+    if (message) {
+        b->message.name = &b->address;
+        b->message.name_length = (int)address_length;
+        ret = raw_syscall(number, a[0], (long)&b->message, a[2], 0, 0, 0);
+    } else if (sending) {
+        ret = raw_syscall(number, a[0], a[1], a[2], a[3], (long)&b->address, address_length);
+    } else {
+        ret = raw_syscall(number, a[0], (long)&b->address, address_length, 0, 0, 0);
+    }
+    if (directory >= 0) raw_syscall(__NR_close, directory, 0, 0, 0, 0, 0);
+    return ret;
+}
+
 static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
     if(number==SYS_faccessat || number==SYS_faccessat2) {
@@ -440,6 +537,9 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     }
     b->mutation = path_mutation(number, a);
     b->traverse = path_traversal(number, a);
+    if (number == __NR_bind || number == __NR_connect ||
+        number == __NR_sendto || number == __NR_sendmsg)
+        return socket_address(b, number, a);
     long ret;
     switch (number) {
     case __NR_setxattr: case __NR_getxattr:

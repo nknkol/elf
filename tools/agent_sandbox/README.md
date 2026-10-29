@@ -551,7 +551,12 @@ ancestor-only interpreter refuses the exec. Merged-usr `/lib` is a symlink in
 the root, so profiles must expose the interpreter's guest path explicitly.
 
 Known gaps: the launcher's initial target still maps PT_INTERP lexically;
-ancestor stat reports host metadata; UNIX socket paths, xattrat
-entries and path races are not covered. `test/fs_policy/reads.py` covers the
+ancestor stat reports host metadata; socket addresses returned to the guest
+(getsockname/accept/recvfrom) are host paths; xattrat entries and path races
+are not covered. Pathname AF_UNIX addresses of bind/connect/sendto/sendmsg are
+translated with guest semantics in both builds: bind follows the mutation
+policy, connect and sends need read visibility, host paths longer than
+sun_path go through a parent directory FD, abstract names pass through, and
+sendmmsg with pathname destinations returns EOPNOTSUPP in guarded modes. `test/fs_policy/reads.py` covers the
 probe matrix plus protected Alpine/Ubuntu shells (read-only system tree, pipes,
 command substitution, redirection, filtered `ls /`).

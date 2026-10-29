@@ -321,6 +321,10 @@ SLOW_SYSCALL(__NR_bind)
 #ifdef __NR_connect
 SLOW_SYSCALL(__NR_connect)
 #endif
+#ifdef __NR_sendto
+/* Pathname AF_UNIX destinations need guest translation. */
+SLOW_SYSCALL(__NR_sendto)
+#endif
 #ifdef __NR_sendmsg
 SLOW_SYSCALL(__NR_sendmsg)
 #endif

@@ -152,8 +152,17 @@ TERM 和显式 `--env`。首个程序是随 FD 构建生成、哈希记入 manif
 现按目录本身判定。Android 真机上的 agent_launch 用例覆盖 Alpine shell 的工作目录、干净环境、
 私有状态持久化、根目录列表、brew shebang 工具、只读/隐藏路径、管道及参数拒绝；全部 fs_policy、
 shell 与默认构建回归通过。
+2026-10-30 UNIX socket 路径增量：bind/connect/sendto/sendmsg 的 pathname AF_UNIX 地址此前以原始
+guest 路径交给宿主，可在视图外创建 socket 文件或连接宿主 socket。现由 PRoot 桥接在私有副本中
+按 guest 语义翻译：bind 不跟随最终 symlink 并按创建执行修改策略，connect/sendto/sendmsg 跟随
+symlink 并按读取可见性判定；宿主路径超过 sun_path 时经父目录 O_PATH FD 的 /proc/self/fd 名称
+访问。抽象与非 UNIX 地址、内核将拒绝的长度原样透传；sendmmsg 带 pathname 目标时在受控模式下
+返回 EOPNOTSUPP。sendto 加入共享慢路径（135 项），两种构建均翻译。真机用例覆盖 stream/dgram、
+相对路径、超长宿主路径、symlink、抽象名、ro/deny 与宿主 socket 拒绝，以及默认构建；旧代码在首个
+bind 即失败。文件修改模式仍拒绝对 socket 使用 write/writev（来源未知），send/recv 不受影响；
+getsockname/getpeername/accept/recvfrom 返回的地址仍是宿主路径，尚未反向映射。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
-bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX socket 路径、新式 xattrat
+bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
@@ -192,7 +201,7 @@ bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX s
 `make check` 不含 FD 实验工作流；两套都通过才能支持上表结论。
 构建与离线验收报告位于忽略目录 `vendor/proot/svc/build/`；不提交二进制或 rootfs。
 当前全量扫描记录是 98 个参数配方、13 个不同 SIGSYS 编号，不是所有 syscall 的证明。
-共享慢路径 134 项表示“进入处理器”，不能作为“实现 134 项”的完成率。
+共享慢路径 135 项表示“进入处理器”，不能作为“实现 135 项”的完成率。
 固定危险调用回归另包含 fchmodat2，共 14 项；close_range 有单独的拒绝/回退测试。
 原生配方、支持子集和错误路径都需分别看待，不能把 ENOSYS 算作功能实现。
 
@@ -200,7 +209,7 @@ bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX s
 
 1. **agent 权限执行**：配置只规划不运行；所有 bind 仍可写。绝对/已知目录 FD/cwd 相对打开已有
    mount/access 观察值，但未知 cwd/目录 FD、导入和 exec 恢复仍 UNKNOWN；尚无可信来源链。
-   实验版的只读修改保护与默认拒绝读取已可选启用，但 PT_INTERP、socket 路径和竞争仍有缺口。
+   实验版的只读修改保护与默认拒绝读取已可选启用，但首个目标的 PT_INTERP、返回的 socket 地址和竞争仍有缺口。
    `tools/agent_sandbox/launch.py` 已把 profile 接到实验版文件访问模式，但 brew 实际程序与平台库
    尚未在 HarmonyOS 沙盒中验证。
 2. **完整 FD/任务语义**：普通线程与共享 VM/FD、通用 clone、close_range 真正实现、
