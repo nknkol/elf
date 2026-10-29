@@ -84,6 +84,7 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 先看 [当前进度与验收快照](docs/STATUS.md)，其中区分默认/实验构建及本轮测试；
 FD 计划后半部分保留历史增量记录，不应把早期“未接入”描述当作当前状态。
 
+- [完整形态测试与验收规范](docs/FULL_SYSTEM_TEST_PLAN.md)：目标清单，不代表当前已实现或已通过。
 - [底层约束和历史经验](docs/SYSCALL_ENGINE_LESSONS.md)
 - [FD 身份与只读策略实施顺序](docs/FD_POLICY_PLAN.md)
 - [PRoot 移植记录](vendor/proot/SVC_PORT.md)
