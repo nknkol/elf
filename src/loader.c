@@ -646,6 +646,38 @@ err:
 #define Z_PROG		0
 #define Z_INTERP	1
 
+#ifndef DT_RELR
+#define DT_RELR 36
+#endif
+/* Payload segments are mapped at base + p_vaddr (first PT_LOAD at 0). */
+static int apply_payload_relocations(void *base, const Elf_Ehdr *ehdr, const Elf_Phdr *phdr)
+{
+	unsigned long b = (unsigned long)base, rela = 0, size = 0, entry = sizeof(Elf64_Rela);
+	for (int i = 0; i < ehdr->e_phnum; i++) {
+		if (phdr[i].p_type != PT_DYNAMIC)
+			continue;
+		for (const Elf64_Dyn *d = (const Elf64_Dyn *)(b + phdr[i].p_vaddr); d->d_tag != DT_NULL; d++) {
+			if (d->d_tag == DT_RELA) rela = d->d_un.d_ptr;
+			else if (d->d_tag == DT_RELASZ) size = d->d_un.d_val;
+			else if (d->d_tag == DT_RELAENT) entry = d->d_un.d_val;
+			else if ((d->d_tag == DT_JMPREL || d->d_tag == DT_PLTRELSZ ||
+				  d->d_tag == DT_RELR || d->d_tag == DT_REL) && d->d_un.d_val)
+				return -1;
+		}
+	}
+	if (!size)
+		return 0;
+	if (!rela || entry != sizeof(Elf64_Rela) || size % entry)
+		return -1;
+	for (const Elf64_Rela *r = (const Elf64_Rela *)(b + rela);
+	     (unsigned long)r < b + rela + size; r++) {
+		if (ELF64_R_TYPE(r->r_info) != R_AARCH64_RELATIVE)
+			return -1;
+		*(unsigned long *)(b + r->r_offset) = b + r->r_addend;
+	}
+	return 0;
+}
+
 static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 {
 	if (fd < 0)
@@ -697,7 +729,6 @@ static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 		unsigned long off = phdr[i].p_vaddr & ALIGN;
 		unsigned long seg_start = (unsigned long)base + TRUNC_PG(phdr[i].p_vaddr);
 		size_t seg_sz = ROUND_PG(phdr[i].p_memsz + off);
-		int prot = PFLAGS(phdr[i].p_flags);
 
 		void *p = z_mmap((void *)seg_start, seg_sz, PROT_WRITE,
 				 MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -712,8 +743,24 @@ static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 		}
 
 		z_read(fd, (void *)((unsigned long)p + off), phdr[i].p_filesz);
-		z_mprotect(p, seg_sz, prot);
+	}
 
+	/* The payload is position independent; compilers may still emit
+	 * RELATIVE relocations (pointer tables, GOT entries). Apply them while
+	 * every segment is writable; any other dynamic relocation is refused. */
+	if (apply_payload_relocations(base, &ehdr, phdr) < 0) {
+		z_munmap(base, total_size);
+		return NULL;
+	}
+
+	for (int i = 0; i < ehdr.e_phnum; i++) {
+		if (phdr[i].p_type != PT_LOAD)
+			continue;
+		unsigned long off = phdr[i].p_vaddr & ALIGN;
+		void *p = (void *)((unsigned long)base + TRUNC_PG(phdr[i].p_vaddr));
+		size_t seg_sz = ROUND_PG(phdr[i].p_memsz + off);
+		int prot = PFLAGS(phdr[i].p_flags);
+		z_mprotect(p, seg_sz, prot);
 		if (prot & PROT_EXEC)
 			arch_flush_cache(p, seg_sz);
 	}

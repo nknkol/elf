@@ -24,7 +24,9 @@ OBJ := $(OBJ:.S=.o)
 INCLUDES := -I. -Isrc -Iinclude -I$(ARCH_DIR)
 
 # Payload 默认用极简运行时：裸 syscall + mini_libc.c，不链接 musl；保留 -nostdlib。
-CFLAGS = -Wall -O0 -g -fPIC -nostdlib -fno-stack-protector -fno-builtin
+# Optimized: this code runs on every intercepted syscall. No strict aliasing:
+# guest buffers and kernel records are reinterpreted in several places.
+CFLAGS = -Wall -O2 -g -fno-strict-aliasing -fPIC -nostdlib -fno-stack-protector -fno-builtin
 CPPFLAGS += $(INCLUDES)
 CFLAGS += $(EXTRA_CFLAGS)
 
