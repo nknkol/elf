@@ -122,6 +122,20 @@ static int watch_hides_child(Bridge *b, const char *guest)
 }
 #endif
 
+/* PRoot "glue": a guest directory that does not exist on the host but leads
+ * to a bind destination (component-wise strict ancestor of one). */
+static bool glue_ancestor(const Bridge *b, const char *guest)
+{
+    size_t length = strlen(guest);
+    for (size_t i = 0; i < b->table.count; i++) {
+        const char *target = b->table.entries[i].guest;
+        if (length == 1 && guest[0] == '/') { if (target[1]) return true; continue; }
+        if (!strncmp(target, guest, length) && target[length] == '/' && target[length + 1])
+            return true;
+    }
+    return false;
+}
+
 static int host_lookup(void *opaque, Finality finality, unsigned int depth,
                        const char *guest, char *host)
 {
@@ -152,6 +166,9 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
     struct stat st;
     long ret = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)host, (long)&st,
                           AT_SYMLINK_NOFOLLOW, 0, 0);
+    /* A missing directory on the way to a bind is glue, not ENOENT. */
+    if (ret == -ENOENT && glue_ancestor(b, guest))
+        return 0;
     if (ret < 0)
         return IS_FINAL(finality) ? 0 : (int)ret;
     unsigned int type = st.st_mode & S_IFMT;
@@ -959,6 +976,15 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (observed_open) {
         ret = binding_table_mount_id(&b->table, b->guest, &mount_id);
         if (ret < 0) return ret;
+    }
+    /* Metadata of a glue directory: a directory (the root's), as PRoot's
+     * glue would be. Opening, listing or entering it is not emulated. */
+    if ((number == SYS_newfstatat || number == SYS_statx || number == SYS_faccessat ||
+         number == SYS_faccessat2) && glue_ancestor(b, b->guest)) {
+        struct stat probe;
+        if (raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->host, (long)&probe,
+                        AT_SYMLINK_NOFOLLOW, 0, 0) == -ENOENT)
+            strcpy(b->host, b->table.root);
     }
     if (number == SYS_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT)))
         ret = proc_cmdline(b, (int)a[2]);
