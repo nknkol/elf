@@ -823,7 +823,8 @@ int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
 }
 
 #ifdef FD_EXPERIMENT
-/* Kernel getdents64 record: ino, off, reclen, type, NUL-terminated name. */
+/* Kernel getdents64 record: ino, next offset, reclen, type, NUL-terminated name. */
+#define DIRENT_OFFSET 8
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME 19
 long proot_getdents_visible(int fd, void *buffer, unsigned long count,
@@ -849,22 +850,24 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
     if (ret < 0) goto done;
     if (!buffer) { ret = -EFAULT; goto done; }
     size_t base = strlen(b->first_guest);
-    /* A smaller kernel count only returns fewer records; tiny guest counts
-     * still get the kernel's own EINVAL. */
-    unsigned long bounce = count < sizeof(b->dirents) ? count : sizeof(b->dirents);
     for (;;) {
-        /* The kernel fills the private bounce and advances the offset; only
-         * visible records are copied out, so hidden names never touch guest
-         * memory, even transiently. A batch hiding every entry is retried,
-         * so zero still means end of directory. */
-        ret = raw_syscall(__NR_getdents64, fd, (long)b->dirents, (long)bounce, 0, 0, 0);
+        /* Read a full private batch so a hidden record never makes a small
+         * guest buffer fail. Visible records are copied out while they fit;
+         * the directory cursor is then moved back to the first record not
+         * returned. Hidden names never touch guest memory, a batch hiding
+         * every entry is retried, and zero still means end of directory. */
+        long position = raw_syscall(__NR_lseek, fd, 0, 1 /* SEEK_CUR */, 0, 0, 0);
+        if (position < 0) { ret = position; goto done; }
+        ret = raw_syscall(__NR_getdents64, fd, (long)b->dirents, sizeof(b->dirents), 0, 0, 0);
         if (ret <= 0) goto done;
         unsigned char *bytes = b->dirents;
         size_t kept = 0;
         for (size_t offset = 0; offset < (size_t)ret;) {
             unsigned short length;
+            long next;
             memcpy(&length, bytes + offset + DIRENT_RECLEN, sizeof(length));
             if (length < DIRENT_NAME + 1 || offset + length > (size_t)ret) { ret = -EIO; goto done; }
+            memcpy(&next, bytes + offset + DIRENT_OFFSET, sizeof(next));
             const char *name = (const char *)bytes + offset + DIRENT_NAME;
             bool keep = !strcmp(name, ".") || !strcmp(name, "..");
             if (!keep) {
@@ -880,16 +883,20 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
                 keep = visibility != FS_HIDDEN;
             }
             if (keep) {
-                if (kept != offset) memmove(bytes + kept, bytes + offset, length);
+                if (kept + length > count) {
+                    /* Like the kernel: the record stays for the next call,
+                     * and a first visible record that cannot fit is EINVAL. */
+                    long sought = raw_syscall(__NR_lseek, fd, position, 0 /* SEEK_SET */, 0, 0, 0);
+                    ret = sought < 0 ? sought : kept ? (long)kept : -EINVAL;
+                    goto done;
+                }
+                memcpy((unsigned char *)buffer + kept, bytes + offset, length);
                 kept += length;
             }
+            position = next;
             offset += length;
         }
-        if (kept) {
-            memcpy(buffer, bytes, kept);
-            ret = (long)kept;
-            goto done;
-        }
+        if (kept) { ret = (long)kept; goto done; }
     }
 done:
     proot_scratch_free(b, sizeof(Bridge));

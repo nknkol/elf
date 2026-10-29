@@ -24,7 +24,9 @@ def tree(root):
     for name, data in (('root-secret', b'SECRET-ROOT'), ('etc/passwd', b'SECRET-ETC'),
                        ('home/u/sibling-secret', b'SECRET-SIB'), ('host-work/file', b'work'),
                        ('host-ro/file', b'ro'), ('host-private/x', b'SECRET-PRIV'),
-                       ('host-pub/file', b'pub'), ('host-deny/file', b'SECRET-DENY'), ('host-hidden/file', b'SECRET-HIDDEN')):
+                       ('host-pub/file', b'pub'),
+                       # Hidden record larger than the 32-byte listing buffer.
+                       ('hidden-entry-with-a-name-longer-than-small-buffers', b'SECRET-LONG'), ('host-deny/file', b'SECRET-DENY'), ('host-hidden/file', b'SECRET-HIDDEN')):
         (root / name).write_bytes(data)
     (root / 'link-visible').symlink_to('/home/u/work/file')
     (root / 'host-work/to-secret').symlink_to('/root-secret')

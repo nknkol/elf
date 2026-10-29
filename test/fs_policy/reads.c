@@ -155,6 +155,14 @@ static void traversal(void)
     const char *in_user[]={"sibling",0},*in_work[]={"hidden",0};
     no_residue("/",1024,in_root);no_residue("/",32,in_root);
     no_residue("/home/u",40,in_user);no_residue("/home/u/work",1024,in_work);
+    {
+        /* Too small for any visible record: EINVAL without moving the cursor. */
+        unsigned char tiny[16];char names[512];
+        long fd=open_file("/",O_RDONLY|O_DIRECTORY);CHECK(fd>=0);
+        CHECK(C(getdents64,fd,tiny,sizeof(tiny),0,0,0)==-EINVAL);
+        CHECK(list(fd,1024,names,sizeof(names))==4);
+        close_fd(fd);
+    }
     expect_listing("/home",1024,home,1);
     expect_listing("/home/u",40,user,1);
     const char *priv[]={"pub"};
