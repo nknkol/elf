@@ -21,14 +21,32 @@ def loader(suffix):
     return path
 
 
+def socket_capable():
+    """Some backings refuse socket inodes (HarmonyOS /storage/Users, /tmp)."""
+    for base in (build, Path(tempfile.gettempdir()), Path('/data/storage/el2/base/cache')):
+        try:
+            with tempfile.TemporaryDirectory(prefix='sock-probe-', dir=base) as tmp:
+                with socket.socket(socket.AF_UNIX) as probe:
+                    probe.bind(str(Path(tmp) / 's'))
+            return base
+        except OSError:
+            continue
+    return None
+
+
 experiment = loader('-fd-experiment')
 assert experiment, 'build the FD experiment first'
-with tempfile.TemporaryDirectory(prefix='sock-', dir=build) as tmp:
+base = socket_capable()
+if base is None:
+    print('SKIP: no backing directory accepts UNIX socket files')
+    raise SystemExit(0)
+with tempfile.TemporaryDirectory(prefix='sock-', dir=base) as tmp:
     root = Path(tmp)
     for name in ('w', 'r', 'host-w', 'host-r'):
         (root / name).mkdir()
     # Guest path stays short; its host spelling exceeds sun_path (108 bytes).
-    deep = 'a' * 60
+    deep = 'a' * max(8, 112 - len(str(root / 'host-w')))
+    assert len(f'/w/{deep}/s') < 108, 'guest path must fit sun_path'
     (root / 'host-w' / deep).mkdir()
     longpath = f'/w/{deep}/s'
     assert len(str(root / 'host-w' / deep / 's')) >= 108, 'fixture must exceed sun_path'
