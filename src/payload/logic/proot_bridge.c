@@ -67,6 +67,7 @@ typedef struct {
     /* /proc link emulation: never the first_* pair a caller may hold. */
     char proc_guest[PATH_MAX], proc_host[PATH_MAX], proc_link_host[PATH_MAX];
     char proc_data[8192]; /* A loader-run process's kernel cmdline. */
+    char proc_candidate[PATH_MAX];
 } Bridge;
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
@@ -167,6 +168,7 @@ static int host_readlink(void *opaque, const char *path, char *out, size_t size)
 }
 
 static int visible_guest_path(Bridge *b, const char *host, char *guest);
+static int preferred_guest_path(Bridge *b, const char *host, char *guest);
 #ifdef FD_EXPERIMENT
 static int path_visibility(Bridge *b, const char *guest);
 #endif
@@ -182,7 +184,7 @@ static int guest_link_target(Bridge *b, char *target)
 #ifdef FD_EXPERIMENT
     guarded = g_payload_config.guard_file_reads;
 #endif
-    int rc = visible_guest_path(b, target, b->proc_guest);
+    int rc = preferred_guest_path(b, target, b->proc_guest);
     if (rc < 0) return guarded ? -EACCES : 0;
 #ifdef FD_EXPERIMENT
     rc = path_visibility(b, b->proc_guest);
@@ -383,6 +385,31 @@ static int observed_guest_path(Bridge *b, const char *host, char *guest)
     rc = binding_table_map(&b->table, GUEST, guest, mapped);
     if (rc < 0) return rc;
     return strcmp(host, mapped) ? -EXDEV : 0;
+}
+
+/* A host object can have several faithful guest names when a bind's host
+ * directory lies inside another mount's host tree. Report it like the
+ * kernel/PRoot would: through the most specific mount, never a hidden alias
+ * under the read guard. The caller's anchor is preserved. */
+static int preferred_guest_path(Bridge *b, const char *host, char *guest)
+{
+    struct proot_open_origin saved = b->anchor;
+    size_t best = 0;
+    int found = 0;
+    for (size_t id = 0; id <= b->table.count; id++) {
+        size_t length = strlen(id ? b->table.entries[id - 1].host : b->table.root);
+        if (found && length <= best) continue;
+        b->anchor = (struct proot_open_origin){id, true};
+        if (observed_guest_path(b, host, b->proc_candidate)) continue;
+#ifdef FD_EXPERIMENT
+        if (path_visibility(b, b->proc_candidate) == FS_HIDDEN) continue;
+#endif
+        strcpy(guest, b->proc_candidate);
+        best = length;
+        found = 1;
+    }
+    b->anchor = saved;
+    return found ? 0 : -EXDEV;
 }
 
 static void select_anchor(Bridge *b, int fd)
@@ -1048,6 +1075,49 @@ static int unique_mount(Bridge *b, const char *host, size_t *selected)
         *selected=id;matches++;
     }
     return matches==1 ? 0 : -EXDEV;
+}
+
+void proot_socket_name(long number, long fd, void *address, unsigned *length,
+                       unsigned capacity)
+{
+    size_t prefix = offsetof(struct sockaddr_un, sun_path);
+    if (!address || !length || *length <= prefix + 1 || *length > sizeof(struct sockaddr_un))
+        return; /* Unnamed or not a pathname address: nothing to rewrite. */
+    Bridge *b;
+    if (bridge_create(&b) < 0) return;
+    if (*length > capacity) {
+        /* The guest buffer holds a truncated host name: query it privately.
+         * accept reports the peer, so ask the new connection for its peer. */
+        unsigned full = sizeof(b->address);
+        long query = number == __NR_getsockname ? __NR_getsockname : __NR_getpeername;
+        if (raw_syscall(query, fd, (long)&b->address, (long)&full, 0, 0, 0) < 0 ||
+            full != *length) {
+            bridge_release(b);
+            return;
+        }
+    } else memcpy(&b->address, address, *length);
+    if (b->address.sun_family == AF_UNIX && b->address.sun_path[0]) {
+        size_t size = strnlen(b->address.sun_path, *length - prefix);
+        memcpy(b->proc_host, b->address.sun_path, size);
+        b->proc_host[size] = 0;
+        int rc = preferred_guest_path(b, b->proc_host, b->proc_guest);
+#ifdef FD_EXPERIMENT
+        if (rc < 0 && g_payload_config.guard_file_reads) {
+            *length = (unsigned)sizeof(b->address.sun_family);
+            bridge_release(b);
+            return;
+        }
+#endif
+        size_t guest = strlen(b->proc_guest);
+        if (!rc && guest < sizeof(b->address.sun_path)) {
+            memset(b->address.sun_path, 0, sizeof(b->address.sun_path));
+            memcpy(b->address.sun_path, b->proc_guest, guest + 1);
+            unsigned full = (unsigned)(prefix + guest + 1);
+            memcpy(address, &b->address, full < capacity ? full : capacity);
+            *length = full;
+        }
+    }
+    bridge_release(b);
 }
 
 int proot_revalidate_cwd(struct proot_open_origin *origin)

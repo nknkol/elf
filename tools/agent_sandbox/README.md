@@ -88,8 +88,10 @@ is marked `unresolved` in the plan and only gets lexical overlap checks.
 Multithreaded programs work in the guarded modes: pthread clones share the
 FD table, cwd and mapping admissions under a metadata lock that never spans a
 blocking guest syscall; racing FD-number reuse is recorded as unknown.
-Container mode reports uid 0 while stat shows real owners; git therefore needs
-`-c safe.directory=/workspace` (command-line configuration is trusted).
+Guests see root identity: getuid and friends report 0, and stat reports the
+caller's own files (real uid/gid, plus the owners of the root and bind host
+directories, since HarmonyOS shared storage gives the caller's files a
+service owner) as owned by 0, so tools such as git accept the workspace.
 The command needs an absolute guest path. Profiles must expose the platform
 programs, libraries and the dynamic linker's guest path (on merged-usr systems
 `/lib` is a symlink to expose explicitly). This is the experimental file access
@@ -566,9 +568,9 @@ ancestor-only interpreter refuses the exec. Merged-usr `/lib` is a symlink in
 the root, so profiles must expose the interpreter's guest path explicitly.
 
 Known gaps: the launcher's initial target still maps PT_INTERP lexically;
-ancestor stat reports host metadata; socket addresses returned to the guest
-(getsockname/accept/recvfrom) are host paths; xattrat entries and path races
-are not covered. Pathname AF_UNIX addresses of bind/connect/sendto/sendmsg are
+ancestor stat reports host metadata; recvfrom sender names are host paths;
+xattrat entries and path races are not covered (accept/getsockname/getpeername
+names are reported in guest terms). Pathname AF_UNIX addresses of bind/connect/sendto/sendmsg are
 translated with guest semantics in both builds: bind follows the mutation
 policy, connect and sends need read visibility, host paths longer than
 sun_path go through a parent directory FD, abstract names pass through, and

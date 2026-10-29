@@ -32,12 +32,28 @@ static void exchange(long client,long server)
     CHECK(C(sendto,client,"k",1,0,0,0)==1);
     CHECK(C(recvfrom,server,&byte,1,0,0,0)==1 && byte=='k');
 }
-static void stream(const char *path)
+static int same(const char *a,const char *b) { while(*a && *a==*b) { a++;b++; } return *a==*b; }
+/* Returned names are guest paths with the kernel's length convention. */
+static void named(long fd,long number,const char *path)
+{
+    struct sockaddr_un a;unsigned size=sizeof(a);
+    long expected=(long)__builtin_offsetof(struct sockaddr_un,sun_path)+length(path)+1;
+    CHECK(call(number,fd,(long)&a,(long)&size,0,0,0)==0);
+    CHECK(a.sun_family==AF_UNIX && same(a.sun_path,path) && size==expected);
+    /* A short buffer gets a truncated copy and the full length. */
+    size=4;
+    CHECK(call(number,fd,(long)&a,(long)&size,0,0,0)==0 && size==expected);
+}
+/* names: the host name fits sun_path, so it can be reported in guest terms. */
+static void stream(const char *path,int names)
 {
     long server=sock(SOCK_STREAM);CHECK(bind_to(server,path)==0);
+    if(names)named(server,__NR_getsockname,path);
     CHECK(C(listen,server,4,0,0,0,0)==0);
     long client=sock(SOCK_STREAM);CHECK(connect_to(client,path)==0);
+    if(names)named(client,__NR_getpeername,path);
     long accepted=C(accept4,server,0,0,SOCK_CLOEXEC,0,0);CHECK(accepted>=0);
+    if(names)named(accepted,__NR_getsockname,path);
     exchange(client,accepted);
     C(close,accepted,0,0,0,0,0);C(close,client,0,0,0,0,0);C(close,server,0,0,0,0,0);
 }
@@ -48,10 +64,10 @@ void run(long *stack)
     int guard=mode[0]=='g';
     /* Guest names are translated into the view, including a host path longer
      * than sun_path (reached through its parent directory FD). */
-    stream("/w/s1");
-    stream(longpath);
+    stream("/w/s1",1);
+    stream(longpath,0);
     CHECK(C(chdir,"/w",0,0,0,0,0)==0);
-    stream("s2");
+    stream("s2",0);
     /* connect follows a guest symlink to a listening socket. */
     long target=sock(SOCK_STREAM);CHECK(bind_to(target,"/w/t")==0);
     CHECK(C(listen,target,1,0,0,0,0)==0);

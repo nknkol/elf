@@ -212,6 +212,15 @@ R_AARCH64_RELATIVE 重定位（-O0 payload 也带两个未重定位 GOT 项）�
 在无保护时原样、读取保护下拒绝。loader 以 exec 名设置 comm；loader 运行进程的 /proc/<pid>/cmdline 由
 memfd 提供 guest argv，不再暴露 loader 参数与宿主路径。默认 ABI 5、实验 ABI 14。HarmonyOS proc_links
 用例三种配置通过，全部回归通过。
+2026-10-30 身份一致性增量：getuid 系列一直报告 0，但 stat 返回宿主属主，git 因"所有权可疑"拒绝工作区。
+现在入口统一改写 fstat/newfstatat/statx 成功结果：属主为真实 uid/gid，或为根与各 bind 宿主目录的
+属主时报告为 0（PRoot -0 只映射真实 uid；HarmonyOS 共享存储上调用者新建文件的属主是服务 uid
+20001006），其他属主不变。新增 ids 用例（两种构建），agent_brew 去掉 safe.directory 后通过。
+2026-10-30 socket 名称增量：accept/accept4/getsockname/getpeername 返回的 pathname AF_UNIX 地址改为 guest 路径
+（四者加入共享慢路径，共 139 项），按调用者缓冲区截断并报告完整长度；被截断时私下重新查询完整名称。
+反向映射选择能如实命名宿主对象的最具体挂载（bind 优先于根别名，读取保护下跳过隐藏别名），/proc 链接
+目标同样受益；读取保护下无法映射或隐藏的名称报告为未命名。经 /proc/self/fd 绑定的超长路径仍无法反向。
+recvfrom 位于快路径，未处理。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
@@ -252,7 +261,7 @@ bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回
 `make check` 不含 FD 实验工作流；两套都通过才能支持上表结论。
 构建与离线验收报告位于忽略目录 `vendor/proot/svc/build/`；不提交二进制或 rootfs。
 当前全量扫描记录是 98 个参数配方、13 个不同 SIGSYS 编号，不是所有 syscall 的证明。
-共享慢路径 135 项表示“进入处理器”，不能作为“实现 135 项”的完成率。
+共享慢路径 139 项表示“进入处理器”，不能作为“实现 139 项”的完成率。
 固定危险调用回归另包含 fchmodat2，共 14 项；close_range 有单独的拒绝/回退测试。
 原生配方、支持子集和错误路径都需分别看待，不能把 ENOSYS 算作功能实现。
 

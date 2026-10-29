@@ -321,6 +321,19 @@ SLOW_SYSCALL(__NR_bind)
 #ifdef __NR_connect
 SLOW_SYSCALL(__NR_connect)
 #endif
+#ifdef __NR_accept
+/* Socket names are reported back to the guest in guest terms. */
+SLOW_SYSCALL(__NR_accept)
+#endif
+#ifdef __NR_accept4
+SLOW_SYSCALL(__NR_accept4)
+#endif
+#ifdef __NR_getsockname
+SLOW_SYSCALL(__NR_getsockname)
+#endif
+#ifdef __NR_getpeername
+SLOW_SYSCALL(__NR_getpeername)
+#endif
 #ifdef __NR_sendto
 /* Pathname AF_UNIX destinations need guest translation. */
 SLOW_SYSCALL(__NR_sendto)

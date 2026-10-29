@@ -1,6 +1,9 @@
 #include <asm/unistd.h>
 #include "syscall_hooks.h"
 #include "config.h"
+#ifdef PROOT_PATH
+#include "proot_bridge.h"
+#endif
 #ifdef FD_EXPERIMENT
 #include "fd_experiment.h"
 #endif
@@ -78,11 +81,19 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     args[4] = a[4];
     args[5] = a[5];
 
+    int named = sys_no == __NR_accept || sys_no == __NR_accept4 ||
+        sys_no == __NR_getsockname || sys_no == __NR_getpeername;
+    unsigned capacity = named && a[1] && a[2] ? *(unsigned *)a[2] : 0;
 #ifdef FD_EXPERIMENT
     long ret = fd_experiment_dispatch(sys_no, args);
 #else
     long ret = syscall_handle_common(sys_no, args);
 #endif
     if (!ret) fake_owner(sys_no, a);
+#ifdef PROOT_PATH
+    if (ret >= 0 && capacity)
+        proot_socket_name(sys_no, sys_no == __NR_accept || sys_no == __NR_accept4 ? ret : a[0],
+                          (void *)a[1], (unsigned *)a[2], capacity);
+#endif
     return ret;
 }

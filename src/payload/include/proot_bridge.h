@@ -30,6 +30,12 @@ int proot_revalidate_cwd(struct proot_open_origin *origin);
  * stays the kernel cursor of the last returned record. */
 long proot_getdents_visible(int fd, void *buffer, unsigned long count,
                             const struct proot_open_origin *anchor);
+/* Rewrite a kernel-returned pathname AF_UNIX address (accept, getsockname,
+ * getpeername) in guest terms, honoring the caller's buffer capacity and
+ * reporting the full length like the kernel. Read guard: an unmappable or
+ * hidden name is reported as unnamed. */
+void proot_socket_name(long number, long fd, void *address, unsigned *length,
+                       unsigned capacity);
 long proot_openat(long args[6], const struct proot_open_origin *anchor,
                   struct proot_open_origin *origin);
 long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,

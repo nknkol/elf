@@ -2,8 +2,6 @@
 SLOW_SYSCALL(__NR_pipe2)
 SLOW_SYSCALL(__NR_socket)
 SLOW_SYSCALL(__NR_socketpair)
-SLOW_SYSCALL(__NR_accept)
-SLOW_SYSCALL(__NR_accept4)
 SLOW_SYSCALL(__NR_recvmsg)
 SLOW_SYSCALL(__NR_recvmmsg)
 SLOW_SYSCALL(__NR_memfd_create)
