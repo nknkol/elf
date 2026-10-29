@@ -140,7 +140,19 @@ guest 内 exec 链的 PT_INTERP 现由 payload 读取，用 guest symlink 语义
 解析出的宿主路径经 `--exec-interp` 交给子 loader 直接加载；隐藏或仅可遍历的解释器使 exec
 失败。文件访问模式的子 loader 遇到 PT_INTERP 而无该参数时拒绝，不回退到词法宿主映射。
 merged-usr 系统的 `/lib` 等是根目录中的 symlink，配置须显式暴露解释器所在路径。
-仍未完成：启动器给出的首个目标仍由 loader 词法映射加载解释器；祖先目录的 stat 仍是宿主元数据，
+2026-10-30 agent 启动增量：新增 `tools/agent_sandbox/launch.py`，把 profile 计划接到文件访问模式。
+私有 home/tmp/cache 以 0700 创建；`<state>/root` 只含挂载点占位，作为 deny 根，祖先目录 stat
+看到占位而非宿主目录，每次启动重建，缺少标记的已有目录拒绝且不删除。全部挂载按 ro/rw 生成
+访问向量，并启用 stdio/pipe 输出、stream 输入和 FD 重新验证；环境只含 HOME/PATH/USER 等固定项、
+TERM 和显式 `--env`。首个程序是随 FD 构建生成、哈希记入 manifest 的静态 exec 助手：确认 payload
+已拦截后 chdir 到工作目录并经 payload exec 命令，因此命令、shebang 与 PT_INTERP 都按策略解析。
+挂载数、环境数、路径长度等后端上限在启动前拒绝。同时修复：exec 后 cwd 不带来源，相对路径
+打开的文件读取被拒；现在 `--revalidate-file-fds` 在启动时按唯一可见视图重新验证 cwd（读取模式
+下隐藏别名不参与竞争，两个可见别名仍为未知）。末尾 `/.` 或 `/` 的规范路径此前被当作隐藏子项，
+现按目录本身判定。Android 真机上的 agent_launch 用例覆盖 Alpine shell 的工作目录、干净环境、
+私有状态持久化、根目录列表、brew shebang 工具、只读/隐藏路径、管道及参数拒绝；全部 fs_policy、
+shell 与默认构建回归通过。
+仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX socket 路径、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -189,6 +201,8 @@ bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX s
 1. **agent 权限执行**：配置只规划不运行；所有 bind 仍可写。绝对/已知目录 FD/cwd 相对打开已有
    mount/access 观察值，但未知 cwd/目录 FD、导入和 exec 恢复仍 UNKNOWN；尚无可信来源链。
    实验版的只读修改保护与默认拒绝读取已可选启用，但 PT_INTERP、socket 路径和竞争仍有缺口。
+   `tools/agent_sandbox/launch.py` 已把 profile 接到实验版文件访问模式，但 brew 实际程序与平台库
+   尚未在 HarmonyOS 沙盒中验证。
 2. **完整 FD/任务语义**：普通线程与共享 VM/FD、通用 clone、close_range 真正实现、
    更多 ioctl/辅助消息 FD 通道仍有缺口。不能把 128 条元数据表视作全部内核 FD。
 3. **路径与挂载语义**：目录 FD 仍经 `/proc/self/fd` 反向路径映射；往返检查可拒绝

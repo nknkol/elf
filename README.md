@@ -6,7 +6,8 @@
 
 **当前是可运行的兼容性后端，尚未完成 agent 文件隔离。** root/bind、动态 ELF、
 链式 exec 已有测试。FD 实验版可选启用只读修改保护和默认拒绝读取/目录可见性
-（`--guard-file-access`），但完整 FD 生命周期、`/proc` 和对抗验收尚未完成。
+（`--guard-file-access`），`tools/agent_sandbox/launch.py` 可按 agent profile 启动；
+但完整 FD 生命周期、`/proc` 和对抗验收尚未完成。
 默认构建仍有 raw syscall 入口及同线程重入透传风险；实验构建拒绝同线程嵌套慢调用，
 但也尚未完成恶意代码隔离验收。
 `container` 模式名称也不代表这些隔离能力已完成。
@@ -78,7 +79,7 @@ make check-ubuntu UBUNTU_ARCHIVE=../ubuntu-base-26.04.1-base-arm64.tar.gz
 | `vendor/proot/port-tests/` | 核心与 ELF 集成回归 |
 | `test/syscalls/` | 沙盒 syscall 行为、分流和重入验证 |
 | `test/alpine/`、`test/ubuntu/` | rootfs 离线验收 |
-| `tools/agent_sandbox/`、`profiles/` | agent 策略规划原型，尚未连接执行层 |
+| `tools/agent_sandbox/`、`profiles/` | agent profile 规划与 `launch.py` 启动（实验版文件访问模式） |
 
 ## 实现状态与下一步
 

@@ -30,5 +30,14 @@ pending=build/('elfloader-proot'+suffix+'.next')
 pending.unlink(missing_ok=True)
 shutil.copy2(elf/'src/elfloader',pending)
 pending.replace(snapshot)
-(build/('elf-build'+suffix+'.json')).write_text(json.dumps({'backend':'proot-path','fd_experiment':args.fd_experiment,'sha256':hashlib.sha256(snapshot.read_bytes()).hexdigest()},indent=2))
+manifest={'backend':'proot-path','fd_experiment':args.fd_experiment,'sha256':hashlib.sha256(snapshot.read_bytes()).hexdigest()}
+if args.fd_experiment:
+    # First guest program of tools/agent_sandbox/launch.py. Static-pie keeps
+    # it near the loader's SVC stubs; it carries no relocations.
+    helper=build/'elf-exec-helper'
+    subprocess.run(['clang','-O1','-static-pie','-fPIE','-nostdlib','-ffreestanding','-fno-builtin',
+                    '-fno-stack-protector',str(elf/'tools/agent_sandbox/exec_helper.c'),
+                    '-o',str(helper)],check=True)
+    manifest['exec_helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
+(build/('elf-build'+suffix+'.json')).write_text(json.dumps(manifest,indent=2))
 print('Built experimental PRoot path backend:',snapshot)

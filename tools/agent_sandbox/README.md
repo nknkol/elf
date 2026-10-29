@@ -5,10 +5,10 @@ system/brew tools. A separate Linux rootfs is a secondary mode. This repository
 contains the ELF execution backend and vendored PRoot path semantics together;
 bubblewrap is not a build or runtime dependency.
 
-`plan.py` currently validates and prints a filesystem plan only. It does not
-launch an agent, create directories, or enforce access. The output explicitly
-marks enforcement as `not-connected`; do not pass the plan to the legacy bind
-CLI expecting readonly or default-deny isolation.
+`plan.py` validates and prints a filesystem plan only; its output is marked
+`not-connected`. `launch.py` connects the same plan to the FD-experiment
+backend's file access guard (see "Launching an agent" below). Do not pass the
+plan to the legacy bind CLI expecting readonly or default-deny isolation.
 
 From the repository root, with real absolute paths:
 
@@ -38,18 +38,47 @@ resources can remain usable; dependencies outside that prefix still need rules.
 Environment expansion and shell execution are not used. Only whole-path
 `${BREW_PREFIX}` and `${WORKSPACE}` substitutions are supported.
 
-Next implementation steps:
+Implementation status of the original steps: policy transport across exec,
+path/FD mutation and read guards, listing filters and ancestor traversal are
+implemented in the FD experiment, and `launch.py` creates private state and a
+clean environment. Remaining: validate real brew programs and platform
+libraries in the HarmonyOS sandbox, and close known interception bypasses
+before claiming hostile-agent isolation.
 
-1. Carry validated policy in loader/payload configuration and across exec;
-   reject policy configurations that exceed backend limits.
-2. Connect default-deny visibility and readonly checks to canonical path
-   resolution, including both operands of rename/link and metadata mutation.
-3. Track descriptor provenance and permissions, including inherited FDs,
-   dup/close, writable mmap and descriptor-based mutations. Filter directory
-   listings and handle traversal of ancestors needed to reach exposed paths.
-4. Create private state and clean environment for launch; validate actual brew
-   programs and their dynamic loaders in the system sandbox.
-5. Close known interception bypasses before claiming hostile-agent isolation.
+## Launching an agent
+
+```sh
+make check-fd-runtime   # or: python3 vendor/proot/svc/build_elf.py --fd-experiment
+python3 tools/agent_sandbox/launch.py profiles/agent.json \
+  --brew-prefix /path/to/brew --workspace /path/to/project \
+  --state /path/to/private-run -- /bin/sh -l
+```
+
+The launcher compiles the profile, creates the private directories (0700) and
+`<state>/root`, a root that contains only mountpoint placeholders. That root is
+the denied mount, so guests can traverse and list exactly the exposed
+mountpoint names, and an ancestor stat reports these placeholders rather than
+host directories. It is recreated on every launch; an existing `root` without
+the launcher's marker is refused, never deleted. Private home/tmp/cache persist.
+
+Every mount becomes a loader volume with its ro/rw access, behind deny for the
+root: `--guard-file-access` plus `--allow-stdio-output`, `--allow-pipe-output`,
+`--allow-stream-input` and `--revalidate-file-fds`. The loader and the static
+exec helper must match the FD build manifest. The helper enters the guest
+working directory (`--cwd`, default the rw workspace target) and execs the
+command through the payload, so the command path, shebang and dynamic linker
+use the same policy as later execs and must be visible. The guest environment
+is clean: HOME, PATH (exposed ro `bin`/`sbin` first), USER, LOGNAME, SHELL,
+LANG, TMPDIR/XDG_CACHE_HOME for private tmp/cache, the host TERM, and explicit
+`--env KEY=VALUE`; no other host variable is passed. `--print` shows the
+launch as JSON without creating state.
+
+Backend limits are checked before launch: at most 8 mounts (private ones
+included), 16 environment entries, 255-byte paths/entries, no ":" in paths.
+The command needs an absolute guest path. Profiles must expose the platform
+programs, libraries and the dynamic linker's guest path (on merged-usr systems
+`/lib` is a symlink to expose explicitly). This is the experimental file access
+mode, not hostile-code isolation; see the known gaps above and docs/STATUS.md.
 
 For the functioning experimental path backend and its tests, see
 [vendor/proot/SVC_PORT.md](../../vendor/proot/SVC_PORT.md).

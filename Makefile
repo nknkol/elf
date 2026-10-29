@@ -61,4 +61,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/fcntls.py
 	$(PYTHON) test/fs_policy/async_io.py
 	$(PYTHON) test/fs_policy/reads.py
+	$(PYTHON) test/fs_policy/agent_launch.py
 	$(PYTHON) test/fd_runtime/run.py
