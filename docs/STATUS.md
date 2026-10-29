@@ -161,6 +161,12 @@ symlink 并按读取可见性判定；宿主路径超过 sun_path 时经父目�
 相对路径、超长宿主路径、symlink、抽象名、ro/deny 与宿主 socket 拒绝，以及默认构建；旧代码在首个
 bind 即失败。文件修改模式仍拒绝对 socket 使用 write/writev（来源未知），send/recv 不受影响；
 getsockname/getpeername/accept/recvfrom 返回的地址仍是宿主路径，尚未反向映射。
+2026-10-30 HarmonyOS 真机核查（`f23d91a`，HongMeng Kernel 1.13.0 AArch64）：`make check` 212 项
+PASS、`make check-fd-runtime` 158 项 PASS（仅既有的 2 项硬链接夹具 SKIP），Alpine/Ubuntu 离线验收
+各 18/18。核查发现并修复：鸿蒙目录记录比 ext4 大，私有 getdents 批次此前沿用 guest 的 count，
+隐藏的大记录会让小缓冲返回 EINVAL；现读取完整私有批次，仅复制放得下的可见记录并把目录游标
+退回首个未返回记录，首个可见记录放不下时才 EINVAL 且不移动游标。/storage/Users 与 /tmp 拒绝
+创建 socket inode，socket 用例改为探测可用目录（应用 TMPDIR）。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
