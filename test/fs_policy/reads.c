@@ -5,6 +5,9 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+/* linux/inotify.h conflicts with libc fcntl.h definitions. */
+#define IN_NONBLOCK O_NONBLOCK
+#define IN_ALL_EVENTS 0xfff
 static long call(long n,long a,long b,long c,long d,long e,long f)
 {
     register long x0 __asm__("x0")=a,x1 __asm__("x1")=b,x2 __asm__("x2")=c,x3 __asm__("x3")=d;
@@ -51,6 +54,41 @@ static int listed(const char *names,const char *name)
         if(!*b && *a=='|')return 1;
     }
     return 0;
+}
+static int contains(const unsigned char *bytes,long size,const char *word)
+{
+    for(long i=0;i<size;i++) {
+        long j=0;
+        while(word[j] && i+j<size && bytes[i+j]==(unsigned char)word[j])j++;
+        if(!word[j])return 1;
+    }
+    return 0;
+}
+/* The whole guest buffer, not just the returned prefix, must stay free of
+ * hidden names: after normal batches, hidden-only batches and at EOF. */
+static void no_residue(const char *path,unsigned size,const char *const *hidden)
+{
+    unsigned char buffer[1024];
+    long fd=open_file(path,O_RDONLY|O_DIRECTORY);CHECK(fd>=0);
+    for(;;) {
+        for(unsigned i=0;i<sizeof(buffer);i++)buffer[i]=0xaa;
+        long n=C(getdents64,fd,buffer,size,0,0,0);CHECK(n>=0);
+        for(long i=0;hidden[i];i++)CHECK(!contains(buffer,sizeof(buffer),hidden[i]));
+        for(long i=n;i<(long)sizeof(buffer);i++)CHECK(buffer[i]==0xaa);
+        if(!n)break;
+    }
+    close_fd(fd);
+}
+static void watches(void)
+{
+    long notify=C(inotify_init1,IN_NONBLOCK,0,0,0,0,0);CHECK(notify>=0);
+    /* A visible directory whose direct child is a hidden bind could name it. */
+    CHECK(C(inotify_add_watch,notify,"/home/u/work",IN_ALL_EVENTS,0,0,0)==-EACCES);
+    CHECK(C(inotify_add_watch,notify,"/home/u",IN_ALL_EVENTS,0,0,0)==-EACCES);
+    CHECK(C(inotify_add_watch,notify,"/etc",IN_ALL_EVENTS,0,0,0)==-EACCES);
+    CHECK(C(inotify_add_watch,notify,"/opt/ro",IN_ALL_EVENTS,0,0,0)>=0);
+    CHECK(C(inotify_add_watch,notify,"/home/u/work/private/pub",IN_ALL_EVENTS,0,0,0)>=0);
+    close_fd(notify);
 }
 static void expect_listing(const char *path,unsigned size,const char *const *names,long count)
 {
@@ -107,6 +145,10 @@ static void traversal(void)
     expect_listing("/",1024,root,2);
     /* Small buffers return one record at a time; hidden batches are skipped. */
     expect_listing("/",32,root,2);
+    const char *in_root[]={"secret","etc","deny","link-visible","probe","host-",0};
+    const char *in_user[]={"sibling",0},*in_work[]={"hidden",0};
+    no_residue("/",1024,in_root);no_residue("/",32,in_root);
+    no_residue("/home/u",40,in_user);no_residue("/home/u/work",1024,in_work);
     expect_listing("/home",1024,home,1);
     expect_listing("/home/u",40,user,1);
     const char *priv[]={"pub"};
@@ -195,7 +237,7 @@ void run(long *stack)
         read_text("/home/u/work/file","work");
         C(exit_group,0,0,0,0,0,0);for(;;){}
     }
-    traversal();visible();inherited(mode[0]=='s');
+    traversal();watches();visible();inherited(mode[0]=='s');
     const char *args[]={"/home/u/work/probe","child",0};
     C(execve,args[0],args,0,0,0,0);CHECK(0);
 }

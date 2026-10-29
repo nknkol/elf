@@ -36,6 +36,8 @@ typedef struct {
     struct fs_policy policy;
     const char *exposed[CONFIG_MAX_BINDS];
     size_t exposed_count;
+    /* Private getdents64 bounce: hidden names never reach guest memory. */
+    unsigned char dirents[4096];
 #endif
     const struct proot_path_context *context;
     int anchor_fd;
@@ -62,6 +64,26 @@ static int path_visibility(Bridge *b, const char *guest)
     int rc = binding_table_mount_id(&b->table, guest, &mount);
     if (rc < 0) return rc;
     return fs_policy_visibility(&b->policy, mount, guest, b->exposed, b->exposed_count);
+}
+
+/* inotify reports names of a watched directory's direct children. Refuse a
+ * watch whose events could name a hidden bind mountpoint (or the host object
+ * aliased there); event filtering per watch descriptor is not modeled. */
+static int watch_hides_child(Bridge *b, const char *guest)
+{
+    size_t length = strlen(guest);
+    for (size_t i = 0; b->reads && i < b->table.count; i++) {
+        const char *child = b->table.entries[i].guest;
+        size_t parent = 0;
+        for (size_t j = 1; child[j]; j++)
+            if (child[j] == '/') parent = j;
+        if (!parent) parent = 1; /* Direct child of "/". */
+        if (parent != length || strncmp(child, guest, length)) continue;
+        int visibility = path_visibility(b, child);
+        if (visibility < 0) return visibility;
+        if (visibility == FS_HIDDEN) return -EACCES;
+    }
+    return 0;
 }
 #endif
 
@@ -424,6 +446,10 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         if (!a[1]) return -EFAULT;
         ret = resolve(b, AT_FDCWD, (const char *)a[1], !(a[2] & IN_DONT_FOLLOW));
         if (ret < 0) return ret;
+#ifdef FD_EXPERIMENT
+        ret = watch_hides_child(b, b->guest);
+        if (ret < 0) return ret;
+#endif
         return raw_syscall(number, a[0], (long)b->host, a[2], 0, 0, 0);
     }
     /* Descriptor operations retain kernel identity; FD policy is a later layer. */
@@ -676,14 +702,19 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
     ret = path_visibility(b, b->first_guest);
     if (ret == FS_HIDDEN) ret = -EACCES;
     if (ret < 0) goto done;
+    if (!buffer) { ret = -EFAULT; goto done; }
     size_t base = strlen(b->first_guest);
+    /* A smaller kernel count only returns fewer records; tiny guest counts
+     * still get the kernel's own EINVAL. */
+    unsigned long bounce = count < sizeof(b->dirents) ? count : sizeof(b->dirents);
     for (;;) {
-        /* The kernel validates the buffer and advances the directory offset.
-         * Records are compacted in place; a batch hiding every entry is
-         * retried, so zero still means end of directory. */
-        ret = raw_syscall(__NR_getdents64, fd, (long)buffer, (long)count, 0, 0, 0);
+        /* The kernel fills the private bounce and advances the offset; only
+         * visible records are copied out, so hidden names never touch guest
+         * memory, even transiently. A batch hiding every entry is retried,
+         * so zero still means end of directory. */
+        ret = raw_syscall(__NR_getdents64, fd, (long)b->dirents, (long)bounce, 0, 0, 0);
         if (ret <= 0) goto done;
-        unsigned char *bytes = buffer;
+        unsigned char *bytes = b->dirents;
         size_t kept = 0;
         for (size_t offset = 0; offset < (size_t)ret;) {
             unsigned short length;
@@ -709,7 +740,11 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
             }
             offset += length;
         }
-        if (kept) { ret = (long)kept; goto done; }
+        if (kept) {
+            memcpy(buffer, bytes, kept);
+            ret = (long)kept;
+            goto done;
+        }
     }
 done:
     proot_scratch_free(b, sizeof(Bridge));

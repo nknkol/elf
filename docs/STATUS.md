@@ -118,8 +118,10 @@ EINVAL；保留宿主限制，不尝试绕过系统沙盒，也不把该项记�
 非 deny bind 的严格祖先则仅可遍历，否则隐藏。PRoot 解析在每个分量、相对基准和 symlink
 目标交给宿主前判定，隐藏名统一 EACCES，不因存在与否、symlink 路由或 `..` 而不同；
 祖先目录只允许 stat/statx/statfs、非写 access、chdir/fchdir、O_DIRECTORY 只读或 O_PATH
-打开及枚举。getdents64 在原缓冲区内压缩记录，隐藏项不返回，整批隐藏时继续读取，
-不会提前返回 0。FD 读取覆盖 read/readv/pread/preadv(2)、sendfile/splice/tee/
+打开及枚举。getdents64 先读入 payload 私有缓冲，只把可见记录复制给 guest，隐藏名
+不会出现在 guest 内存中（返回长度之后的字节和读取期间均不出现）；整批隐藏时继续读取，
+不会提前返回 0。inotify 不能监听祖先或隐藏目录；可见目录若有隐藏的直接子 bind，
+其事件会带出该名称，因此此类监听返回 EACCES（尚未实现按 wd 过滤事件）。FD 读取覆盖 read/readv/pread/preadv(2)、sendfile/splice/tee/
 copy_file_range 的来源、fd 型 xattr 读取、空路径 readlinkat 和全部文件 mmap（含 private）。
 已知来源按挂载判定；本地创建的 pipe/socketpair/socket/accept/eventfd/timerfd/signalfd/
 epoll/inotify/memfd 带本地 stream 授权，随 dup/fork 保留，exec 清除且不进快照。

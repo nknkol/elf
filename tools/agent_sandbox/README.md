@@ -494,9 +494,13 @@ referee before the host sees it, so a hidden name returns EACCES whether or not
 it exists, and neither a symlink nor `..` can route through it. Ancestors allow
 stat/statx/statfs, non-write access checks, chdir/fchdir, read-only
 `O_DIRECTORY` or `O_PATH` opens and listing; content, links, xattrs, watches and
-exec are refused. getdents64 compacts the kernel batch in place and drops
-hidden names, and it retries batches that are entirely hidden so that zero
-still means end of directory. Listings only contain names the host directory
+exec are refused. getdents64 reads into a private payload buffer and copies
+only visible records to the guest, so hidden names never appear in guest
+memory, not even transiently or past the returned length. Batches that are
+entirely hidden are retried so that zero still means end of directory.
+inotify watches on a visible directory with a hidden direct child bind are
+refused with EACCES, because events would name that child; per-watch event
+filtering is not implemented. Listings only contain names the host directory
 actually has: missing bind mountpoints are not synthesized.
 
 Content reads from FDs (read/readv/pread/preadv/preadv2, the source of

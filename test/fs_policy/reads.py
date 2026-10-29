@@ -15,21 +15,23 @@ assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads(
 
 def tree(root):
     """Host layout. Root and /deny are denied; /home/u/work is rw with a denied
-    private child that re-exposes pub read-only; /opt/ro is read-only."""
+    private child that re-exposes pub read-only and a denied hidden child whose
+    host mountpoint must not be listed or watched; /opt/ro is read-only."""
     for name in ('etc', 'home/u/work', 'home/other', 'opt/ro', 'deny', 'host-work/private',
-                 'host-ro', 'host-private/pub', 'host-pub', 'host-deny'):
+                 'host-work/hidden', 'host-ro', 'host-private/pub', 'host-pub', 'host-deny',
+                 'host-hidden'):
         (root / name).mkdir(parents=True, exist_ok=True)
     for name, data in (('root-secret', b'SECRET-ROOT'), ('etc/passwd', b'SECRET-ETC'),
                        ('home/u/sibling-secret', b'SECRET-SIB'), ('host-work/file', b'work'),
                        ('host-ro/file', b'ro'), ('host-private/x', b'SECRET-PRIV'),
-                       ('host-pub/file', b'pub'), ('host-deny/file', b'SECRET-DENY')):
+                       ('host-pub/file', b'pub'), ('host-deny/file', b'SECRET-DENY'), ('host-hidden/file', b'SECRET-HIDDEN')):
         (root / name).write_bytes(data)
     (root / 'link-visible').symlink_to('/home/u/work/file')
     (root / 'host-work/to-secret').symlink_to('/root-secret')
     return ['-v', f'{root}/host-work:/home/u/work', '-v', f'{root}/host-ro:/opt/ro',
             '-v', f'{root}/host-private:/home/u/work/private',
             '-v', f'{root}/host-pub:/home/u/work/private/pub',
-            '-v', f'{root}/host-deny:/deny']
+            '-v', f'{root}/host-deny:/deny', '-v', f'{root}/host-hidden:/home/u/work/hidden']
 
 
 def launch(root, binds, options, mode):
@@ -58,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='read-guard-', dir=build) as tmp:
                     '-o', str(root / 'probe')], check=True)
     (root / 'host-work/probe').write_bytes((root / 'probe').read_bytes())
     (root / 'host-work/probe').chmod(0o755)
-    policy = ['--guard-file-access', 'dwrdrd', '--allow-pipe-output', '--allow-stdio-output']
+    policy = ['--guard-file-access', 'dwrdrdd', '--allow-pipe-output', '--allow-stdio-output']
     for mode, extra in (('main', []), ('stream', ['--allow-stream-input'])):
         p = launch(root, binds, [*policy, *extra], mode)
         assert p.returncode == 0, (mode, p.returncode, p.stdout, p.stderr)
@@ -67,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='read-guard-', dir=build) as tmp:
     assert (root / 'host-work/file').read_bytes() == b'work'
 
     # The mutation-only mode keeps its earlier read behavior.
-    p = launch(root, binds, ['--guard-file-mutations', 'dwrdrd'], 'main')
+    p = launch(root, binds, ['--guard-file-mutations', 'dwrdrdd'], 'main')
     assert p.returncode != 0, (p.stdout, p.stderr)
     print('PASS: file mutation mode does not imply read denial')
 
