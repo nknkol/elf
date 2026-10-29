@@ -38,6 +38,7 @@ typedef struct {
     size_t exposed_count;
     /* Private getdents64 bounce: hidden names never reach guest memory. */
     unsigned char dirents[4096];
+    char classified[PATH_MAX];
 #endif
     const struct proot_path_context *context;
     int anchor_fd;
@@ -60,10 +61,22 @@ static int host_map(void *opaque, const char *guest, char *host)
 static int path_visibility(Bridge *b, const char *guest)
 {
     if (!b->reads) return FS_VISIBLE;
+    /* A final "/" or "." keeps directory semantics in PRoot's canonical
+     * result; classify the directory itself. */
+    size_t length = strnlen(guest, PATH_MAX);
+    if (length == PATH_MAX) return -ENAMETOOLONG;
+    memcpy(b->classified, guest, length + 1);
+    for (;;) {
+        if (length > 1 && b->classified[length - 1] == '/') b->classified[--length] = 0;
+        else if (length > 2 && !strcmp(b->classified + length - 2, "/."))
+            b->classified[length -= 2] = 0;
+        else break;
+    }
+    if (!length || !strcmp(b->classified, "/.")) strcpy(b->classified, "/");
     size_t mount;
-    int rc = binding_table_mount_id(&b->table, guest, &mount);
+    int rc = binding_table_mount_id(&b->table, b->classified, &mount);
     if (rc < 0) return rc;
-    return fs_policy_visibility(&b->policy, mount, guest, b->exposed, b->exposed_count);
+    return fs_policy_visibility(&b->policy, mount, b->classified, b->exposed, b->exposed_count);
 }
 
 /* inotify reports names of a watched directory's direct children. Refuse a
@@ -633,6 +646,41 @@ static long bridge_create(Bridge **out)
     return 0;
 }
 
+/* Exactly one retained mount must faithfully name this host path. Under the
+ * read guard a hidden name cannot reach the object, so it is not a competing
+ * view; two visible aliases (e.g. ro and rw) remain ambiguous. */
+static int unique_mount(Bridge *b, const char *host, size_t *selected)
+{
+    size_t matches=0;
+    for(size_t id=0;id<=b->table.count;id++) {
+        b->anchor=(struct proot_open_origin){id,true};
+        if(observed_guest_path(b,host,b->guest))continue;
+#ifdef FD_EXPERIMENT
+        int visibility=path_visibility(b,b->guest);
+        if(visibility<0)return visibility;
+        if(visibility==FS_HIDDEN)continue;
+#endif
+        *selected=id;matches++;
+    }
+    return matches==1 ? 0 : -EXDEV;
+}
+
+int proot_revalidate_cwd(struct proot_open_origin *origin)
+{
+    if(!origin)return -EINVAL;
+    *origin=(struct proot_open_origin){0,false};
+    Bridge *b;
+    long ret=bridge_create(&b);if(ret<0)return ret;
+    ret=raw_syscall(SYS_getcwd,(long)b->first_host,sizeof(b->first_host),0,0,0,0);
+    if(ret>=0) {
+        size_t selected;
+        /* Unreachable or ambiguous (aliased) directories stay unknown. */
+        ret=unique_mount(b,b->first_host,&selected);
+        if(!ret)*origin=(struct proot_open_origin){selected,true};
+    }
+    proot_scratch_free(b,sizeof(Bridge));return (int)ret;
+}
+
 int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
 {
     if(!origin)return -EINVAL;
@@ -661,12 +709,9 @@ int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
     if((named.st_mode&S_IFMT)!=S_IFREG || named.st_dev!=live.st_dev || named.st_ino!=live.st_ino) {
         ret=-ESTALE;goto done;
     }
-    size_t selected=0,matches=0;
-    for(size_t id=0;id<=b->table.count;id++) {
-        b->anchor=(struct proot_open_origin){id,true};
-        if(!observed_guest_path(b,b->first_host,b->guest)) { selected=id;matches++; }
-    }
-    if(matches!=1) { ret=-EXDEV;goto done; }
+    size_t selected;
+    ret=unique_mount(b,b->first_host,&selected);
+    if(ret<0)goto done;
     ret=raw_syscall(__NR_fstat,fd,(long)&again,0,0,0,0);
     if(ret<0)goto done;
     if(again.st_dev!=live.st_dev || again.st_ino!=live.st_ino || !again.st_nlink) {

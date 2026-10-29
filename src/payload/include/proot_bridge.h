@@ -23,6 +23,8 @@ struct proot_open_origin { size_t mount_id; bool known; };
 /* Re-derive a regular FD's unique current mount view from kernel identity.
  * No snapshot origin is accepted; ambiguous/unlinked/unmatched objects fail. */
 int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin);
+/* Same unique-view rule for the kernel cwd, never a stored cwd tag. */
+int proot_revalidate_cwd(struct proot_open_origin *origin);
 /* Read guard listing: EACCES for a hidden directory; hidden entries are
  * removed from each kernel batch. Only exact names are filtered, so d_off
  * stays the kernel cursor of the last returned record. */

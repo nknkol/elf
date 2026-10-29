@@ -216,6 +216,12 @@ static int start(struct fd_runtime *s)
             return rc;
         }
     }
+    if(g_payload_config.revalidate_file_fds) {
+        /* exec does not carry cwd provenance; re-derive it like file FDs so
+         * relative paths keep a known origin. Failure leaves cwd unknown. */
+        struct proot_open_origin cwd;
+        if(!proot_revalidate_cwd(&cwd))s->cwd=cwd;
+    }
     int admission=admit_stdio_output(s);
     if(admission) {
         s->init_error=admission;

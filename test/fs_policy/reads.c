@@ -135,6 +135,12 @@ static void traversal(void)
     /* Ancestors of exposed binds: lookup, stat, directory open and cwd only. */
     CHECK(C(newfstatat,AT_FDCWD,"/",&st,0,0,0)==0);
     CHECK(C(newfstatat,AT_FDCWD,"/home/u",&st,0,0,0)==0);
+    /* Trailing "." or "/" names the directory itself, not a hidden child. */
+    CHECK(C(newfstatat,AT_FDCWD,"/.",&st,0,0,0)==0);
+    CHECK(C(newfstatat,AT_FDCWD,"/home/",&st,0,0,0)==0);
+    CHECK(C(newfstatat,AT_FDCWD,"/home/u/work/.",&st,0,0,0)==0);
+    CHECK(C(newfstatat,AT_FDCWD,"/etc/.",&st,0,0,0)==-EACCES);
+    CHECK(open_file("/home/u/work/./",O_RDONLY|O_DIRECTORY)>=0);
     CHECK(C(faccessat,AT_FDCWD,"/home",4,0,0,0)==0);
     CHECK(open_file("/",O_RDONLY)==-EACCES);
     CHECK(open_file("/home",O_RDWR|O_DIRECTORY)==-EACCES);
@@ -235,9 +241,13 @@ void run(long *stack)
         const char *root[]={"home","opt"};
         expect_listing("/",1024,root,2);
         read_text("/home/u/work/file","work");
+        /* exec carries no cwd tag; revalidation restores a known origin. */
+        read_text("file","work");
+        CHECK(open_file("../sibling-secret",O_RDONLY)==-EACCES);
         C(exit_group,0,0,0,0,0,0);for(;;){}
     }
     traversal();watches();visible();inherited(mode[0]=='s');
+    CHECK(C(chdir,"/home/u/work",0,0,0,0,0)==0);
     const char *args[]={"/home/u/work/probe","child",0};
     C(execve,args[0],args,0,0,0,0);CHECK(0);
 }

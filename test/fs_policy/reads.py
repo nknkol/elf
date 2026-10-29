@@ -60,7 +60,8 @@ with tempfile.TemporaryDirectory(prefix='read-guard-', dir=build) as tmp:
                     '-o', str(root / 'probe')], check=True)
     (root / 'host-work/probe').write_bytes((root / 'probe').read_bytes())
     (root / 'host-work/probe').chmod(0o755)
-    policy = ['--guard-file-access', 'dwrdrdd', '--allow-pipe-output', '--allow-stdio-output']
+    policy = ['--guard-file-access', 'dwrdrdd', '--allow-pipe-output', '--allow-stdio-output',
+              '--revalidate-file-fds']
     for mode, extra in (('main', []), ('stream', ['--allow-stream-input'])):
         p = launch(root, binds, [*policy, *extra], mode)
         assert p.returncode == 0, (mode, p.returncode, p.stdout, p.stderr)
