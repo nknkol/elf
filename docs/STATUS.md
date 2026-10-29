@@ -36,6 +36,13 @@ pwrite/向量写、truncate/fallocate、FD 元数据及数据转移的目标 FD�
 实验 ABI 升至 6，拒绝把新模式解释成只有路径保护的旧 payload。
 新增 FD 与既有路径/传递测试、完整 FD 回归及普通版 `make check` 通过。
 mmap/mprotect、任意 ioctl、异步 IO、读取可见性和可信执行交接仍未完成。
+2026-10-29 映射修改增量：文件修改模式要求文件共享 mmap 的来源可写，即使
+初始只读；private/COW 和匿名映射仍可用。新增最多 128 个地址区间的准入表，
+mprotect 加写/执行及 MADV_REMOVE 要求完整覆盖；munmap 成功后更新，失败保留。
+private fork 复制记录；mremap 成功暂清空记录，vfork 共享 VM 窗口拒绝相关操作。
+实验 ABI 升至 7，pkey_mprotect 在此模式返回 ENOSYS。区间模型、真实映射回归、
+完整 `make check-fd-runtime` 与普通版 `make check` 通过。
+初始映射不会自动获得准入、已有权限不撤销；标准 IO 授权和完整隔离仍待完成。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

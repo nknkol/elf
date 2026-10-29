@@ -50,8 +50,8 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         if kind == 1 and addr <= entry and entry+16 <= addr+size:
             offset = off+entry-addr
             break
-    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 6
-    for version in (5, 4, 3, 2):
+    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 7
+    for version in (6, 5, 4, 3, 2):
         old = bytearray(blob)
         struct.pack_into('<I', old, offset+12, version)
         payload = root / f'old-{version}.bin'
@@ -61,4 +61,4 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         p = subprocess.run([str(loader), '-c', str(config), '--mode', 'compat',
                             '--', str(root / 'probe')], capture_output=True, text=True, timeout=20)
         assert p.returncode != 0 and 'payload ABI mismatch' in p.stdout+p.stderr, (p.stdout, p.stderr)
-    print('PASS: experimental ABI 6 rejects older payload layouts')
+    print('PASS: experimental ABI 7 rejects older payload layouts')

@@ -14,6 +14,7 @@ SLOW_SYSCALL(__NR_signalfd4)
 SLOW_SYSCALL(__NR_timerfd_create)
 SLOW_SYSCALL(__NR_pidfd_getfd)
 SLOW_SYSCALL(__NR_unshare)
+SLOW_SYSCALL(__NR_pkey_mprotect)
 
 #define FD_UNSUPPORTED(n) SLOW_SYSCALL(n)
 #include "fd_unsupported_syscalls.inc"

@@ -16,6 +16,7 @@ build:
 	$(PYTHON) vendor/proot/svc/build_elf.py
 check: build
 	$(PYTHON) test/fs_policy/run.py
+	$(PYTHON) test/fs_policy/vm_model.py
 	$(PYTHON) test/fd_table/run.py
 	$(PYTHON) test/fd_table/check_clone.py
 	$(PYTHON) test/fd_table/check_notify.py
@@ -47,4 +48,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py
 	$(PYTHON) test/fs_policy/fd_mutations.py
+	$(PYTHON) test/fs_policy/mappings.py
 	$(PYTHON) test/fd_runtime/run.py

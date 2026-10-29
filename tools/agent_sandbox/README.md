@@ -119,7 +119,7 @@ origin tags. It is an explicitly unauthenticated observation protocol, not a
 secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
-The experimental payload ABI is now 6 (normal PRoot remains 3); older custom
+The experimental payload ABI is now 7 (normal PRoot remains 3); older custom
 payload layouts are rejected. Build and test with `make check-fd-runtime`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
@@ -182,9 +182,44 @@ not yet suitable for a general shell/agent launch. The regression uses exit
 status and host-side file checks, including readonly content/metadata integrity,
 writable output, dup/fork/slot reuse and rejection of exec-imported FDs.
 
-This is still not a readonly sandbox: mmap/mprotect, arbitrary ioctl, async IO,
+This is still not a readonly sandbox: arbitrary ioctl, async IO,
 unmigrated pathname handlers, read visibility, policy handoff authentication and
 path/alias races are outstanding. Existing mappings are not revoked. The
 observation and path-only modes retain their previous behavior. ABI 6 prevents
 an older custom payload from silently treating file protection as path-only.
 `test/fs_policy/fd_mutations.py` is included in `make check-fd-runtime`.
+
+## Mapping writeback guard
+
+The file-mutation mode now also gates guest mmap/mprotect and MADV_REMOVE.
+All non-private file mappings (MAP_SHARED and MAP_SHARED_VALIDATE) require a
+known writable mount, even when initially read-only. This is deliberately
+stricter than native Linux, and prevents a later mprotect from introducing an
+unchecked file writer. Private COW and anonymous mappings remain available.
+Shared executable file mmap is EOPNOTSUPP because the legacy executable-file
+fallback copies into anonymous memory and cannot preserve shared semantics.
+
+A fixed 128-interval admission table records successfully created guest
+mappings, coalescing adjacent ranges. It stores addresses only, independent of
+FD closure/reuse. Page rounding uses AT_PAGESZ from guest auxv. Adding write or
+execute permission via mprotect, or requesting MADV_REMOVE, requires complete
+coverage by admitted intervals. Executable upgrades need coverage because the
+hook engine patches instructions. Initial loader/stack mappings are not
+implicitly admitted; existing permissions are not revoked.
+
+Successful munmap removes/splits coverage; failed mapping operations leave it
+unchanged. Capacity is reserved before mmap or a splitting munmap, returning
+ENOSPC conservatively when necessary. Successful mremap currently discards all
+admissions instead of guessing new aliases/ranges, so later upgrades require
+fresh admitted mappings. Private fork copies the table; guarded VM operations
+in the shared-VM vfork window are EOPNOTSUPP until shared accounting exists.
+pkey_mprotect is routed and returns ENOSYS in this mode. Exec begins with an
+empty admission table and imported FDs still have unknown origins.
+
+ABI 7 rejects older payloads without these checks. `vm_model.py` tests merging,
+holes and atomic capacity failures against a reference bitmap; `mappings.py`
+uses real SVC calls to test COW versus shared writeback, upgrades after closing
+the FD, partial unmap/fixed replacement, failed operations, fork, conservative
+remap invalidation and exec. No per-byte interception or file content copy is
+added by the admission checks. Read visibility, stdio grants, ioctl/async IO,
+initial mappings and trusted policy handoff remain outside complete isolation.

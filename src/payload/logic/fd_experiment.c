@@ -4,6 +4,9 @@
 #include <fcntl.h>
 #include <asm/ioctls.h>
 #include <linux/sched.h>
+#include <sys/mman.h>
+#include <elf.h>
+#include "vm_write_guard.h"
 #include "reentry_guard.h"
 #include "fd_experiment.h"
 #include "fs_policy.h"
@@ -27,6 +30,7 @@ struct fd_runtime {
     int initialized, init_error;
     long owner_tid;
     struct proot_open_origin cwd;
+    struct vm_write_guard mappings;
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
@@ -249,6 +253,77 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
 }
+static int mapping_range(long address, long length, uintptr_t *end)
+{
+    size_t page=0;
+    for(size_t i=0;i+1<g_payload_config.guest_auxv_bytes/sizeof(uint64_t) &&
+                      i+1<CONFIG_AUXV_PAIRS*2;i+=2)
+        if(g_payload_config.guest_auxv[i]==AT_PAGESZ)page=g_payload_config.guest_auxv[i+1];
+    if(!page || (page&(page-1)))return -EOPNOTSUPP;
+    uintptr_t begin=(uintptr_t)address, len=(uintptr_t)length;
+    if(begin&(page-1))return -EINVAL;
+    if(!len || len>UINTPTR_MAX-(page-1))return -EINVAL;
+    len=(len+page-1)&~(page-1);
+    if(begin>UINTPTR_MAX-len)return -EINVAL;
+    *end=begin+len;return 0;
+}
+/* All admitted shared file mappings require mutation rights even when first
+ * mapped read-only; later mprotect cannot introduce an unchecked file writer.
+ * Private/COW and anonymous mappings cannot write back to a file. */
+static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, long a[6])
+{
+    /* vfork shares VM but uses a private FD arena. Do not publish divergent
+     * mapping records until shared-VM lifecycle accounting exists. */
+    if(vfork_active)return -EOPNOTSUPP;
+    if(n==__NR_pkey_mprotect)return -ENOSYS;
+    if(n==__NR_mremap) {
+        long result=syscall_handle_common(n,a);
+        /* Remap/alias flags need no incorrect address inference: discard all
+         * admissions after success; subsequent upgrades must fail closed. */
+        if((unsigned long)result<(unsigned long)-4095)s->mappings.count=0;
+        return result;
+    }
+    if(n==__NR_mprotect && !a[1])return syscall_handle_common(n,a);
+    uintptr_t end;
+    int rc=mapping_range(n==__NR_mmap?0:a[0],a[1],&end);
+    if(rc)return rc;
+    if(n==__NR_mmap) {
+        unsigned long type=(unsigned long)a[3]&MAP_TYPE;
+        if(type!=MAP_PRIVATE && type!=MAP_SHARED && type!=MAP_SHARED_VALIDATE)return -EINVAL;
+        if(!(a[3]&MAP_ANONYMOUS) && type!=MAP_PRIVATE) {
+            const struct fd_record *r=fd_table_get(t,(int)a[4]);
+            rc=mount_decision(r?r->origin.mount_id:0,
+                             r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
+            if(rc)return rc;
+            /* The legacy executable-file fallback produces an anonymous copy,
+             * which must not silently replace shared-file semantics here. */
+            if(a[2]&PROT_EXEC)return -EOPNOTSUPP;
+        }
+        /* One possible new disjoint interval. Reserve before changing VM. */
+        if(s->mappings.count==VM_WRITE_REGIONS)return -ENOSPC;
+        long result=syscall_handle_common(n,a);
+        if((unsigned long)result<(unsigned long)-4095) {
+            uintptr_t finish;
+            rc=mapping_range(result,a[1],&finish);
+            if(rc || vm_write_add(&s->mappings,(uintptr_t)result,finish))
+                s->mappings.count=0; /* Cannot grant using incomplete metadata. */
+        }
+        return result;
+    }
+    if(n==__NR_munmap) {
+        struct vm_write_guard next=s->mappings;
+        rc=vm_write_remove(&next,(uintptr_t)a[0],end);
+        if(rc)return rc; /* A split may require one additional interval. */
+        long result=syscall_handle_common(n,a);
+        if(result==0)s->mappings=next;
+        return result;
+    }
+    /* Executable upgrades also patch instructions, so they need admitted VM. */
+    if((n==__NR_mprotect && (a[2]&(PROT_WRITE|PROT_EXEC))) ||
+       (n==__NR_madvise && a[2]==MADV_REMOVE))
+        if(!vm_write_covers(&s->mappings,(uintptr_t)a[0],end))return -EACCES;
+    return syscall_handle_common(n,a);
+}
 long fd_experiment_dispatch(long n,long a[6])
 {
     struct fd_runtime *s=current();
@@ -268,6 +343,10 @@ long fd_experiment_dispatch(long n,long a[6])
         if(a[1]==5)return r->origin.access;
         return -EINVAL;
     }
+    if(g_payload_config.guard_path_mutations==2 &&
+       (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
+        n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE)))
+        return guarded_mapping(s,t,n,a);
     rc=check_fd_mutation(t,s,n,a);if(rc<0)return rc;
     if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
         struct proot_open_origin anchor=s->cwd,next={0,false};
