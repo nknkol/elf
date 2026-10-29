@@ -201,6 +201,11 @@ static int start(struct fd_runtime *s)
             if(record->fd==transport || flags<0 || (flags&FD_CLOEXEC)) { rc=-ESTALE;break; }
             /* Serialized metadata is not permission authority. */
             record->origin=(struct fd_origin){0,FD_ACCESS_UNKNOWN};
+            if(g_payload_config.revalidate_file_fds) {
+                struct proot_open_origin observed={0,false};
+                if(!proot_revalidate_regular_fd(record->fd,&observed) && observed.known)
+                    record->origin=(struct fd_origin){observed.mount_id,FD_ACCESS_RW};
+            }
         }
         raw_syscall(__NR_close,transport,0,0,0,0,0);
         g_payload_config.fd_state=-1;

@@ -20,6 +20,9 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
  * and established cwd select the reverse mapping; unknown/imported anchors
  * stay unknown. Exec does not authenticate or restore cwd provenance. */
 struct proot_open_origin { size_t mount_id; bool known; };
+/* Re-derive a regular FD's unique current mount view from kernel identity.
+ * No snapshot origin is accepted; ambiguous/unlinked/unmatched objects fail. */
+int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin);
 long proot_openat(long args[6], const struct proot_open_origin *anchor,
                   struct proot_open_origin *origin);
 long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,

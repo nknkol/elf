@@ -1429,6 +1429,11 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
                 z_strncmp(arg, "--guard-path-mutations", 23) == 0;
             continue;
         }
+        if (z_strncmp(arg, "--revalidate-file-fds", sizeof("--revalidate-file-fds")) == 0) {
+            if (cfg->revalidate_file_fds) z_errx(1, "duplicate file FD revalidation option");
+            cfg->revalidate_file_fds = 1;
+            continue;
+        }
         if (z_strncmp(arg, "--allow-pipe-output", 20) == 0) {
             if (cfg->allow_pipe_output) z_errx(1, "duplicate pipe output option");
             cfg->allow_pipe_output = 1;
@@ -2007,6 +2012,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
     if (bootstrap_cfg.mount_access_observe[0] &&
         z_strlen(bootstrap_cfg.mount_access_observe) != (size_t)bootstrap_cfg.bind_count + 1)
         z_errx(1, "mount access observation requires root plus every bind");
+    if (bootstrap_cfg.revalidate_file_fds && bootstrap_cfg.guard_path_mutations != 2)
+        z_errx(1, "file FD revalidation requires file mutation guard");
     if (bootstrap_cfg.allow_pipe_output && bootstrap_cfg.guard_path_mutations != 2)
         z_errx(1, "pipe output requires file mutation guard");
     if (bootstrap_cfg.allow_stdio_output && bootstrap_cfg.guard_path_mutations != 2)

@@ -89,6 +89,7 @@ typedef struct payload_config {
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
     char mount_access_observe[CONFIG_MAX_BINDS + 2];
+    int32_t revalidate_file_fds; /* Re-derive regular-file origins, never trust snapshot tags. */
     int32_t allow_pipe_output; /* Newly created pipe2 write ends only. */
     int32_t allow_stdio_output; /* Revalidate pipe/TTY stdout+stderr, write/writev only. */
     int32_t guard_path_mutations; /* 0=observe, 1=path guard, 2=path+FD guard; not isolation. */

@@ -19,6 +19,7 @@
 
 #define S_IFMT 0170000
 #define S_IFDIR 0040000
+#define S_IFREG 0100000
 #define S_IFLNK 0120000
 extern long raw_syscall(long, long, long, long, long, long, long);
 _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 16,
@@ -495,6 +496,50 @@ static long bridge_create(Bridge **out)
     }
     *out = b;
     return 0;
+}
+
+int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
+{
+    if(!origin)return -EINVAL;
+    *origin=(struct proot_open_origin){0,false};
+    struct stat live, named, again;
+    long ret=raw_syscall(__NR_fstat,fd,(long)&live,0,0,0,0);
+    if(ret<0)return ret;
+    if((live.st_mode&S_IFMT)!=S_IFREG || !live.st_nlink)return -EOPNOTSUPP;
+    Bridge *b;
+    ret=bridge_create(&b);if(ret<0)return ret;
+    char link[64]="/proc/self/fd/",digits[16];
+    unsigned value=(unsigned)fd;size_t count=0,pos=strlen(link);
+    do { digits[count++]='0'+value%10;value/=10; } while(value);
+    while(count)link[pos++]=digits[--count];link[pos]=0;
+    ret=host_readlink(b,link,b->first_host,sizeof(b->first_host));
+    if(ret<0)goto done;
+    if(ret>=PATH_MAX) { ret=-ENAMETOOLONG;goto done; }
+    b->first_host[ret]=0;
+    if(!ret || b->first_host[0]!='/' ||
+       (ret>=10 && !strcmp(b->first_host+ret-10," (deleted)"))) {
+        ret=-EXDEV;goto done;
+    }
+    ret=raw_syscall(__NR_newfstatat,AT_FDCWD,(long)b->first_host,(long)&named,
+                    AT_SYMLINK_NOFOLLOW,0,0);
+    if(ret<0)goto done;
+    if((named.st_mode&S_IFMT)!=S_IFREG || named.st_dev!=live.st_dev || named.st_ino!=live.st_ino) {
+        ret=-ESTALE;goto done;
+    }
+    size_t selected=0,matches=0;
+    for(size_t id=0;id<=b->table.count;id++) {
+        b->anchor=(struct proot_open_origin){id,true};
+        if(!observed_guest_path(b,b->first_host,b->guest)) { selected=id;matches++; }
+    }
+    if(matches!=1) { ret=-EXDEV;goto done; }
+    ret=raw_syscall(__NR_fstat,fd,(long)&again,0,0,0,0);
+    if(ret<0)goto done;
+    if(again.st_dev!=live.st_dev || again.st_ino!=live.st_ino || !again.st_nlink) {
+        ret=-ESTALE;goto done;
+    }
+    *origin=(struct proot_open_origin){selected,true};ret=0;
+ done:
+    proot_scratch_free(b,sizeof(Bridge));return ret;
 }
 
 static long bridge_syscall(long number, long args[6], const struct proot_open_origin *anchor,

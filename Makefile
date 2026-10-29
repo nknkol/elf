@@ -51,4 +51,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/mappings.py
 	$(PYTHON) test/fs_policy/stdio.py
 	$(PYTHON) test/fs_policy/pipes.py
+	$(PYTHON) test/fs_policy/revalidate.py
 	$(PYTHON) test/fd_runtime/run.py

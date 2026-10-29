@@ -119,7 +119,7 @@ origin tags. It is an explicitly unauthenticated observation protocol, not a
 secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
-The experimental payload ABI is now 9 (normal PRoot remains 3); older custom
+The experimental payload ABI is now 10 (normal PRoot remains 3); older custom
 payload layouts are rejected. Build and test with `make check-fd-runtime`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
@@ -278,6 +278,32 @@ dup/fork, CLOEXEC, slot replacement and snapshot dropping; `pipes.py` exercises
 real pipe IO and transfers, metadata denial, socket/regular-file rejection and
 exec downgrade. Available Alpine/Ubuntu fixtures run protected three-stage
 pipelines, command substitution and subshell output. These tests use captured
-pipe stdout. Regular-file output redirection across exec still loses trusted
-origin and is not solved by pipe/stdout grants; full agent isolation remains
-blocked on that handoff and the other documented permission gaps.
+pipe stdout. Regular-file output redirection uses the separate option below.
+
+## Revalidating regular files after exec
+
+`--revalidate-file-fds` requires `--guard-file-mutations`. It re-derives the
+current mount view of regular files listed in an imported FD snapshot. It never
+accepts the snapshot's claimed mount or access permission, and does not adopt
+arbitrary FDs inherited at initial launch. Without this option, exec continues
+to downgrade file origins to unknown. Experimental ABI 10 carries this option.
+
+At restore time, fstat and /proc/self/fd identify the live file; a no-follow
+stat of the reported path must match its device and inode. Reverse and forward
+mapping must identify exactly one effective mount view, followed by a second
+FD identity check. Deleted/replaced files, paths outside the mount table,
+nonregular objects and ambiguous aliases remain unknown. Multiple views are
+rejected even if all are writable; a host root of `/` overlapping bind sources
+can therefore prevent revalidation. The current mount policy still determines
+whether writes return success, EROFS or EACCES.
+
+This is fresh authorization under the current configuration, not proof of the
+original view or authenticated exec transport. The pathname checks are not
+race-free. Checks run only at restore; ordinary writes retain table lookups and
+native kernel IO. Default-deny read visibility and other permission gaps remain,
+so this does not establish complete hostile-agent isolation.
+
+`revalidate.py` covers two consecutive execs, forged sealed snapshots claiming
+writable origins for read-only/denied files, disabled-option behavior, outside
+files, ambiguous aliases and unlinked/replaced files. Available Alpine/Ubuntu
+fixtures verify shell pipeline redirection and append through exec.
