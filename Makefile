@@ -26,6 +26,7 @@ check: build
 	$(PYTHON) vendor/proot/port-tests/test_svc.py
 	$(PYTHON) vendor/proot/port-tests/test_modify.py
 	$(PYTHON) test/fs_policy/xattrs.py --normal
+	$(PYTHON) test/fs_policy/access.py --normal
 	$(PYTHON) vendor/proot/port-tests/test_inotify.py
 	$(PYTHON) vendor/proot/port-tests/test_exec.py
 	$(PYTHON) vendor/proot/port-tests/test_auxv.py
@@ -48,6 +49,7 @@ check-fd-runtime:
 	$(PYTHON) vendor/proot/svc/build_elf.py --fd-experiment
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py
+	$(PYTHON) test/fs_policy/access.py
 	$(PYTHON) test/fs_policy/fd_mutations.py
 	$(PYTHON) test/fs_policy/mappings.py
 	$(PYTHON) test/fs_policy/madvise_abi.py

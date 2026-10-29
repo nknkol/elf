@@ -453,3 +453,32 @@ change adds no address, protocol, endpoint or Internet-access filtering. Local
 AF_UNIX FD-transfer/lifecycle tests validate file capability transport, not a
 network sandbox. A system security notification must be diagnosed separately;
 a passing local regression does not identify its source.
+
+
+## Write-access preflight follows mutation policy
+
+Development purpose: this is a userspace filesystem sandbox running inside the
+existing system sandbox, not a system-sandbox escape or privilege-escalation
+tool. The regression uses private temporary files and preserves host denials.
+
+Path queries through faccessat/faccessat2 with W_OK now consult the same selected
+mount mutation policy as actual writes. Readonly paths return EROFS, denied or
+unknown relative origins return EACCES. Resolution follows the final symlink
+unless AT_SYMLINK_NOFOLLOW is requested. Known cwd/dirfd and nested mounts retain
+their selected view. Mode and faccessat2 flags use their native 32-bit ABI;
+invalid mode/flag bits are rejected before policy evaluation.
+
+In file-mutation mode, faccessat2(W_OK, AT_EMPTY_PATH) additionally checks the
+tracked FD origin, or cwd origin for AT_FDCWD. Path-only mode does not authorize
+empty-path FD operations. If policy allows the query, the host still decides
+its result; a writable view does not promise that the host supports the query
+or permits writing. F_OK/R_OK/X_OK without W_OK retain existing behavior, so
+this is not default-deny visibility or a race-free guarantee of a later write.
+
+`test/fs_policy/access.py` checks all four experimental modes; `--normal` checks
+the default build. Cases cover high parameter bits, invalid modes/flags, nested
+binds, following/nonfollowing symlinks, cwd/dirfd paths, inherited FDs and empty
+paths. Host contents/mode/size/mtime/ctime must remain unchanged. Native controls
+on the actual fixture backing currently return EACCES for W_OK on its symlink
+and EINVAL for AT_EMPTY_PATH queries. These restrictions are retained, not
+emulated away or counted as successful empty-path compatibility.

@@ -280,6 +280,13 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
         fd=(int)a[1];break;
     case __NR_copy_file_range: case __NR_splice:
         fd=(int)a[2];break;
+    case __NR_faccessat2:
+        if(!((unsigned int)a[2]&2))return 0; /* W_OK only, not read visibility. */
+        if(((unsigned int)a[2]&~7u) ||
+           ((unsigned int)a[3]&~(AT_EACCESS|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH)))
+            return -EINVAL;
+        if(!a[1] || ((const char *)a[1])[0] || !(a[3]&AT_EMPTY_PATH))return 0;
+        fd=(int)a[0];break;
     case __NR_utimensat:
         if(a[1])return 0; /* Non-null paths use the PRoot guard. */
         fd=(int)a[0];break;
@@ -288,7 +295,7 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
         fd=(int)a[0];break;
     default:return 0;
     }
-    if(fd==AT_FDCWD && (n==__NR_utimensat || n==__NR_fchownat))
+    if(fd==AT_FDCWD && (n==__NR_utimensat || n==__NR_fchownat || n==__NR_faccessat2))
         return mount_decision(s->cwd.mount_id,s->cwd.known,FS_MUTATE);
     const struct fd_record *r=fd_table_get(t,fd);
     if((n==__NR_write || n==__NR_writev) && r && r->description &&

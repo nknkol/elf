@@ -321,6 +321,8 @@ static long mutate(Bridge *b, long number, long a[6])
 static bool path_mutation(long number, long a[6])
 {
     switch (number) {
+    case SYS_faccessat: case SYS_faccessat2:
+        return !!((unsigned int)a[2] & 2); /* W_OK queries mutation permission. */
     case SYS_openat:
         /* O_PATH ignores ordinary access/create/truncate flags. */
         if (a[2] & O_PATH) return false;
@@ -338,6 +340,16 @@ static bool path_mutation(long number, long a[6])
 
 static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
+    if(number==SYS_faccessat || number==SYS_faccessat2) {
+        /* Match the kernel's int ABI before classifying W_OK. */
+        a[2]=(int)a[2];
+        if((unsigned int)a[2]&~7u)return -EINVAL;
+        if(number==SYS_faccessat2) {
+            a[3]=(int)a[3];
+            if((unsigned int)a[3]&~(AT_EACCESS|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH))
+                return -EINVAL;
+        }
+    }
     b->mutation = path_mutation(number, a);
     long ret;
     switch (number) {
