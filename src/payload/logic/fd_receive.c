@@ -6,7 +6,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <time.h>
-#include "fd_table.h"
+#include "fd_receive.h"
 #define RECEIVE_MAX 128
 #define RECEIVE_BATCH_MAX 8
 struct receive_buffer {
@@ -38,12 +38,23 @@ static int prepare(struct receive_buffer *buffer,struct msghdr *message,void *gu
     message->msg_controllen=length;
     return 0;
 }
-static int reserve(struct fd_table *table,size_t bound)
+static int reserve(struct fd_table *table,size_t bound,const struct fd_receive_sync *sync)
 {
+    sync->lock(sync->context);
     size_t available=0;
     for(size_t i=0;i<table->capacity;i++)available+=table->slots[i].fd<0;
-    if(bound>RECEIVE_MAX || bound>available)return -ENOSPC;
-    return bound>UINT64_MAX-table->serial?-EOVERFLOW:0;
+    available=available>*sync->reserved?available-*sync->reserved:0;
+    int rc=bound>RECEIVE_MAX || bound>available?-ENOSPC:
+        bound>UINT64_MAX-table->serial?-EOVERFLOW:0;
+    if(!rc)*sync->reserved+=bound;
+    sync->unlock(sync->context);
+    return rc;
+}
+static void release(size_t bound,const struct fd_receive_sync *sync)
+{
+    sync->lock(sync->context);
+    *sync->reserved-=bound;
+    sync->unlock(sync->context);
 }
 static size_t collect(struct receive_buffer *buffer,struct msghdr *message,int *received)
 {
@@ -74,29 +85,32 @@ static void discard(int *received,size_t count)
 {
     for(size_t i=0;i<count;i++)raw_syscall(__NR_close,received[i],0,0,0,0,0);
 }
-static int import(struct fd_table *table,int *received,size_t count,long flags)
+static int import(struct fd_table *table,int *received,size_t count,long flags,
+                  const struct fd_receive_sync *sync)
 {
-    for(size_t i=0;i<count;i++) {
-        int rc=fd_table_import_unknown(table,received[i],!!(flags&MSG_CMSG_CLOEXEC));
-        if(rc)return rc; /* Preflight + single-task exclusion guarantee room. */
-    }
-    return 0;
+    int rc=0;
+    sync->lock(sync->context);
+    for(size_t i=0;!rc && i<count;i++)
+        rc=fd_table_import_unknown(table,received[i],!!(flags&MSG_CMSG_CLOEXEC));
+    sync->unlock(sync->context);
+    return rc; /* The reservation guarantees room. */
 }
-long fd_receive_message(struct fd_table *table,long a[6])
+long fd_receive_message(struct fd_table *table,long a[6],const struct fd_receive_sync *sync)
 {
     struct receive_buffer buffer;struct msghdr message;size_t bound=0;
     int rc=prepare(&buffer,&message,(void *)a[1],&bound);
-    if(!rc)rc=reserve(table,bound);
+    if(!rc)rc=reserve(table,bound,sync);
     if(rc)return rc;
     long result=raw_syscall(__NR_recvmsg,a[0],(long)&message,a[2],0,0,0);
-    if(result<0)return result;
+    if(result<0) { release(bound,sync);return result; }
     int received[RECEIVE_MAX];size_t count=collect(&buffer,&message,received);
     rc=output(&buffer,&message,(void *)a[1]);
-    if(rc) { discard(received,count);return rc; }
-    rc=import(table,received,count,a[2]);
+    if(rc) { discard(received,count);release(bound,sync);return rc; }
+    rc=import(table,received,count,a[2],sync);
+    release(bound,sync);
     return rc?rc:result;
 }
-long fd_receive_messages(struct fd_table *table,long a[6])
+long fd_receive_messages(struct fd_table *table,long a[6],const struct fd_receive_sync *sync)
 {
     unsigned length=(unsigned)a[2];
     if(!length)return raw_syscall(__NR_recvmmsg,a[0],a[1],0,a[3],a[4],0);
@@ -110,19 +124,22 @@ long fd_receive_messages(struct fd_table *table,long a[6])
         if(rc)return rc;
         messages[i].msg_len=0;
     }
-    rc=reserve(table,bound);if(rc)return rc;
+    rc=reserve(table,bound,sync);if(rc)return rc;
     struct timespec timeout;
-    if(a[4]) { rc=transfer(&timeout,(void *)a[4],sizeof(timeout),0);if(rc)return rc; }
+    if(a[4]) {
+        rc=transfer(&timeout,(void *)a[4],sizeof(timeout),0);
+        if(rc) { release(bound,sync);return rc; }
+    }
     /* Keep timeout and headers local so post-receive output faults cannot hide
      * the kernel's completed message count and the installed descriptors. */
     long result=raw_syscall(__NR_recvmmsg,a[0],(long)messages,length,a[3],a[4]?(long)&timeout:0,0);
-    if(result<0)return result;
+    if(result<0) { release(bound,sync);return result; }
     int received[RECEIVE_MAX];size_t offsets[RECEIVE_BATCH_MAX+1]={0};
     for(long i=0;i<result;i++)
         offsets[i+1]=offsets[i]+collect(&buffers[i],&messages[i].msg_hdr,received+offsets[i]);
     if(a[4]) {
         rc=transfer(&timeout,(void *)a[4],sizeof(timeout),1);
-        if(rc) { discard(received,offsets[result]);return rc; }
+        if(rc) { discard(received,offsets[result]);release(bound,sync);return rc; }
     }
     for(long i=0;i<result;i++) {
         char *guest=(char *)a[1]+i*sizeof(struct mmsghdr);
@@ -132,10 +149,12 @@ long fd_receive_messages(struct fd_table *table,long a[6])
             /* Preserve the published prefix. Later kernel-received messages
              * may already be consumed: close every unpublished descriptor. */
             discard(received+offsets[i],offsets[result]-offsets[i]);
+            release(bound,sync);
             return i?i:rc;
         }
-        rc=import(table,received+offsets[i],offsets[i+1]-offsets[i],a[3]);
-        if(rc)return rc;
+        rc=import(table,received+offsets[i],offsets[i+1]-offsets[i],a[3],sync);
+        if(rc) { release(bound,sync);return rc; }
     }
+    release(bound,sync);
     return result;
 }

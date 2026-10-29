@@ -35,15 +35,75 @@ struct fd_runtime {
     struct proot_open_origin cwd;
     struct vm_write_guard mappings;
     uint64_t stdio_output[2]; /* Local description IDs, never serialized as grants. */
+    /* Threads of one process share this runtime (CLONE_VM|CLONE_FILES|CLONE_FS). */
+    int lock;
+    long tgid;
+    size_t reserved; /* Record slots promised to creations still in the kernel. */
+    uint64_t close_epoch;
+    struct closed_fd { int fd; uint64_t epoch; } closed[64];
+    /* Recorded objects whose kernel close is in flight. */
+    struct closing_fd { int fd; uint64_t generation; } closing[64];
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
 static struct scratch_slot { void *address;size_t size;int used; } scratch[2];
 #define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
-extern long fd_receive_messages(struct fd_table *,long [6]);
-extern long fd_receive_message(struct fd_table *,long [6]);
+#include "fd_receive.h"
 extern long raw_syscall(long,long,long,long,long,long,long);
 static int start(struct fd_runtime *s);
+#define FUTEX_WAIT_PRIVATE 128
+#define FUTEX_WAKE_PRIVATE 129
+/* Metadata mutex for the threads sharing a runtime. Held only around table,
+ * cwd, mapping and reservation updates plus non-blocking kernel queries, never
+ * across a guest operation that may block. Same-thread nested slow calls are
+ * rejected at entry, so a signal handler cannot wait on its own thread. A
+ * handler that never returns (siglongjmp out of a hook) is not supported. */
+static void lock(struct fd_runtime *s)
+{
+    int c=0;
+    if(__atomic_compare_exchange_n(&s->lock,&c,1,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED))return;
+    if(c!=2)c=__atomic_exchange_n(&s->lock,2,__ATOMIC_ACQUIRE);
+    while(c) {
+        raw_syscall(__NR_futex,(long)&s->lock,FUTEX_WAIT_PRIVATE,2,0,0,0);
+        c=__atomic_exchange_n(&s->lock,2,__ATOMIC_ACQUIRE);
+    }
+}
+static void unlock(struct fd_runtime *s)
+{
+    if(__atomic_fetch_sub(&s->lock,1,__ATOMIC_RELEASE)!=1) {
+        __atomic_store_n(&s->lock,0,__ATOMIC_RELEASE);
+        raw_syscall(__NR_futex,(long)&s->lock,FUTEX_WAKE_PRIVATE,1,0,0,0);
+    }
+}
+static void lock_callback(void *s) { lock(s); }
+static void unlock_callback(void *s) { unlock(s); }
+#define CLOSE_RING (sizeof(primary.closed)/sizeof(primary.closed[0]))
+/* Under lock, before the kernel can release a number (close, dup3 target).
+ * While a recorded object nobody else is closing occupies the number, no
+ * in-flight creation can receive it, so releasing that object is harmless.
+ * A number without a record (possibly another thread's fresh, unrecorded
+ * object) or one already being closed is announced. */
+static int closing_index(const struct fd_runtime *s,int fd,uint64_t generation)
+{
+    for(size_t i=0;i<sizeof(s->closing)/sizeof(s->closing[0]);i++)
+        if(s->closing[i].generation==generation && s->closing[i].fd==fd)return (int)i;
+    return -1;
+}
+static void announce_close(struct fd_runtime *s,int fd,uint64_t generation)
+{
+    if(generation && closing_index(s,fd,generation)<0)return;
+    uint64_t epoch=++s->close_epoch;
+    s->closed[epoch%CLOSE_RING]=(struct closed_fd){fd,epoch};
+}
+/* A number announced closed after a creation began may now name another
+ * thread's object. That creation records neither provenance nor grants. */
+static int reused_since(const struct fd_runtime *s,int fd,uint64_t since)
+{
+    if(s->close_epoch-since>=CLOSE_RING)return s->close_epoch!=since;
+    for(uint64_t e=since+1;e<=s->close_epoch;e++)
+        if(s->closed[e%CLOSE_RING].fd==fd)return 1;
+    return 0;
+}
 static struct fd_runtime *current(void)
 {
     if(!vfork_active)return &primary;
@@ -68,32 +128,48 @@ static int scratch_prepare(void)
     }
     return 0;
 }
+/* pthread_create on musl and glibc: one thread group sharing VM, FS and FILES. */
+#define THREAD_REQUIRED (CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD)
+/* musl also passes CLONE_DETACHED, which the kernel ignores. */
+#define THREAD_ALLOWED (THREAD_REQUIRED|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID| \
+                        CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|CLONE_DETACHED)
+static int thread_clone(unsigned long flags)
+{
+    return (flags&THREAD_REQUIRED)==THREAD_REQUIRED && !(flags&~(unsigned long)THREAD_ALLOWED);
+}
 int clone_observer_before(struct clone_event *event)
 {
     unsigned long allowed=CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID;
     int vf=event->flags==(CLONE_VM|CLONE_VFORK|17ul);
-    if(!vf && ((event->flags & 255)!=17 || (event->flags & ~(allowed|255ul))))return -ENOSYS;
-    /* One suspended parent and one child only. No nested clone or threads. */
-    if(vfork_active)return -ENOSYS;
+    int thread=thread_clone(event->flags);
+    if(!vf && !thread && ((event->flags & 255)!=17 || (event->flags & ~(allowed|255ul))))return -ENOSYS;
+    /* One suspended parent and one child only: the vfork child itself cannot
+     * clone. Other threads of the parent keep running and may still clone. */
+    if(vfork_active && (vf || current()==&vfork_child))return -ENOSYS;
     struct reentry_slot *slot=reentry_try_enter();
     if(!slot)return -EDEADLK;
     if((uintptr_t)slot>=(uintptr_t)-4095)return (long)slot;
     struct fd_runtime *s=&primary;
     int rc=start(s);
-    if(!rc)rc=fd_close_drain(&s->queue,&s->registry);
-    if(rc>=0 && fd_close_pending(&s->queue,fd_registry_table(&s->registry,s->owner),-1))rc=-EBUSY;
     if(rc<0) { reentry_leave(slot);return rc; }
+    /* Threads share the runtime: nothing to copy. A fork copies the whole VM,
+     * so hold the metadata lock across it for a consistent child snapshot;
+     * the parent releases it in finish and the child resets its copy. */
+    if(!thread)lock(s);
     if(vf) {
         rc=scratch_prepare();
-        if(rc) { reentry_leave(slot);return rc; }
+        if(rc) { unlock(s);reentry_leave(slot);return rc; }
         vfork_child=*s;
-        /* Fix all pointers into the copied arena; no pending close pins exist. */
+        /* Fix all pointers into the copied arena. */
         vfork_child.registry.tasks=vfork_child.tasks;
         vfork_child.registry.tables=vfork_child.tables;
         vfork_child.tables[0].table.slots=vfork_child.records;
         fd_close_queue_init(&vfork_child.queue,vfork_child.pending,8);
         vfork_child.owner_tid=0;
+        vfork_child.lock=0;
+        vfork_child.reserved=0;
         vfork_active=1;
+        unlock(s);
     }
     /* Only the returning parent dereferences this lease. A private-fork
      * descendant may hold a private slot; child finish/cleanup never touch it. */
@@ -103,6 +179,12 @@ int clone_observer_before(struct clone_event *event)
 void clone_observer_finish(const struct clone_event *event,long result)
 {
     int vf=event->flags==(CLONE_VM|CLONE_VFORK|17ul);
+    if(thread_clone(event->flags)) {
+        /* The new thread starts in guest code with its own TID and slots; the
+         * lease belongs to the calling thread only. */
+        if(result)reentry_leave(event->cookie);
+        return;
+    }
     if(result) {
         if(vf) {
             /* Kernel vfork return proves the child left this VM (exec/exit),
@@ -110,13 +192,20 @@ void clone_observer_finish(const struct clone_event *event,long result)
             scratch_discard();
             reentry_vfork_end();
             vfork_active=0;
-        }
+        } else unlock(&primary);
         reentry_leave(event->cookie);return;
     }
     struct fd_runtime *s=vf?&vfork_child:&primary;
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
     if(vf)reentry_vfork_begin(tid);
-    else reentry_private_fork(tid);
+    else {
+        /* The child is single-threaded: only the copied state of the forking
+         * thread survives. Other threads' in-flight reservations vanish. */
+        reentry_private_fork(tid);
+        s->lock=0;
+        s->reserved=0;
+        s->tgid=raw_syscall(__NR_getpid,0,0,0,0,0,0);
+    }
     s->tasks[s->owner.slot].clone.child_tid=0;
     int rc=fd_registry_publish(&s->registry,s->owner,tid);
     if(rc) {
@@ -182,7 +271,11 @@ static int start(struct fd_runtime *s)
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
     if(tid<=0)return tid<0?(int)tid:-EIO;
     int state=__atomic_load_n(&s->initialized,__ATOMIC_ACQUIRE);
-    if(state==2)return tid==s->owner_tid?0:-EOPNOTSUPP;
+    if(state==2) {
+        if(tid==s->owner_tid)return 0;
+        /* Any thread of the owning process shares this runtime. */
+        return raw_syscall(__NR_getpid,0,0,0,0,0,0)==s->tgid ? 0 : -EOPNOTSUPP;
+    }
     if(state==3)return s->init_error;
     int empty=0;
     if(!__atomic_compare_exchange_n(&s->initialized,&empty,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return -EAGAIN;
@@ -229,6 +322,7 @@ static int start(struct fd_runtime *s)
         return admission;
     }
     s->owner_tid=tid;
+    s->tgid=raw_syscall(__NR_getpid,0,0,0,0,0,0);
     __atomic_store_n(&s->initialized,2,__ATOMIC_RELEASE);
     return 0;
 }
@@ -236,15 +330,23 @@ long fd_experiment_export(void)
 {
     struct fd_runtime *s=current();
     unsigned char snapshot[STATE_BYTES];
-    return fd_handoff_create(fd_registry_table(&s->registry,s->owner),snapshot,sizeof(snapshot));
+    /* FDs other threads create after this snapshot restore as unknown. */
+    lock(s);
+    long rc=fd_handoff_create(fd_registry_table(&s->registry,s->owner),snapshot,sizeof(snapshot));
+    unlock(s);
+    return rc;
 }
-static int room(struct fd_table *t,int target,int assign)
+/* Under lock: reserve record slots for a creation still in the kernel, so a
+ * concurrent creation cannot take them. Returns the reserved count. */
+static int room(struct fd_runtime *s,struct fd_table *t,int target,int assign,size_t need)
 {
-    int existing=target>=0 && fd_table_get(t,target);
-    if(t->serial==UINT64_MAX && (assign || !existing))return -EOVERFLOW;
-    if(existing)return 0;
-    for(size_t i=0;i<t->capacity;i++)if(t->slots[i].fd<0)return 0;
-    return -ENOSPC;
+    if(target>=0 && fd_table_get(t,target))need=0;
+    if(t->serial>UINT64_MAX-CAPACITY && (assign || need))return -EOVERFLOW;
+    size_t free_slots=0;
+    for(size_t i=0;i<t->capacity;i++)free_slots+=t->slots[i].fd<0;
+    if(free_slots<s->reserved+need)return -ENOSPC;
+    s->reserved+=need;
+    return (int)need;
 }
 int fd_experiment_mount_access(enum fs_access access[CONFIG_MAX_BINDS+1], size_t *count)
 {
@@ -461,8 +563,9 @@ static int mapping_range(long address, long length, uintptr_t *end)
 static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, long a[6])
 {
     /* vfork shares VM but uses a private FD arena. Do not publish divergent
-     * mapping records until shared-VM lifecycle accounting exists. */
-    if(vfork_active)return -EOPNOTSUPP;
+     * mapping records until shared-VM lifecycle accounting exists. Threads
+     * share primary's records under the metadata lock. */
+    if(s==&vfork_child)return -EOPNOTSUPP;
     if(n==__NR_pkey_mprotect)return -ENOSYS;
     if(n==__NR_mremap) {
         long result=syscall_handle_common(n,a);
@@ -513,6 +616,97 @@ static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, lo
         if(!vm_write_covers(&s->mappings,(uintptr_t)a[0],end))return -EACCES;
     return syscall_handle_common(n,a);
 }
+/* The kernel result is returned unchanged. The number is announced before the
+ * kernel can release it; only the generation observed then is withdrawn. */
+static long close_descriptor(struct fd_runtime *s,struct fd_table *t,int fd)
+{
+    if(fd<0)return -EBADF;
+    lock(s);
+    const struct fd_record *r=fd_table_get(t,fd);
+    uint64_t generation=r?r->generation:0;
+    announce_close(s,fd,generation);
+    int slot=generation?closing_index(s,0,0):-1;
+    if(slot>=0)s->closing[slot]=(struct closing_fd){fd,generation};
+    /* No free tracking slot: concurrent closes of this number stay announced. */
+    else if(generation)announce_close(s,fd,0);
+    unlock(s);
+    long result=raw_syscall(__NR_close,fd,0,0,0,0,0);
+    if(!generation)return result;
+    lock(s);
+    if(slot>=0)s->closing[slot]=(struct closing_fd){0,0};
+    if(result==0 || result==-EBADF)fd_table_close_generation(t,fd,generation);
+    else {
+        /* Uncertain kernel effect: never keep authority or grants on a number
+         * that may already be released and reused. */
+        struct fd_record *live=(struct fd_record *)fd_table_get(t,fd);
+        if(live && live->generation==generation) {
+            live->origin=(struct fd_origin){0,FD_ACCESS_UNKNOWN};
+            live->description=0;
+            live->pipe_writer=live->stream_reader=live->local_writer=0;
+        }
+    }
+    unlock(s);
+    return result;
+}
+/* Under lock after kernel success. A number another thread announced closed
+ * while the call ran is recorded as unknown, without provenance or grants. */
+static int record(struct fd_runtime *s,struct fd_table *t,long n,long a[6],long result,
+                  uint64_t since,int create,int pair,int setfd,int ioctl_setfd,
+                  unsigned long openat2_flags,struct proot_open_origin opened)
+{
+    int rc;
+    int local_output=g_payload_config.allow_local_output && g_payload_config.guard_path_mutations==2;
+    if(pair) {
+        /* Read only after kernel success; same address space for all threads. */
+        const int *fds=(const int *)a[n==__NR_pipe2?0:3];
+        int cloexec=!!(a[1]&O_CLOEXEC);
+        for(int i=0;i<2;i++) {
+            int fd=fds[i];
+            if(reused_since(s,fd,since)) {
+                rc=fd_table_import_unknown(t,fd,cloexec);
+                if(rc)return rc;
+                continue;
+            }
+            rc=(i==1 && n==__NR_pipe2 && g_payload_config.allow_pipe_output &&
+                g_payload_config.guard_path_mutations==2)?
+                fd_table_open_pipe_writer(t,fd,cloexec):
+                fd_table_open(t,fd,(struct fd_origin){0,FD_ACCESS_UNKNOWN},cloexec);
+            /* Non-file objects created here hold no mount content. */
+            if(!rc)rc=fd_table_grant_stream(t,fd);
+            if(!rc && n==__NR_socketpair && local_output)rc=fd_table_grant_local_writer(t,fd);
+            if(rc)return rc;
+        }
+        return 0;
+    }
+    if(create) {
+        /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
+        int cloexec=n==__NR_openat2?!!(openat2_flags&O_CLOEXEC):(n==__NR_pidfd_open || n==__NR_pidfd_getfd)?1:n==__NR_accept?0:(n==__NR_accept4 || n==__NR_signalfd4)?!!(a[3]&O_CLOEXEC):
+            n==__NR_memfd_create?!!(a[1]&1):
+            (n==__NR_epoll_create1 || n==__NR_inotify_init1)?!!(a[0]&O_CLOEXEC):
+            (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
+        if(n==__NR_pidfd_getfd || reused_since(s,(int)result,since))
+            return fd_table_import_unknown(t,(int)result,cloexec);
+        /* Existing root/bind configuration is writable. This is a source
+         * tag, not O_ACCMODE or permission enforcement; unknown anchors,
+         * imported FDs and exec restore deliberately remain UNKNOWN. */
+        rc=fd_table_open(t,(int)result,(struct fd_origin){opened.mount_id,
+                         opened.known?FD_ACCESS_RW:FD_ACCESS_UNKNOWN},cloexec);
+        int stream=n==__NR_memfd_create || n==__NR_eventfd2 || n==__NR_epoll_create1 ||
+            n==__NR_timerfd_create || n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
+            n==__NR_inotify_init1 || n==__NR_signalfd4;
+        if(!rc && stream)rc=fd_table_grant_stream(t,(int)result);
+        if(!rc && local_output && (n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
+                                   n==__NR_eventfd2 || n==__NR_memfd_create))
+            rc=fd_table_grant_local_writer(t,(int)result);
+        return rc;
+    }
+    if(setfd)return fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
+    int cloexec=n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC;
+    /* The kernel copied whatever the source number named at that time. */
+    if(reused_since(s,(int)a[0],since) || reused_since(s,(int)result,since))
+        return fd_table_import_unknown(t,(int)result,cloexec);
+    return fd_table_dup(t,(int)a[0],(int)result,cloexec);
+}
 long fd_experiment_dispatch(long n,long a[6])
 {
     struct fd_runtime *s=current();
@@ -551,40 +745,50 @@ long fd_experiment_dispatch(long n,long a[6])
         if(a[1]==6) {
             return mount_decision((size_t)a[2],true,(enum fs_operation)a[3]);
         }
-        if(a[1]==0) { long count=0;for(size_t i=0;i<t->capacity;i++)count+=t->slots[i].fd>=0;return count; }
-        const struct fd_record *r=fd_table_get(t,(int)a[2]);if(!r)return -ENOENT;
-        if(a[1]==1)return r->generation;
-        if(a[1]==2)return r->description;
-        if(a[1]==3)return r->cloexec;
-        if(a[1]==4)return r->origin.mount_id;
-        if(a[1]==5)return r->origin.access;
-        return -EINVAL;
+        long value=-EINVAL;
+        lock(s);
+        const struct fd_record *r=fd_table_get(t,(int)a[2]);
+        if(a[1]==0) { value=0;for(size_t i=0;i<t->capacity;i++)value+=t->slots[i].fd>=0; }
+        else if(!r)value=-ENOENT;
+        else if(a[1]==1)value=r->generation;
+        else if(a[1]==2)value=r->description;
+        else if(a[1]==3)value=r->cloexec;
+        else if(a[1]==4)value=r->origin.mount_id;
+        else if(a[1]==5)value=r->origin.access;
+        unlock(s);
+        return value;
     }
     /* advice is an int in the kernel ABI. Normalize before deciding whether
      * MADV_REMOVE needs mapping authorization; high bits cannot hide a punch. */
     if(n==__NR_madvise)a[2]=(int)a[2];
-    /* Content sources, including private file mappings, before any mapping
-     * bookkeeping or transfer destination checks. */
-    rc=check_read_call(t,n,a);if(rc<0)return rc;
-    if(g_payload_config.guard_path_mutations==2 &&
-       (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
-        n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE)))
-        return guarded_mapping(s,t,n,a);
     /* Linux consumes unsigned int cmd. Normalize before both authorization
      * and FD-event classification, or high bits can hide dup/setfd effects. */
-    if(n==__NR_fcntl) {
-        a[1]=(unsigned int)a[1];
-        rc=check_fcntl(t,a);if(rc<0)return rc;
+    if(n==__NR_fcntl)a[1]=(unsigned int)a[1];
+    /* Checks read shared metadata under the lock; they issue only
+     * non-blocking kernel queries (fstat, TCGETS). Content sources, including
+     * private file mappings, come before mapping or destination checks. */
+    lock(s);
+    rc=check_read_call(t,n,a);
+    if(!rc && g_payload_config.guard_path_mutations==2 &&
+       (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
+        n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE))) {
+        /* Address-space changes and their admission records stay atomic. */
+        long result=guarded_mapping(s,t,n,a);
+        unlock(s);
+        return result;
     }
-    rc=check_fd_mutation(t,s,n,a);if(rc<0)return rc;
+    if(!rc && n==__NR_fcntl)rc=check_fcntl(t,a);
+    if(!rc)rc=check_fd_mutation(t,s,n,a);
+    if(!rc && n==__NR_ioctl)rc=check_ioctl(t,a);
+    if(rc<0) { unlock(s);return rc; }
     if(n==__NR_getdents64 && g_payload_config.guard_file_reads) {
         const struct fd_record *r=fd_table_get(t,(int)a[0]);
         struct proot_open_origin anchor={0,false};
         if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
             anchor=(struct proot_open_origin){r->origin.mount_id,true};
+        unlock(s);
         return proot_getdents_visible((int)a[0],(void *)a[1],(unsigned int)a[2],&anchor);
     }
-    if(n==__NR_ioctl) { rc=check_ioctl(t,a);if(rc<0)return rc; }
     if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
         struct proot_open_origin anchor=s->cwd,next={0,false};
         if(n==__NR_fchdir) {
@@ -593,10 +797,12 @@ long fd_experiment_dispatch(long n,long a[6])
             if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
                 anchor=(struct proot_open_origin){r->origin.mount_id,true};
         }
+        unlock(s);
         long result=proot_cwd(n,a,&anchor,&next);
-        if(result>=0 && n!=__NR_getcwd)s->cwd=next;
+        if(result>=0 && n!=__NR_getcwd) { lock(s);s->cwd=next;unlock(s); }
         return result;
     }
+    unlock(s);
     /* No partial support for lifecycle or alternate FD creation in this mode. */
     switch(n) {
     case __NR_clone: case __NR_clone3:
@@ -609,7 +815,7 @@ long fd_experiment_dispatch(long n,long a[6])
     /* TIOCGPTPEER returns a new FD; do not treat it as an ordinary ioctl.
      * Native success is not available in this sandbox, so keep it unsupported. */
     if(n==__NR_ioctl && (unsigned)a[1]==TIOCGPTPEER)return -ENOSYS;
-    if(n==__NR_close) { int bookkeeping;return fd_close_execute(&s->queue,&s->registry,&s->guard,s->owner,(int)a[0],&bookkeeping); }
+    if(n==__NR_close)return close_descriptor(s,t,(int)a[0]);
     unsigned long openat2_flags=0,openat2_resolve=0;
     if(n==__NR_openat2) {
         /* Snapshot before use. Only the published 24-byte ABI and this narrow
@@ -638,43 +844,44 @@ long fd_experiment_dispatch(long n,long a[6])
     int receive=n==__NR_recvmsg || n==__NR_recvmmsg;
     if(!create && !pair && !duplicate && !setfd && !receive && !execute) {
         if(proot_handles_syscall(n)) {
-            struct proot_path_context context={.cwd=s->cwd,
-                .fd={(int)a[n==__NR_symlinkat?1:0],AT_FDCWD}};
+            struct proot_path_context context={.fd={(int)a[n==__NR_symlinkat?1:0],AT_FDCWD}};
             if(n==__NR_linkat || n==__NR_renameat || n==__NR_renameat2)
                 context.fd[1]=(int)a[2];
+            lock(s);
+            context.cwd=s->cwd;
             for(size_t i=0;i<2;i++) {
                 if(context.fd[i]==AT_FDCWD)continue;
                 const struct fd_record *r=fd_table_get(t,context.fd[i]);
                 if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
                     context.directory[i]=(struct proot_open_origin){r->origin.mount_id,true};
             }
+            unlock(s);
             return proot_context_syscall(n,a,&context);
         }
         return syscall_handle_common(n,a);
     }
-    /* The entry trampoline rejects same-TID nested slow calls in this build;
-     * each supported task has its own metadata arena across these syscalls.
-     * Never generalize this to a multithreaded permission mode. */
-    rc=fd_close_drain(&s->queue,&s->registry);if(rc<0)return rc;
-    if(fd_close_pending(&s->queue,t,-1))return -EBUSY;
     if(execute) {
-        struct proot_path_context context={.cwd=s->cwd,.fd={AT_FDCWD,AT_FDCWD}};
+        struct proot_path_context context={.fd={AT_FDCWD,AT_FDCWD}};
+        lock(s);
+        context.cwd=s->cwd;
         if(n==__NR_execveat && (int)a[0]!=AT_FDCWD) {
             context.fd[0]=(int)a[0];
             const struct fd_record *r=fd_table_get(t,context.fd[0]);
             if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
                 context.directory[0]=(struct proot_open_origin){r->origin.mount_id,true};
         }
+        unlock(s);
         return proot_execve_context(n,a,&context);
     }
-    if(receive)return n==__NR_recvmsg?fd_receive_message(t,a):fd_receive_messages(t,a);
-    rc=room(t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1,!setfd);if(rc)return rc;
-    if(pair) {
-        if(t->serial>UINT64_MAX-2)return -EOVERFLOW;
-        size_t free_slots=0;
-        for(size_t i=0;i<t->capacity;i++)free_slots+=t->slots[i].fd<0;
-        if(free_slots<2)return -ENOSPC;
+    if(receive) {
+        struct fd_receive_sync sync={s,lock_callback,unlock_callback,&s->reserved};
+        return n==__NR_recvmsg?fd_receive_message(t,a,&sync):fd_receive_messages(t,a,&sync);
     }
+    /* Reserve, snapshot and announce under the lock; run the (possibly
+     * blocking) kernel call unlocked; record under the lock with reuse checks. */
+    lock(s);
+    int reserved=room(s,t,n==__NR_dup3?(int)a[1]:setfd?(int)a[0]:-1,!setfd,pair?2:1);
+    if(reserved<0) { unlock(s);return reserved; }
     struct proot_open_origin opened={0,false},anchor=s->cwd;
     if((n==__NR_openat || n==__NR_openat2) && (int)a[0]!=AT_FDCWD) {
         anchor=(struct proot_open_origin){0,false};
@@ -682,6 +889,13 @@ long fd_experiment_dispatch(long n,long a[6])
         if(directory && directory->origin.access!=FD_ACCESS_UNKNOWN)
             anchor=(struct proot_open_origin){directory->origin.mount_id,true};
     }
+    /* dup3 replaces its target atomically; announce it like a close. */
+    if(n==__NR_dup3 && (int)a[0]!=(int)a[1]) {
+        const struct fd_record *target=fd_table_get(t,(int)a[1]);
+        announce_close(s,(int)a[1],target?target->generation:0);
+    }
+    uint64_t since=s->close_epoch;
+    unlock(s);
     long result;
     if(n==__NR_openat2) {
         if(openat2_resolve==8)
@@ -695,48 +909,12 @@ long fd_experiment_dispatch(long n,long a[6])
         }
     } else if(n==__NR_openat)result=proot_openat(a,&anchor,&opened);
     else result=syscall_handle_common(n,a);
-    if(result<0)return result;
-    /* Non-file objects created here hold no mount content. */
-    int stream=pair || n==__NR_memfd_create || n==__NR_eventfd2 || n==__NR_epoll_create1 ||
-        n==__NR_timerfd_create || n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
-        n==__NR_inotify_init1 || n==__NR_signalfd4;
-    int local_output=g_payload_config.allow_local_output && g_payload_config.guard_path_mutations==2;
-    if(pair) {
-        /* Read only after kernel success. This relies on the experimental
-         * single-task AArch64 address space and nested slow-call exclusion;
-         * it is not a general user-memory snapshot for concurrent guests. */
-        const int *fds=(const int *)a[n==__NR_pipe2?0:3];
-        int first=fds[0],second=fds[1];
-        rc=fd_table_open(t,first,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
-        if(!rc)rc=(n==__NR_pipe2 && g_payload_config.allow_pipe_output &&
-                   g_payload_config.guard_path_mutations==2)?
-            fd_table_open_pipe_writer(t,second,!!(a[1]&O_CLOEXEC)):
-            fd_table_open(t,second,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
-        if(!rc)rc=fd_table_grant_stream(t,first);
-        if(!rc)rc=fd_table_grant_stream(t,second);
-        if(!rc && n==__NR_socketpair && local_output)rc=fd_table_grant_local_writer(t,first);
-        if(!rc && n==__NR_socketpair && local_output)rc=fd_table_grant_local_writer(t,second);
-    }
-    else if(create) {
-        /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
-        int cloexec=n==__NR_openat2?!!(openat2_flags&O_CLOEXEC):(n==__NR_pidfd_open || n==__NR_pidfd_getfd)?1:n==__NR_accept?0:(n==__NR_accept4 || n==__NR_signalfd4)?!!(a[3]&O_CLOEXEC):
-            n==__NR_memfd_create?!!(a[1]&1):
-            (n==__NR_epoll_create1 || n==__NR_inotify_init1)?!!(a[0]&O_CLOEXEC):
-            (n==__NR_eventfd2 || n==__NR_timerfd_create || n==__NR_socket)?!!(a[1]&O_CLOEXEC):!!(a[2]&O_CLOEXEC);
-        rc=n==__NR_pidfd_getfd?fd_table_import_unknown(t,(int)result,cloexec):
-            /* Existing root/bind configuration is writable. This is a source
-             * tag, not O_ACCMODE or permission enforcement; unknown anchors,
-             * imported FDs and exec restore deliberately remain UNKNOWN. */
-            fd_table_open(t,(int)result,(struct fd_origin){opened.mount_id,
-                          opened.known?FD_ACCESS_RW:FD_ACCESS_UNKNOWN},cloexec);
-        if(!rc && stream)rc=fd_table_grant_stream(t,(int)result);
-        if(!rc && local_output && (n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
-                                   n==__NR_eventfd2 || n==__NR_memfd_create))
-            rc=fd_table_grant_local_writer(t,(int)result);
-    }
-    else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
-    else rc=fd_table_dup(t,(int)a[0],(int)result,n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC);
-    /* Preflight plus single-task exclusion guarantees capacity/serial here. */
+    lock(s);
+    s->reserved-=(size_t)reserved;
+    rc=result<0?0:record(s,t,n,a,result,since,create,pair,setfd,ioctl_setfd,
+                         openat2_flags,opened);
+    unlock(s);
+    /* The reservation guarantees capacity/serial for the recording above. */
     if(rc)return rc;
     return result;
 }
