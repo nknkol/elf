@@ -25,9 +25,9 @@ try:
     result["system_write"] = "allowed"
 except OSError as exc:
     result["system_write"] = exc.errno
-# Container mode reports uid 0 while stat shows the real owner; git's
-# ownership check needs an explicit exception (command-line config is trusted).
-run = lambda *a: subprocess.run([git, "-c", "safe.directory=/workspace", "-c", "user.name=agent",
+# getuid reports root and stat reports the caller's files as root-owned,
+# so git's ownership check passes without a safe.directory exception.
+run = lambda *a: subprocess.run([git, "-c", "user.name=agent",
                                  "-c", "user.email=a@example.invalid", *a],
                                 check=True, capture_output=True, text=True).stdout
 run("init", "-q")

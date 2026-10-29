@@ -205,6 +205,13 @@ R_AARCH64_RELATIVE 重定位（-O0 payload 也带两个未重定位 GOT 项）�
 并拒绝其他动态重定位类型。路径调用改用每进程 4 个复用 scratch（vfork 子进程仍用预留区），并跳过不改变
 解析结果的宿主 lstat（根与 bind 挂载点、不跟随的最终名）。HarmonyOS 结果：stat 3.1 倍、open+close 2.5 倍、
 保护模式目录读取 1.5 倍、mmap 2.0 倍，FD 读写 1.4-1.8 倍；全部回归与 rootfs 验收通过。
+2026-10-30 /proc 增量：此前经过 /proc/self 的任何路径都返回 EOPNOTSUPP。现按 PRoot readlink_proc 语义
+（无 PID 命名空间）：self/thread-self 规范化为真实 pid/tid；exe 为 guest 程序（脚本为解释器，经
+`--exec-exe` 传递，其他 loader 进程从其 cmdline 解析）；cwd 反向映射，root 为 "/"；fd 项作为最终分量
+保持魔术链接，读取保护下文件目标按 guest 路径解析以受策略约束；readlink 返回 guest 路径，视图外目标
+在无保护时原样、读取保护下拒绝。loader 以 exec 名设置 comm；loader 运行进程的 /proc/<pid>/cmdline 由
+memfd 提供 guest argv，不再暴露 loader 参数与宿主路径。默认 ABI 5、实验 ABI 14。HarmonyOS proc_links
+用例三种配置通过，全部回归通过。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。

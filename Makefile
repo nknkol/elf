@@ -28,6 +28,7 @@ check: build
 	$(PYTHON) vendor/proot/port-tests/test_modify.py
 	$(PYTHON) test/fs_policy/xattrs.py --normal
 	$(PYTHON) test/fs_policy/access.py --normal
+	$(PYTHON) test/fs_policy/ids.py
 	$(PYTHON) vendor/proot/port-tests/test_inotify.py
 	$(PYTHON) vendor/proot/port-tests/test_exec.py
 	$(PYTHON) vendor/proot/port-tests/test_auxv.py

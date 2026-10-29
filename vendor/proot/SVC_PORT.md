@@ -41,8 +41,8 @@ run inside a temporary directory and remove their artifacts automatically.
 
 An experimental ELF path bridge is now runnable (see below); this is not
 full SVC-backed PRoot. Host-backed bind initialization/glue, FD lifecycle,
-extensions and /proc adaptation are outstanding. /proc links are explicitly
-unsupported in the new bridge. The full legacy build is
+extensions are outstanding. /proc links follow PRoot's readlink_proc semantics
+(see docs/STATUS.md, 2026-10-30). The full legacy build is
 not validated: local pkg-config cannot locate talloc development files.
 
 ## Dependency map and next migration steps
@@ -175,8 +175,8 @@ not wholesale stat emulation.
 
 AT_EMPTY_PATH metadata and empty-path readlink intentionally operate on the
 existing FD without translating a pathname. Inherited FD policy and guest
-pointer fault containment are not implemented. For virtual /proc symlinks,
-pathname readlink returns EOPNOTSUPP rather than leaking a translated target.
+pointer fault containment are not implemented. /proc links resolve and read
+in guest terms; under the read guard unmappable or hidden targets are refused.
 
 ## Mutation and execution milestone
 
