@@ -83,7 +83,11 @@ with tempfile.TemporaryDirectory(prefix='read-guard-', dir=build) as tmp:
             (['--guard-file-access', 'd', '--guard-file-mutations', 'd', '--', str(probe)],
              'duplicate mount access observation'),
             (['--guard-file-access', 'dw', '--', str(probe)],
-             'mount access observation requires root plus every bind')):
+             'mount access observation requires root plus every bind'),
+            (['--guard-file-access', 'd', '--exec-interp', '/lib/ld.so', '--', str(probe)],
+             'exec interpreter requires file access child loader'),
+            (['--guard-file-access', 'd', '--exec-interp', 'relative', '--', str(probe)],
+             'invalid value for --exec-interp')):
         p = subprocess.run([str(loader), '--mode', 'container', '--root', str(root), *options],
                            capture_output=True, text=True, timeout=20)
         assert p.returncode != 0 and marker in p.stdout + p.stderr, (options, p.stdout, p.stderr)
@@ -104,17 +108,28 @@ for directory, shell, prefix, cat, ls in (
                    f'{cat} /etc/passwd 2>/dev/null || echo hidden-etc; '
                    f'{ls} /; v=$({cat} /work/note); echo "sub=$v"; '
                    f'printf out > /work/new; {cat} < /work/new; echo')
-        binds = []
-        for name in ('bin', 'lib', 'usr', 'sbin'):
-            if (root / name).is_dir() and not (root / name).is_symlink():
-                binds += ['-v', f'{root}/{name}:/{name}']
-        vector = 'd' + 'r' * (len(binds) // 2) + 'w' + 'w'
-        p = subprocess.run([str(loader), '--mode', 'container', '--root', str(root), *binds,
-                            '-v', f'{work}:/work', '-v', '/dev/null:/dev/null',
-                            '--guard-file-access', vector, '--allow-stdio-output',
-                            '--allow-pipe-output', '--allow-stream-input',
-                            '--revalidate-file-fds', '--', shell, *prefix, '-c', command],
-                           cwd=root, capture_output=True, text=True, timeout=30)
+        def system(names):
+            # Merged-usr links in the denied root are hidden; expose their
+            # targets at the linked names, as an agent profile must.
+            binds = []
+            for name in names:
+                path = root / name
+                if path.is_symlink():
+                    path = (root / os.readlink(path)).resolve()
+                if path.is_dir():
+                    binds += ['-v', f'{path}:/{name}']
+            return binds
+
+        def protected(binds, command):
+            vector = 'd' + 'r' * (len(binds) // 2) + 'w' + 'w'
+            return subprocess.run([str(loader), '--mode', 'container', '--root', str(root),
+                                   *binds, '-v', f'{work}:/work', '-v', '/dev/null:/dev/null',
+                                   '--guard-file-access', vector, '--allow-stdio-output',
+                                   '--allow-pipe-output', '--allow-stream-input',
+                                   '--revalidate-file-fds', '--', shell, *prefix, '-c', command],
+                                  cwd=root, capture_output=True, text=True, timeout=30)
+
+        p = protected(system(('bin', 'lib', 'usr', 'sbin')), command)
         listing = set(p.stdout.split())
         assert p.returncode == 0, (directory, p.returncode, p.stdout, p.stderr)
         assert 'visible-note' in p.stdout and 'piped' in p.stdout, p.stdout
@@ -124,3 +139,12 @@ for directory, shell, prefix, cat, ls in (
         assert 'etc' not in listing and 'root' not in listing and 'usr' in listing, p.stdout
         assert 'root:' not in p.stdout, p.stdout
         print('PASS: protected rootfs reads, pipes, listing and redirection:', directory)
+
+        # Exec chains resolve PT_INTERP under the policy: hiding the dynamic
+        # linker's directory refuses the exec instead of loading it from the
+        # host. The initial shell is the launcher's trusted target.
+        p = protected(system(('bin', 'usr', 'sbin')),
+                      f'{cat} /work/note || echo exec-denied')
+        assert p.returncode == 0 and 'exec-denied' in p.stdout, (directory, p.stdout, p.stderr)
+        assert 'visible-note' not in p.stdout, p.stdout
+        print('PASS: hidden dynamic linker refuses exec:', directory)

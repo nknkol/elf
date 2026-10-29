@@ -1316,6 +1316,7 @@ typedef struct child_loader_proto {
 	const char *exec_path;
 	int exec_dirfd;
 	int exec_flags;
+	const char *exec_interp;
 } child_loader_proto_t;
 
 static const char *find_config_path_arg(int argc, char **argv)
@@ -1353,7 +1354,9 @@ static const char *find_config_path_arg(int argc, char **argv)
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_DIRFD,
 			      z_strlen(CONFIG_CHILD_EXEC_DIRFD) + 1) == 0 ||
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_FLAGS,
-			      z_strlen(CONFIG_CHILD_EXEC_FLAGS) + 1) == 0) {
+			      z_strlen(CONFIG_CHILD_EXEC_FLAGS) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_INTERP,
+			      z_strlen(CONFIG_CHILD_EXEC_INTERP) + 1) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			i++;
@@ -1380,6 +1383,7 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		child_proto->exec_path = NULL;
 		child_proto->exec_dirfd = AT_FDCWD;
 		child_proto->exec_flags = 0;
+		child_proto->exec_interp = NULL;
 	}
 
 	for (int i = 1; i < argc; i++) {
@@ -1505,6 +1509,16 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 				z_errx(1, "missing value for %s", arg);
 			if (child_proto)
 				child_proto->exec_flags = z_atoi(argv[i + 1]);
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_INTERP,
+			      z_strlen(CONFIG_CHILD_EXEC_INTERP) + 1) == 0) {
+			if (i + 1 >= argc || argv[i + 1][0] != '/')
+				z_errx(1, "invalid value for %s", arg);
+			if (child_proto)
+				child_proto->exec_interp = argv[i + 1];
 			i++;
 			continue;
 		}
@@ -2030,6 +2044,11 @@ void z_entry(unsigned long *sp, void (*fini)(void))
         z_errx(1, "stream input requires file access guard");
     if (bootstrap_cfg.fd_state >= 0 && !child_loader)
         z_errx(1, "fd state requires child loader");
+    if (child_proto.exec_interp && (!child_loader || !bootstrap_cfg.guard_file_reads))
+        z_errx(1, "exec interpreter requires file access child loader");
+#else
+    if (child_proto.exec_interp)
+        z_errx(1, "exec interpreter requires file access child loader");
 #endif
 	int argi = target_index;
 	int has_config = (config_path && config_path[0]) ? 1 : 0;
@@ -2353,9 +2372,21 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 				z_errx(1, "can't read interp segment");
 			if (elf_interp[iter->p_filesz - 1] != '\0')
 				z_errx(1, "bogus interp path");
-			/* Resolve interpreter inside configured root/binds to avoid host escape */
-			file = rewrite_interp_path(&bootstrap_cfg, elf_interp,
-						   interp_path, sizeof(interp_path));
+			if (child_loader && child_proto.exec_interp) {
+				/* Payload resolved it with guest symlink semantics and the
+				 * read policy; never re-map the raw PT_INTERP here. */
+				file = child_proto.exec_interp;
+			} else {
+#ifdef FD_EXPERIMENT
+				/* A target swapped after the payload's check must not fall
+				 * back to lexical host mapping and bypass the read policy. */
+				if (child_loader && bootstrap_cfg.guard_file_reads)
+					z_errx(1, "interpreter not authorized by payload");
+#endif
+				/* Resolve interpreter inside configured root/binds to avoid host escape */
+				file = rewrite_interp_path(&bootstrap_cfg, elf_interp,
+							   interp_path, sizeof(interp_path));
+			}
 			z_printf("[Loader] interp \"%s\" -> \"%s\"\n", elf_interp, file);
 			load_interp_next = 1;
 			break;

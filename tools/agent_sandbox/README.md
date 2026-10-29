@@ -515,8 +515,14 @@ or socket, or a character device that answers TCGETS; invalid FDs still return
 EBADF first. Combine it with `--revalidate-file-fds` for file redirections that
 cross exec. name_to_handle_at is not bridged and returns ENOSYS in this mode.
 
-Known gaps: the ELF interpreter (PT_INTERP) is loaded by the loader without the
-read policy; ancestor stat reports host metadata; UNIX socket paths, xattrat
+Exec chains read the target's PT_INTERP in the payload and resolve it with guest
+symlink semantics and the read policy; the child loader loads exactly that host
+path (`--exec-interp`) and refuses a dynamic target without one. A hidden or
+ancestor-only interpreter refuses the exec. Merged-usr `/lib` is a symlink in
+the root, so profiles must expose the interpreter's guest path explicitly.
+
+Known gaps: the launcher's initial target still maps PT_INTERP lexically;
+ancestor stat reports host metadata; UNIX socket paths, xattrat
 entries and path races are not covered. `test/fs_policy/reads.py` covers the
 probe matrix plus protected Alpine/Ubuntu shells (read-only system tree, pipes,
 command substitution, redirection, filtered `ls /`).

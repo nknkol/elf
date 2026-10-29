@@ -41,6 +41,8 @@
 #define CONFIG_CHILD_EXEC_PATH "--exec-path"
 #define CONFIG_CHILD_EXEC_DIRFD "--exec-dirfd"
 #define CONFIG_CHILD_EXEC_FLAGS "--exec-flags"
+/* Payload-resolved host path of the target PT_INTERP (file access mode). */
+#define CONFIG_CHILD_EXEC_INTERP "--exec-interp"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];

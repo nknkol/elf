@@ -16,7 +16,7 @@
 #endif
 
 #define EXEC_ARGS 128
-#define CHAIN_ARGS (EXEC_ARGS + 40)
+#define CHAIN_ARGS (EXEC_ARGS + 48)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
 #define S_IFLNK 0120000
@@ -30,6 +30,10 @@ typedef struct {
     char *argv[CHAIN_ARGS];
 #ifdef FD_EXPERIMENT
     char fd_state[24];
+    /* PT_INTERP as stored in the target, then its policy-checked resolution. */
+    char elf_interp[CONFIG_MAX_PATH];
+    char elf_interp_guest[CONFIG_MAX_PATH], elf_interp_host[CONFIG_MAX_PATH];
+    Elf64_Phdr phdrs[64];
 #endif
 } ExecScratch;
 
@@ -76,6 +80,37 @@ static int elf_magic(const char *p, int n)
         h.e_ehsize == sizeof(Elf64_Ehdr) &&
         h.e_phentsize == sizeof(Elf64_Phdr) && h.e_phnum > 0;
 }
+
+#ifdef FD_EXPERIMENT
+/* Read the target's PT_INTERP string. 0: static, 1: found, <0: refused.
+ * Bounded like the loader: a non-empty pathname ending in NUL. */
+static int elf_interpreter(const char *path, ExecScratch *s)
+{
+    long fd = raw_syscall(SYS_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    if (fd < 0) return (int)fd;
+    Elf64_Ehdr h;
+    long ret = raw_syscall(__NR_pread64, fd, (long)&h, sizeof(h), 0, 0, 0);
+    if (ret == (long)sizeof(h)) {
+        size_t bytes = (size_t)h.e_phnum * sizeof(Elf64_Phdr);
+        if (!h.e_phnum || h.e_phnum > sizeof(s->phdrs) / sizeof(s->phdrs[0]) ||
+            h.e_phentsize != sizeof(Elf64_Phdr)) ret = -ENOEXEC;
+        else ret = raw_syscall(__NR_pread64, fd, (long)s->phdrs, (long)bytes,
+                               (long)h.e_phoff, 0, 0) == (long)bytes ? 0 : -ENOEXEC;
+    } else if (ret >= 0) ret = -ENOEXEC;
+    for (size_t i = 0; !ret && i < h.e_phnum; i++) {
+        const Elf64_Phdr *p = &s->phdrs[i];
+        if (p->p_type != PT_INTERP) continue;
+        if (p->p_filesz < 2 || p->p_filesz > sizeof(s->elf_interp)) { ret = -ENOEXEC; break; }
+        ret = raw_syscall(__NR_pread64, fd, (long)s->elf_interp, (long)p->p_filesz,
+                          (long)p->p_offset, 0, 0);
+        if (ret != (long)p->p_filesz || s->elf_interp[p->p_filesz - 1] ||
+            !s->elf_interp[0]) { ret = -ENOEXEC; break; }
+        ret = 1;
+    }
+    raw_syscall(SYS_close, fd, 0, 0, 0, 0, 0);
+    return (int)ret;
+}
+#endif
 
 long proot_execve_context(long number, long a[6], const struct proot_path_context *context)
 {
@@ -153,6 +188,25 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         if (!elf_magic(magic, n)) { ret = -EOPNOTSUPP; goto done; }
         target = s->interpreter_host;
     }
+#ifdef FD_EXPERIMENT
+    int dynamic = 0;
+    if (cfg->guard_file_reads) {
+        /* The dynamic linker is loaded content too: resolve it with guest
+         * symlinks and the read policy instead of lexical host mapping. */
+        dynamic = elf_interpreter(target, s);
+        if (dynamic < 0) { ret = dynamic; goto done; }
+        if (dynamic) {
+            ret = proot_resolve_exec_path(AT_FDCWD, s->elf_interp, true,
+                                          s->elf_interp_guest, s->elf_interp_host,
+                                          sizeof(s->elf_interp_host), context);
+            if (ret < 0) goto done;
+            char magic[256];
+            n = read_executable(s->elf_interp_host, 0, magic);
+            if (n < 0) { ret = n; goto done; }
+            if (!elf_magic(magic, n)) { ret = -ELIBBAD; goto done; }
+        }
+    }
+#endif
     size_t pos = 0;
     s->argv[pos++] = cfg->loader_path;
     s->argv[pos++] = "--child-loader";
@@ -178,6 +232,12 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = target;
     s->argv[pos++] = "--exec-path";
     s->argv[pos++] = s->guest;
+#ifdef FD_EXPERIMENT
+    if (dynamic) {
+        s->argv[pos++] = CONFIG_CHILD_EXEC_INTERP;
+        s->argv[pos++] = s->elf_interp_host;
+    }
+#endif
 #ifdef FD_EXPERIMENT
     if (cfg->mount_access_observe[0]) {
         s->argv[pos++] = cfg->guard_file_reads ? "--guard-file-access" :

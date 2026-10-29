@@ -136,7 +136,11 @@ Alpine 3.24.3 与 Ubuntu 26.04.1 的受保护 shell 只读系统树、管道、�
 测试通过。check_fd_clone、test_inotify、check_runtime 及 fd_runtime/run 在该设备上
 对未修改的 HEAD 同样失败，属环境差异，未计为通过。该设备的 Linux 不按低地址 mmap 提示
 放置 SVC stub，静态探针改用自重定位 static-pie 链接；这只是设备测试环境调整，未入库。
-仍未完成：PT_INTERP 由 loader 直接加载、不经读取策略；祖先目录的 stat 仍是宿主元数据，
+guest 内 exec 链的 PT_INTERP 现由 payload 读取，用 guest symlink 语义和读取策略解析，
+解析出的宿主路径经 `--exec-interp` 交给子 loader 直接加载；隐藏或仅可遍历的解释器使 exec
+失败。文件访问模式的子 loader 遇到 PT_INTERP 而无该参数时拒绝，不回退到词法宿主映射。
+merged-usr 系统的 `/lib` 等是根目录中的 symlink，配置须显式暴露解释器所在路径。
+仍未完成：启动器给出的首个目标仍由 loader 词法映射加载解释器；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX socket 路径、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
