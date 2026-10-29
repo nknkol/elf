@@ -81,6 +81,15 @@ FIONREAD 限文件/pipe/socket/经 TCGETS 验证的终端，有限终端查询�
 pipe/CLOEXEC 及 PTY 查询；既有权限测试、完整 FD 回归与默认 `make check` 均通过。
 观察/路径保护/无策略模式保持原行为；ABI 布局未变。
 这仍不包含默认拒绝读取、完整终端设置、fcntl 命令审计或通用设备模型。
+2026-10-29 fcntl 增量：在实验版中先按内核 unsigned 32 位 ABI 规范化命令号，
+修复高位非零 DUPFD/DUPFD_CLOEXEC/SETFD 已在内核生效但未进入正确 FD 记账的缺口。
+文件修改模式增加命令准入：保留普通 FD/pipe 控制和有限查询；锁要求已知非 deny 来源，
+write hint 设置要求可写来源；owner/signal/lease/notify/seal 设置、O_ASYNC 和未知命令拒绝。
+真实高位参数测试核对来源/description/CLOEXEC；原生对照覆盖宿主持锁下 POSIX/OFD 冲突、
+只读读锁、共享状态 flags、pipe 容量及 seal 拒绝后状态不变。新增测试、既有权限测试、
+完整 FD 回归与默认 `make check` 通过。当前宿主 hint 设置为 EOPNOTSUPP，不算成功支持。
+ABI 布局不变；无额外路径查找或用户 flock 解引用。默认拒绝读取、完整 memfd 能力、
+跨进程锁隔离和共享 FD 竞争仍未完成。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

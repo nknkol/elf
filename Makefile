@@ -55,4 +55,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/revalidate.py
 	$(PYTHON) test/fs_policy/xattrs.py
 	$(PYTHON) test/fs_policy/ioctls.py
+	$(PYTHON) test/fs_policy/fcntls.py
 	$(PYTHON) test/fd_runtime/run.py

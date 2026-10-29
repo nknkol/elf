@@ -360,3 +360,46 @@ pipe controls, CLOEXEC, unknown/read-encoded commands, clone/dedupe rejection,
 and real PTY queries/injection rejection. It requires PTY support for its terminal
 case. Full interactive-terminal settings and broader device compatibility are
 not claimed by this limited query support.
+
+
+## fcntl command boundary
+
+The FD experiment normalizes fcntl's command to the kernel's unsigned 32-bit
+ABI before both policy checks and descriptor bookkeeping. High nonzero register
+bits must not hide F_DUPFD/F_DUPFD_CLOEXEC or F_SETFD effects. This correction
+applies to all FD experimental modes, not just file-mutation mode.
+
+In `--guard-file-mutations`, only these command families are admitted:
+
+| Commands | Policy |
+| --- | --- |
+| DUPFD/DUPFD_CLOEXEC, GETFD/SETFD, GETFL | Existing descriptor tracking and native validation |
+| SETFL | Native flags/access-mode semantics, except O_ASYNC requests return EOPNOTSUPP |
+| GETOWN/GETOWN_EX/GETSIG/GETLEASE/GET_SEALS | Native queries; no default-deny read claim |
+| GETPIPE_SZ/SETPIPE_SZ | Native pipe validation and resource limits |
+| GET_RW_HINT/GET_FILE_RW_HINT | Native queries |
+| GETLK/SETLK/SETLKW and OFD equivalents | Known non-denied mount source, then native lock and access-mode validation |
+| SET_RW_HINT/SET_FILE_RW_HINT | Known writable source, then native behavior |
+| Everything else | EOPNOTSUPP, including owner/signal/lease/notification setters, ADD_SEALS and unknown commands |
+
+Advisory locking is not file-content modification: a known readonly file can
+hold a native read lock. Locks cannot grant read/write access. Denied and unknown
+sources return EACCES for the listed lock operations; hint setters return EROFS
+for readonly and EACCES for denied/unknown sources. No guest flock pointer is
+parsed by the policy check. Rejected commands cannot dereference their argument
+or alter kernel state through this dispatcher. The check adds no allocation or
+host lookup to fcntl; ordinary IO remains unchanged.
+
+Guest ADD_SEALS is deliberately unsupported here until private/imported memfd
+capabilities can be distinguished. Internal exec handoff still uses its own raw
+sealing path; that does not authenticate guest-supplied snapshots. Other modes
+retain native command behavior. This is a bounded command policy, not complete
+read isolation, cross-process locking isolation or shared-FD race protection.
+
+`test/fs_policy/fcntls.py` compares real SVC results with isolated native runs,
+including host-held POSIX lock contention seen by both POSIX and OFD guest locks.
+It checks high-bit duplicate/setfd bookkeeping, shared status flags, inability
+to turn O_RDONLY into O_RDWR, pipe capacity controls, readonly/unknown/denied
+policy, unsupported commands, unchanged protected file content/ctime, and all
+four experimental modes. Native hint setters on the current backing return
+EOPNOTSUPP; comparison is error parity, not proof of successful hint support.

@@ -299,6 +299,38 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
 }
+/* Only audited fcntl families are admitted in file-mutation mode. Advisory
+ * locks do not grant content access: known visible sources may lock, while
+ * access mode and flock validation remain the kernel's responsibility. */
+static int check_fcntl(struct fd_table *t, long a[6])
+{
+    if(g_payload_config.guard_path_mutations!=2)return 0;
+    enum fs_operation operation;
+    switch(a[1]) {
+    case F_DUPFD: case F_DUPFD_CLOEXEC: case F_GETFD: case F_SETFD:
+    case F_GETFL: case F_GETOWN: case F_GETOWN_EX: case F_GETSIG:
+    case F_GETLEASE: case F_GET_SEALS:
+    case F_GETPIPE_SZ: case F_SETPIPE_SZ:
+    case F_GET_RW_HINT: case F_GET_FILE_RW_HINT:
+        return 0;
+    case F_SETFL:
+        /* Async signal ownership/notification is not admitted in this mode. */
+        return a[2]&O_ASYNC ? -EOPNOTSUPP : 0;
+    case F_GETLK: case F_SETLK: case F_SETLKW:
+    case F_OFD_GETLK: case F_OFD_SETLK: case F_OFD_SETLKW:
+        operation=FS_OBSERVE;break;
+    case F_SET_RW_HINT: case F_SET_FILE_RW_HINT:
+        operation=FS_MUTATE;break;
+    default:
+        /* Includes lease/notification/owner setters, seal mutation and new
+         * commands; no kernel call or user-pointer access before rejection. */
+        return -EOPNOTSUPP;
+    }
+    const struct fd_record *r=fd_table_get(t,(int)a[0]);
+    return mount_decision(r?r->origin.mount_id:0,
+                          r && r->origin.access!=FD_ACCESS_UNKNOWN,operation);
+}
+
 /* ioctl numbers do not describe their effects (nor all affected FDs).
  * Keep a small explicit command/type set in file-mutation mode. Never infer
  * safety from _IOC_READ/_IOC_WRITE: those bits describe argument copying. */
@@ -436,6 +468,12 @@ long fd_experiment_dispatch(long n,long a[6])
        (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
         n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE)))
         return guarded_mapping(s,t,n,a);
+    /* Linux consumes unsigned int cmd. Normalize before both authorization
+     * and FD-event classification, or high bits can hide dup/setfd effects. */
+    if(n==__NR_fcntl) {
+        a[1]=(unsigned int)a[1];
+        rc=check_fcntl(t,a);if(rc<0)return rc;
+    }
     rc=check_fd_mutation(t,s,n,a);if(rc<0)return rc;
     if(n==__NR_ioctl) { rc=check_ioctl(t,a);if(rc<0)return rc; }
     if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
