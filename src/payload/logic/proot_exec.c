@@ -125,8 +125,19 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         return -EINVAL;
     if (!path)
         return -EFAULT;
-    if (!*path)
-        return (flags & AT_EMPTY_PATH) ? -EOPNOTSUPP : -ENOENT;
+    char named[CONFIG_MAX_PATH];
+    if (!*path) {
+        if (!(flags & AT_EMPTY_PATH))
+            return -ENOENT;
+        /* fexecve: the FD names the program. Execute it by its guest name,
+         * so resolution, interpreter and policy match a pathname exec. */
+        int rc = proot_fd_guest_path(dirfd, named, sizeof(named));
+        if (rc < 0)
+            return rc;
+        path = named;
+        dirfd = AT_FDCWD;
+        flags &= ~AT_EMPTY_PATH;
+    }
     /* Preserve debugger policy explicitly rather than silently losing it. */
     if (cfg->hook_range_set || cfg->hook_range_interp_set)
         return -EOPNOTSUPP;

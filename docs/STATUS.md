@@ -225,6 +225,9 @@ recvfrom 位于快路径，未处理。
 目录处返回 ENOENT）。现在通往 bind 目标的缺失目录按 PRoot glue 视为目录：可经其遍历（含 `..`），stat/
 access 报告目录（取根目录元数据）。不在宿主创建任何目录；打开、列出或进入 glue 目录本身以及在父目录
 列表中显示 glue 名称尚未模拟。glue 用例覆盖两种构建与读取保护模式，并确认 rootfs 未被修改。
+2026-10-30 fexecve 增量：execveat(fd, "", AT_EMPTY_PATH) 此前返回 EOPNOTSUPP。现由 /proc/self/fd 取得 FD 指向的
+宿主路径并映射为 guest 名称，按普通路径 exec（解析、解释器与策略一致）；目录得到与内核相同的 EACCES，
+已删除文件、memfd 等无路径对象仍为 EOPNOTSUPP。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 glue 目录不可打开、进入，也不出现在父目录列表中；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。

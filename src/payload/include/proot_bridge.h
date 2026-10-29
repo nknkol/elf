@@ -36,6 +36,9 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
  * hidden name is reported as unnamed. */
 void proot_socket_name(long number, long fd, void *address, unsigned *length,
                        unsigned capacity);
+/* Guest name of the file an FD refers to, for fexecve. Deleted files and
+ * non-path objects fail with EOPNOTSUPP; unmappable ones with EACCES. */
+int proot_fd_guest_path(int fd, char *guest, size_t capacity);
 long proot_openat(long args[6], const struct proot_open_origin *anchor,
                   struct proot_open_origin *origin);
 long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,

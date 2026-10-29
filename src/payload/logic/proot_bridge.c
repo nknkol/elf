@@ -1103,6 +1103,42 @@ static int unique_mount(Bridge *b, const char *host, size_t *selected)
     return matches==1 ? 0 : -EXDEV;
 }
 
+int proot_fd_guest_path(int fd, char *guest, size_t capacity)
+{
+    if (!guest || !capacity) return -EINVAL;
+    Bridge *b;
+    long ret = bridge_create(&b);
+    if (ret < 0) return (int)ret;
+    char link[32];
+    strcpy(link, "/proc/self/fd/");
+    size_t at = strlen(link);
+    unsigned value = (unsigned)fd;
+    char digits[16];
+    int count = 0;
+    do { digits[count++] = '0' + value % 10; value /= 10; } while (value);
+    while (count) link[at++] = digits[--count];
+    link[at] = 0;
+    ret = host_readlink(b, link, b->proc_host, sizeof(b->proc_host) - 1);
+    if (ret >= 0) {
+        b->proc_host[ret] = 0;
+        size_t length = (size_t)ret;
+        /* Deleted files, memfds and other non-path objects have no guest name. */
+        if (b->proc_host[0] != '/' ||
+            (length >= 10 && !strcmp(b->proc_host + length - 10, " (deleted)")))
+            ret = -EOPNOTSUPP;
+        else if (preferred_guest_path(b, b->proc_host, b->proc_guest) < 0)
+            ret = -EACCES;
+        else if (strlen(b->proc_guest) >= capacity)
+            ret = -ENAMETOOLONG;
+        else {
+            strcpy(guest, b->proc_guest);
+            ret = 0;
+        }
+    }
+    bridge_release(b);
+    return (int)ret;
+}
+
 void proot_socket_name(long number, long fd, void *address, unsigned *length,
                        unsigned capacity)
 {

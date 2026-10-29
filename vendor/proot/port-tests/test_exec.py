@@ -39,6 +39,7 @@ with tempfile.TemporaryDirectory(prefix='exec-',dir=build) as tmp:
     check('invalid format','!v','/bad',['RET=-8'])
     check('truncated ELF rejected before replacing process','!v','/truncated',['RET=-8'])
     check('empty pathname','!v','',['RET=-2'])
-    check('FD exec explicitly unsupported','!e','',['RET=-95'])
+    check('FD exec of a directory is EACCES like the kernel','!e','',['RET=-13'])
+    check('fexecve runs the program by its guest name','!f','/mnt/child',common)
     check('nested interpreter explicitly unsupported','!v','/nested',['RET=-95'])
 print(f'{len(results)} exec checks passed')
