@@ -49,6 +49,12 @@ int fd_table_open(struct fd_table *t, int fd, struct fd_origin origin, int cloex
     return assign(t, fd, (struct fd_record){.cloexec = cloexec, .origin = origin}, 1);
 }
 
+int fd_table_open_pipe_writer(struct fd_table *t, int fd, int cloexec)
+{
+    if(cloexec!=0 && cloexec!=1)return -EINVAL;
+    return assign(t,fd,(struct fd_record){.cloexec=cloexec,.pipe_writer=1},1);
+}
+
 int fd_table_import_unknown(struct fd_table *t, int fd, int cloexec)
 {
     if (cloexec != 0 && cloexec != 1) return -EINVAL;
@@ -113,9 +119,11 @@ int fd_table_range(struct fd_table *t, unsigned first, unsigned last, int cloexe
 
 void fd_table_exec(struct fd_table *t)
 {
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->capacity; i++) {
         if (t->slots[i].fd >= 0 && t->slots[i].cloexec)
             t->slots[i] = (struct fd_record){.fd = -1};
+        else t->slots[i].pipe_writer = 0;
+    }
 }
 
 int fd_table_copy(struct fd_table *dst, const struct fd_table *src)

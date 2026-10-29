@@ -50,6 +50,12 @@ private fork 复制记录；mremap 成功暂清空记录，vfork 共享 VM 窗�
 实验 ABI 升至 8。真实 pipe/PTY 与生命周期测试、Alpine/Ubuntu 受保护 shell
 read/printf/exec→cat、原有权限测试、完整 FD 回归和普通版 `make check` 通过。
 新建管道/复杂流水线和可信执行交接仍未完成，不能据此宣称完整 agent 隔离。
+2026-10-29 新建管道增量：独立 `--allow-pipe-output` 授权成功 pipe2 的写端，
+限数据输出，读端/socket/文件不获准；dup/fork 保留本地 capability，替换/复用清除，
+快照不序列化且 exec 清除。配合 stdio 重新验证，Alpine/Ubuntu 的三级流水线、
+命令替换和子 shell 输出已通过。真实管道传输、模型生命周期/快照降级、既有权限
+测试、完整 FD 回归及普通版 `make check` 通过；实验 ABI 为 9。
+跨 exec 的普通文件输出重定向仍丢失来源，尚未具备完整 agent 隔离。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

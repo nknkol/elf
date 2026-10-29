@@ -6,6 +6,7 @@
 /* Version 1: little-endian uint64 words, no native pointers or padding.
  * Header: magic, version, serial, live-count. Entries: fd, cloexec (0),
  * generation, description, mount_id, access. Only exec-surviving FDs exported.
+ * Local pipe-writer capabilities are intentionally omitted and import as zero.
  * Storage need not be aligned and must not overlap table storage.
  * All calls require exclusive table access.
  * This format is not authenticated. Never accept guest-supplied metadata as

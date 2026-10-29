@@ -287,6 +287,9 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     const struct fd_record *r=fd_table_get(t,fd);
     if((n==__NR_write || n==__NR_writev) && r && r->description &&
        (r->description==s->stdio_output[0] || r->description==s->stdio_output[1]))return 0;
+    if(g_payload_config.allow_pipe_output && r && r->pipe_writer &&
+       (n==__NR_write || n==__NR_writev || n==__NR_sendfile || n==__NR_splice ||
+        n==__NR_tee || n==__NR_vmsplice || n==__NR_copy_file_range))return 0;
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
 }
@@ -503,7 +506,10 @@ long fd_experiment_dispatch(long n,long a[6])
         const int *fds=(const int *)a[n==__NR_pipe2?0:3];
         int first=fds[0],second=fds[1];
         rc=fd_table_open(t,first,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
-        if(!rc)rc=fd_table_open(t,second,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
+        if(!rc)rc=(n==__NR_pipe2 && g_payload_config.allow_pipe_output &&
+                   g_payload_config.guard_path_mutations==2)?
+            fd_table_open_pipe_writer(t,second,!!(a[1]&O_CLOEXEC)):
+            fd_table_open(t,second,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
     }
     else if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */

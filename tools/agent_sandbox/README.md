@@ -119,7 +119,7 @@ origin tags. It is an explicitly unauthenticated observation protocol, not a
 secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
-The experimental payload ABI is now 8 (normal PRoot remains 3); older custom
+The experimental payload ABI is now 9 (normal PRoot remains 3); older custom
 payload layouts are rejected. Build and test with `make check-fd-runtime`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
@@ -177,8 +177,8 @@ FD access tags remain mapping observations; the permission vector is consulted
 separately on every guarded operation.
 
 Without the explicit stdio option below, inherited stdout/stderr remain
-unknown. Imported aliases and newly created pipes/sockets still receive no
-implicit output grant. General shell pipelines/agent launches remain incomplete. The regression uses exit
+unknown. Imported aliases and sockets receive no implicit output grant.
+New pipe write ends require the separate option described below. The regression uses exit
 status and host-side file checks, including readonly content/metadata integrity,
 writable output, dup/fork/slot reuse and rejection of exec-imported FDs.
 
@@ -253,5 +253,31 @@ ABI 8 distinguishes the new configuration layout from older custom payloads.
 `test/fs_policy/stdio.py` covers pipe/PTY output, stdin, writev, dup/fork/exec,
 FD reuse, regular-file/socket/non-TTY rejection and invalid options. Available
 Alpine and Ubuntu fixtures also run a protected shell read/printf followed by
-exec→cat. These simple workflows pass; newly created pipes/sockets, general
-pipelines, and authenticated preservation of other inherited FDs remain work.
+exec→cat. Local pipes are covered by the next option; socket authorization and
+authenticated preservation of other inherited FDs remain work.
+
+## Locally created pipe output
+
+`--allow-pipe-output` requires file-mutation mode and authorizes the write end
+of each successful guest pipe2. It is independent of `--allow-stdio-output`;
+use both for shell pipelines. Read ends, socketpair, inherited pipe aliases and
+ordinary files receive no new grant. A local per-record capability follows
+tracked dup/fcntl duplication and private fork, and is cleared by replacement,
+close/reuse and exec. It does not grant mount identity or metadata/mmap access.
+
+Allowed output operations are write/writev, sendfile, splice, tee, vmsplice and
+copy_file_range; the kernel retains its native validation (e.g. copy_file_range
+normally rejects pipe output). Pwrite and metadata operations do not receive a
+pipe exception. No extra syscall or content copying is added to the write path.
+The capability is deliberately absent from the exec snapshot format: import
+cannot assert it. After exec, only actual stdout/stderr may be revalidated by
+the separate stdio option; other inherited pipe aliases remain unknown.
+
+ABI 9 covers the new configuration and capability semantics. Model tests check
+dup/fork, CLOEXEC, slot replacement and snapshot dropping; `pipes.py` exercises
+real pipe IO and transfers, metadata denial, socket/regular-file rejection and
+exec downgrade. Available Alpine/Ubuntu fixtures run protected three-stage
+pipelines, command substitution and subshell output. These tests use captured
+pipe stdout. Regular-file output redirection across exec still loses trusted
+origin and is not solved by pipe/stdout grants; full agent isolation remains
+blocked on that handoff and the other documented permission gaps.

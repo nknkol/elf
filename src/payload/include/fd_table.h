@@ -19,6 +19,7 @@ struct fd_record {
     uint64_t generation;       /* changes on assignment, not F_SETFD */
     uint64_t description;      /* duplicates share it; 0 means unknown */
     struct fd_origin origin;
+    int pipe_writer;           /* Local capability; never exported in snapshots. */
 };
 struct fd_table {
     struct fd_record *slots;
@@ -30,6 +31,9 @@ const struct fd_record *fd_table_get(const struct fd_table *, int fd);
 /* Successful open/adoption. Distinct opens have distinct descriptions even
  * when host inode and mount match. All errors leave the table unchanged. */
 int fd_table_open(struct fd_table *, int fd, struct fd_origin, int cloexec);
+/* Caller has just obtained a pipe2 write end from the kernel. Does not grant
+ * file mount provenance; copies through dup/fork and is cleared on exec. */
+int fd_table_open_pipe_writer(struct fd_table *, int fd, int cloexec);
 /* Imported FD with unknown provenance AND unknown open-description identity. */
 int fd_table_import_unknown(struct fd_table *, int fd, int cloexec);
 /* Successful dup/dup3/F_DUPFD. same-FD success is dup2's no-op. Unknown source

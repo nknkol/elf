@@ -63,3 +63,10 @@ with tempfile.TemporaryDirectory(prefix='fd-table-') as temp:
                       for name in ('fd_clone', 'fd_registry', 'fd_guard', 'fd_close_queue', 'fd_close_exec')],
                     '-o', str(exec_exe)], check=True)
     subprocess.run([str(exec_exe)], check=True, timeout=15)
+
+    pipe_exe = Path(temp) / 'pipe-capabilities'
+    subprocess.run(['clang', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(repo / 'src/payload/include'),
+                    str(repo / 'test/fd_table/pipe_capabilities.c'), str(obj), str(snapshot_obj),
+                    '-o', str(pipe_exe)], check=True)
+    subprocess.run([str(pipe_exe)], check=True, timeout=15)
