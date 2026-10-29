@@ -90,6 +90,13 @@ write hint 设置要求可写来源；owner/signal/lease/notify/seal 设置、O_
 完整 FD 回归与默认 `make check` 通过。当前宿主 hint 设置为 EOPNOTSUPP，不算成功支持。
 ABI 布局不变；无额外路径查找或用户 flock 解引用。默认拒绝读取、完整 memfd 能力、
 跨进程锁隔离和共享 FD 竞争仍未完成。
+2026-10-29 madvise 参数宽度修复：复现高位非零 MADV_REMOVE 绕过映射准入检查，
+在 mremap 清除记录后仍实际清零共享可写测试文件。现于分流前按内核 int ABI 规范化
+advice；普通、bit 32 非零、高 32 位全一均执行同一检查。五种模式共 15 组真实用例
+核对原生清零与保护模式 EACCES/宿主内容和时间戳不变，并检查 NORMAL/负 advice。
+新增用例、既有权限测试、完整 FD 回归和默认 `make check` 均通过。
+这是已证实的映射检查旁路修复，不是已证实的只读挂载逃逸；原有映射生命周期和
+动态代码边界限制仍在。ABI 布局、慢路径清单及普通 IO 成本均不变。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

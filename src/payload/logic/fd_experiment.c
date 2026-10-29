@@ -464,6 +464,9 @@ long fd_experiment_dispatch(long n,long a[6])
         if(a[1]==5)return r->origin.access;
         return -EINVAL;
     }
+    /* advice is an int in the kernel ABI. Normalize before deciding whether
+     * MADV_REMOVE needs mapping authorization; high bits cannot hide a punch. */
+    if(n==__NR_madvise)a[2]=(int)a[2];
     if(g_payload_config.guard_path_mutations==2 &&
        (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
         n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE)))

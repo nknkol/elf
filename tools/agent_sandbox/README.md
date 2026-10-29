@@ -403,3 +403,20 @@ to turn O_RDONLY into O_RDWR, pipe capacity controls, readonly/unknown/denied
 policy, unsupported commands, unchanged protected file content/ctime, and all
 four experimental modes. Native hint setters on the current backing return
 EOPNOTSUPP; comparison is error parity, not proof of successful hint support.
+
+
+## madvise argument-width regression
+
+Experimental dispatch normalizes madvise advice to the kernel's signed 32-bit
+argument before selecting the MADV_REMOVE mapping guard. This closes a reproduced
+bypass where high register bits hid MADV_REMOVE from the guard while the kernel
+still punched a hole in a live shared mapping after mremap had cleared admissions.
+The regression uses a private writable fixture; it does not claim a demonstrated
+readonly-mount escape. No extra path lookup, syscall or ABI layout is introduced.
+
+`test/fs_policy/madvise_abi.py` tests low bits, bit 32 set, and all high 32 bits
+set, in native, unguarded, observation, path-only and file-mutation modes. It
+verifies actual file zeroing in native/compatibility modes and EACCES with
+unchanged bytes/size/mtime/ctime in protected mode. MADV_NORMAL and invalid
+negative advice retain their native behavior. Other mapping/admission and
+executable-code limitations remain as documented above.

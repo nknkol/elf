@@ -476,3 +476,24 @@ BENEATH。FD 实验允许经过原有严格 O_PATH|O_NOFOLLOW flags 校验的 re
 读取内容及链接元数据。硬链接 fixture 在本机 workspace 原生 EPERM、cache EACCES，
 该项明确 SKIP，不假报通过；支持硬链接的宿主才执行其归档校验。当前 Alpine 缺 xz，
 Ubuntu 缺 xz/bzip2；相关压缩命令的“程序不存在”与本次路径语义缺陷独立。
+
+
+### 2026-10-29：按内核参数宽度检查，不按寄存器宽度猜语义
+
+AArch64 syscall 参数寄存器是 64 位，但内核参数不全是 64 位。已发现两处具体问题：
+
+- fcntl 的 cmd 是 unsigned int；高位非零的 DUPFD/SETFD 仍会在内核执行，完整 long
+  比较却可能漏掉 FD 复制或 CLOEXEC 记账。实验版已在授权及事件分类前转为 unsigned int。
+- madvise 的 advice 是 int；完整 long 比较 MADV_REMOVE 会漏掉高位非零的同一操作。
+  原生三组 advice（普通、bit 32 非零、高 32 位全一）均能清零私有测试文件的共享页。
+  旧受保护模式在成功 mremap 清除准入记录后，仅普通 advice 返回 EACCES；高位变体
+  仍进入内核并实际清零文件。修复在映射分流前转为 int，使三种形式均执行同一检查。
+
+`test/fs_policy/madvise_abi.py` 用真实共享可写映射和宿主文件内容核对该旁路：五种模式
+各测三种 advice；受保护模式检查字节、大小、mtime、ctime 不变，其他模式与原生清零
+行为一致。另测 MADV_NORMAL 与负 advice 的原生语义。此复现证明映射准入检查可绕过，
+不等于已经演示了只读挂载逃逸或解决了全部映射/动态代码问题。
+
+规则：在选择权限分支和记录内核效果之前，先按每个参数实际 ABI 规范化；后续处理
+使用同一份解释。不能全局截断所有参数——指针、offset、size 和部分 flags 仍为 64 位。
+回归需使用原始 SVC 构造 libc 原型不会生成的高位值，并核对真实副作用，而非只看返回码。
