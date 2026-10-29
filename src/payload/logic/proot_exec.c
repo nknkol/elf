@@ -232,6 +232,17 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = target;
     s->argv[pos++] = "--exec-path";
     s->argv[pos++] = s->guest;
+    /* The kernel's exe for a script is its interpreter. */
+    s->argv[pos++] = CONFIG_CHILD_EXEC_EXE;
+    s->argv[pos++] = script ? s->interpreter_guest : s->guest;
+    /* Kernel comm: basename of the path as passed (symlink name included). */
+    const char *name = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/' && p[1]) name = p + 1;
+    if (*name && *name != '/') {
+        s->argv[pos++] = CONFIG_CHILD_EXEC_NAME;
+        s->argv[pos++] = (char *)name;
+    }
 #ifdef FD_EXPERIMENT
     if (dynamic) {
         s->argv[pos++] = CONFIG_CHILD_EXEC_INTERP;

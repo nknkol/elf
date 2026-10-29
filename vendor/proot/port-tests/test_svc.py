@@ -88,7 +88,8 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     check('non-directory intermediate','/plain/file',expected=-errno.ENOTDIR)
     check('trailing slash','/plain/',expected=-errno.ENOTDIR)
     check('symlink loop','/loop1',expected=-errno.ELOOP)
-    check('unsupported proc link fails explicitly','/proc/link',expected=-errno.EOPNOTSUPP)
+    # PRoot readlink_proc: a non-special name under /proc resolves like any link.
+    check('ordinary link under /proc resolves like PRoot','/proc/link',data='ROOT')
     def metadata(name,op,path,value=0,expected=()):
         cmd=prefix[:-1]+['./meta',op,path,str(value)]
         p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)
@@ -115,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     metadata('readlink zero capacity','r','/absolute',0,expected=['RET=-22'])
     metadata('readlink regular file','r','/plain',255,expected=['RET=-22'])
     metadata('readlink via empty pathname FD','q','/absolute',255,expected=['RET=10','LINK=/real/file','AFTER=90'])
-    metadata('readlink proc explicitly unsupported','r','/proc/link',255,expected=['RET=-95'])
+    metadata('readlink ordinary link under /proc','r','/proc/link',255,expected=['RET=10','LINK=/real/file'])
     metadata('getcwd root includes NUL in result','g','/',255,expected=['RET=2','CWD=/','TERMINATOR=0'])
     metadata('chdir updates relative open and cwd','c','/real',255,expected=['CHDIR=0','RET=6','CWD=/real','OPEN=0','DATA=ROOT'])
     metadata('chdir bound directory','c','/mnt',255,expected=['CHDIR=0','RET=5','CWD=/mnt','DATA=BOUND'])

@@ -1364,6 +1364,8 @@ typedef struct child_loader_proto {
 	int exec_dirfd;
 	int exec_flags;
 	const char *exec_interp;
+	const char *exec_exe;
+	const char *exec_name;
 } child_loader_proto_t;
 
 static const char *find_config_path_arg(int argc, char **argv)
@@ -1403,7 +1405,11 @@ static const char *find_config_path_arg(int argc, char **argv)
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_FLAGS,
 			      z_strlen(CONFIG_CHILD_EXEC_FLAGS) + 1) == 0 ||
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_INTERP,
-			      z_strlen(CONFIG_CHILD_EXEC_INTERP) + 1) == 0) {
+			      z_strlen(CONFIG_CHILD_EXEC_INTERP) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_EXE,
+			      z_strlen(CONFIG_CHILD_EXEC_EXE) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_NAME,
+			      z_strlen(CONFIG_CHILD_EXEC_NAME) + 1) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			i++;
@@ -1431,6 +1437,8 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		child_proto->exec_dirfd = AT_FDCWD;
 		child_proto->exec_flags = 0;
 		child_proto->exec_interp = NULL;
+		child_proto->exec_exe = NULL;
+		child_proto->exec_name = NULL;
 	}
 
 	for (int i = 1; i < argc; i++) {
@@ -1561,6 +1569,26 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 				z_errx(1, "missing value for %s", arg);
 			if (child_proto)
 				child_proto->exec_flags = z_atoi(argv[i + 1]);
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_NAME,
+			      z_strlen(CONFIG_CHILD_EXEC_NAME) + 1) == 0) {
+			if (i + 1 >= argc || !argv[i + 1][0])
+				z_errx(1, "invalid value for %s", arg);
+			if (child_proto)
+				child_proto->exec_name = argv[i + 1];
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_EXE,
+			      z_strlen(CONFIG_CHILD_EXEC_EXE) + 1) == 0) {
+			if (i + 1 >= argc || argv[i + 1][0] != '/')
+				z_errx(1, "invalid value for %s", arg);
+			if (child_proto)
+				child_proto->exec_exe = argv[i + 1];
 			i++;
 			continue;
 		}
@@ -2250,6 +2278,31 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		const char *default_target = (argi < argc) ? argv[argi] : NULL;
 		file = child_exec_target ? child_exec_target : default_target;
 	}
+#ifdef PROOT_PATH
+	/* /proc/<pid>/exe in guest terms. The exec chain names it; an initial
+	 * target is a host path relative to the root (or the guest path itself
+	 * without one). Loader-side shebang targets keep their interpreter name. */
+	if (child_proto.exec_exe) {
+		copy_cstr(bootstrap_cfg.exec_exe, CONFIG_MAX_PATH, child_proto.exec_exe);
+	} else if (child_exec_path) {
+		copy_cstr(bootstrap_cfg.exec_exe, CONFIG_MAX_PATH, child_exec_path);
+	} else if (file && !shell_mode && !bootstrap_cfg.use_init) {
+		const char *name = file;
+		while (name[0] == '.' && name[1] == '/') {
+			name += 2;
+			while (*name == '/') name++;
+		}
+		if (name[0] == '/') {
+			copy_cstr(bootstrap_cfg.exec_exe, CONFIG_MAX_PATH, name);
+		} else if (bootstrap_cfg.root[0]) {
+			bootstrap_cfg.exec_exe[0] = '/';
+			copy_cstr(bootstrap_cfg.exec_exe + 1, CONFIG_MAX_PATH - 1, name);
+		} else if (z_getcwd(bootstrap_cfg.exec_exe, CONFIG_MAX_PATH)) {
+			join_paths(bootstrap_cfg.exec_exe, CONFIG_MAX_PATH, bootstrap_cfg.exec_exe,
+				   z_strlen(bootstrap_cfg.exec_exe), name);
+		}
+	}
+#endif
 	if (bootstrap_cfg.root[0] && file && file[0] == '/' && !child_loader && !shell_mode)
 		z_errx(1, "absolute path not allowed when PROOT_ROOT is set; use path relative to root");
 	char **target_argv = NULL;
@@ -2575,6 +2628,16 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	if (install_guest_debugger() < 0)
 		z_printf("[Debugger] SIGSEGV debugger setup failed, continuing without it\n");
 
+#ifdef PROOT_PATH
+	/* /proc/<pid>/{comm,stat,status} name the guest program, not the loader
+	 * (the kernel derives comm from the exec'd loader file). */
+	if (child_proto.exec_name || bootstrap_cfg.exec_exe[0]) {
+		const char *base = child_proto.exec_name ? child_proto.exec_name : bootstrap_cfg.exec_exe;
+		for (const char *p = base; *p; p++)
+			if (*p == '/' && p[1]) base = p + 1;
+		z_prctl(15 /* PR_SET_NAME */, (unsigned long)base, 0);
+	}
+#endif
 	z_trampo((void (*)(void))(elf_interp ?
 			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);
 	z_exit(0);

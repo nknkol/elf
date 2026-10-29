@@ -43,6 +43,10 @@
 #define CONFIG_CHILD_EXEC_FLAGS "--exec-flags"
 /* Payload-resolved host path of the target PT_INTERP (file access mode). */
 #define CONFIG_CHILD_EXEC_INTERP "--exec-interp"
+/* Guest path of the executed binary (/proc/self/exe). */
+#define CONFIG_CHILD_EXEC_EXE "--exec-exe"
+/* Basename of the path as passed to execve, for the kernel comm. */
+#define CONFIG_CHILD_EXEC_NAME "--exec-name"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -87,6 +91,9 @@ typedef struct payload_config {
     char vfs_lower[CONFIG_MAX_PATH];
     char vfs_upper[CONFIG_MAX_PATH];
 #ifdef PROOT_PATH
+    /* Guest path of the running executable (interpreter for scripts), for
+     * /proc/<pid>/exe. The kernel link names the loader instead. */
+    char exec_exe[CONFIG_MAX_PATH];
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
