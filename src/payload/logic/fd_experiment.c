@@ -6,6 +6,7 @@
 #include <asm/termbits.h>
 #include <asm/stat.h>
 #include <linux/sched.h>
+#include <linux/fs.h>
 #include <sys/mman.h>
 #include <elf.h>
 #include "vm_write_guard.h"
@@ -298,6 +299,49 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
 }
+/* ioctl numbers do not describe their effects (nor all affected FDs).
+ * Keep a small explicit command/type set in file-mutation mode. Never infer
+ * safety from _IOC_READ/_IOC_WRITE: those bits describe argument copying. */
+static int check_ioctl(struct fd_table *t, long a[6])
+{
+    if(g_payload_config.guard_path_mutations!=2)return 0;
+    unsigned request=(unsigned)a[1];
+    switch(request) {
+    case FIOCLEX: case FIONCLEX: case FIONBIO:
+        return 0; /* Generic descriptor/status controls; CLOEXEC tracked below. */
+    case TIOCGPTPEER:
+        return -ENOSYS; /* Existing unsupported FD-creation contract. */
+    case FS_IOC_SETFLAGS: case FS_IOC_SETVERSION: case FS_IOC_FSSETXATTR: {
+        const struct fd_record *r=fd_table_get(t,(int)a[0]);
+        int rc=mount_decision(r?r->origin.mount_id:0,
+                             r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
+        if(rc)return rc;
+        break;
+    }
+    case FS_IOC_GETFLAGS: case FS_IOC_GETVERSION: case FS_IOC_FSGETXATTR:
+    case FIONREAD: case TCGETS: case TIOCGWINSZ: case TIOCGPGRP:
+        break;
+    default:
+        /* Includes clone/dedupe's embedded descriptors, terminal injection,
+         * device-specific mutations and unknown/new command numbers. */
+        return -EOPNOTSUPP;
+    }
+    struct stat st;
+    long rc=raw_syscall(__NR_fstat,a[0],(long)&st,0,0,0,0);
+    if(rc<0)return rc;
+    unsigned type=st.st_mode&0170000;
+    if(request==FIONREAD) {
+        if(type==0100000 || type==0010000 || type==0140000)return 0;
+    } else if(request!=TCGETS && request!=TIOCGWINSZ && request!=TIOCGPGRP) {
+        return type==0100000 || type==0040000 ? 0 : -EOPNOTSUPP;
+    }
+    /* Require a character FD with a successful native terminal query. */
+    if(type!=0020000)return -EOPNOTSUPP;
+    struct termios term;
+    rc=raw_syscall(__NR_ioctl,a[0],TCGETS,(long)&term,0,0,0);
+    return rc<0 ? (int)rc : 0;
+}
+
 static int mapping_range(long address, long length, uintptr_t *end)
 {
     size_t page=0;
@@ -393,6 +437,7 @@ long fd_experiment_dispatch(long n,long a[6])
         n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE)))
         return guarded_mapping(s,t,n,a);
     rc=check_fd_mutation(t,s,n,a);if(rc<0)return rc;
+    if(n==__NR_ioctl) { rc=check_ioctl(t,a);if(rc<0)return rc; }
     if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
         struct proot_open_origin anchor=s->cwd,next={0,false};
         if(n==__NR_fchdir) {

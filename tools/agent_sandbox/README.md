@@ -328,3 +328,35 @@ mounts, cwd provenance, create/replace/remove and size queries/short buffers.
 Read visibility is still not default-deny. ACL/security attribute semantics are
 left to the host, newer xattrat interfaces are not added, and pathname races
 remain outside this increment's guarantee.
+
+
+## Bounded ioctl support in file-mutation mode
+
+`--guard-file-mutations` now rejects unclassified ioctl commands with
+EOPNOTSUPP. Neither the command's `_IOC_READ` nor `_IOC_WRITE` encoding is an
+access-policy declaration: it describes argument copying, not effects.
+
+| Requests | Admission |
+| --- | --- |
+| FIOCLEX/FIONCLEX/FIONBIO | Generic FD/status controls; existing CLOEXEC tracking remains active |
+| FS_IOC_GETFLAGS/GETVERSION/FSGETXATTR | Regular file or directory, native result |
+| FS_IOC_SETFLAGS/SETVERSION/FSSETXATTR | Known writable mount, then regular-file/directory type check; native permissions still apply |
+| FIONREAD | Regular file, FIFO/pipe, socket, or character FD with successful TCGETS |
+| TCGETS/TIOCGWINSZ/TIOCGPGRP | Character FD with successful native TCGETS |
+| TIOCGPTPEER | Existing ENOSYS contract: unsupported FD creation |
+| All others, including FICLONE/FICLONERANGE/FIDEDUPERANGE, TIOCSTI and TCSETS | EOPNOTSUPP; embedded-FD and terminal/device mutation semantics are not implemented |
+
+Known filesystem setters return EROFS for readonly sources and EACCES for
+unknown/denied sources before reading their argument. Pipe/stdio output grants
+do not grant filesystem setter rights. Queries still do not enforce default-deny
+read visibility. Type probing adds fstat (and TCGETS for terminal queries) only
+to the admitted ioctl path, not ordinary read/write. The existing supported-task
+and FD race limitations remain; this is not a complete device security model.
+
+Observation, path-only and unguarded modes retain their prior ioctl behavior.
+`test/fs_policy/ioctls.py` checks an isolated native baseline, real reversible
+NODUMP changes on private files, protected-file ctime/content, dup/replacement,
+pipe controls, CLOEXEC, unknown/read-encoded commands, clone/dedupe rejection,
+and real PTY queries/injection rejection. It requires PTY support for its terminal
+case. Full interactive-terminal settings and broader device compatibility are
+not claimed by this limited query support.

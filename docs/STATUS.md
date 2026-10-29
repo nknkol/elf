@@ -73,6 +73,14 @@ PRoot 解析；l* 不跟随最终 symlink，其余遵循最终目标。路径/�
 ABI 布局不变（实验 10，普通 3）。
 这只补齐扩展属性的路径映射与修改入口，读取仍未默认拒绝，ACL/安全属性由宿主裁决，
 未解决路径竞争或新式 xattrat ABI，不代表完整规范 FILE-09 已通过。
+2026-10-29 ioctl 增量：文件修改模式改为按命令和对象类型准入；普通 FD 控制保留，
+GETFLAGS/GETVERSION/FSGETXATTR 仅用于文件/目录，三种对应 setter 先检查挂载写权限。
+FIONREAD 限文件/pipe/socket/经 TCGETS 验证的终端，有限终端查询限已验证字符设备。
+未知命令、clone/dedupe、终端注入和设置均返回 EOPNOTSUPP；TIOCGPTPEER 仍 ENOSYS。
+真实原生对照包含可写文件 NODUMP 修改/恢复、只读/deny/未知来源拒绝、dup 与编号替换、
+pipe/CLOEXEC 及 PTY 查询；既有权限测试、完整 FD 回归与默认 `make check` 均通过。
+观察/路径保护/无策略模式保持原行为；ABI 布局未变。
+这仍不包含默认拒绝读取、完整终端设置、fcntl 命令审计或通用设备模型。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**
