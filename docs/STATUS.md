@@ -176,6 +176,14 @@ launch.py 默认启用。HarmonyOS 真机 local_output 用例覆盖开启/关闭
 socket 与 pipe 契约。HarmonyOS 上经 launch.py 运行 harmonybrew python3（暴露 brew、/system、/lib、
 /etc）成功读写工作区且根目录只见暴露项；libc 的 hilog socket 不在视图内，连接被拒并在 stderr 输出
 告警，需要在 profile 中显式暴露，而 8 个挂载上限已用满。
+2026-10-30 挂载上限与 HarmonyOS profile 增量：CONFIG_MAX_BINDS 由 8 提高到 16（默认 ABI 4，实验 ABI 13），
+exec 链参数容量按挂载数计算，launch.py 上限同步。新增 `profiles/harmonyos-agent.json`：brew 前缀、
+/system、/lib（/system/lib）、/etc 只读，工作区与 /dev/null 可写，并单独暴露 hilog 输入 socket，
+消除 libc 的 HiLogBase 连接告警；私有 home/tmp/cache。规划器对路径规范但 resolve 得到 EACCES 的
+显式来源（该 socket 及其目录对用户不可 stat 但可连接）保留原拼写并标记 `unresolved`，只做词法重叠
+检查。HarmonyOS 真机新增 agent_brew 用例：harmonybrew python3 经 subprocess 运行 git init/add/commit/log，
+cwd/HOME、根与 /dev 列表、宿主项目目录不可见、/system 写入 EROFS 均核对。容器模式 getuid 报告 0 而
+stat 返回真实属主，git 的所有权检查需 `safe.directory`；这是既有 uid 模拟的语义差异。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。

@@ -36,7 +36,7 @@ class LaunchTests(unittest.TestCase):
         self.assertIn('--allow-local-output', argv)
 
     def test_limits(self):
-        many = dict(self.compiled, mounts=self.compiled['mounts'] * 2)
+        many = dict(self.compiled, mounts=self.compiled['mounts'] * 4)
         with self.assertRaises(launch.ProfileError):
             launch.command_line(many, self.state/'root', Path('/l'), '/', ['/bin/sh'], [])
         with self.assertRaises(launch.ProfileError):

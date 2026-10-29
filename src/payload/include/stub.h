@@ -2,9 +2,9 @@
 #define STUB_H
 
 #if defined(PROOT_PATH) && defined(FD_EXPERIMENT)
-#define PAYLOAD_ABI_VERSION 12
+#define PAYLOAD_ABI_VERSION 13
 #elif defined(PROOT_PATH)
-#define PAYLOAD_ABI_VERSION 3
+#define PAYLOAD_ABI_VERSION 4
 #else
 #define PAYLOAD_ABI_VERSION 2
 #endif

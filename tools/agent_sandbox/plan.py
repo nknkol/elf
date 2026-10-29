@@ -76,25 +76,34 @@ def compile_profile(profile, *, brew_prefix, workspace, state):
     state = str(Path(absolute(state)).resolve())
     mounts = []
     destinations = set()
-    def add(source, target, access, kind):
+    def add(source, target, access, kind, **extra):
         if target == '/' or target in destinations:
             raise ProfileError('Root exposure and duplicate destinations are disallowed in agent profiles')
         destinations.add(target)
-        mounts.append(dict(source=source, target=target, access=access, kind=kind))
+        mounts.append(dict(source=source, target=target, access=access, kind=kind, **extra))
     for mount in profile['mounts']:
         fields(mount, {'source', 'target', 'access'}, {'source', 'access'})
         source = expand(mount['source'], variables)
         target = expand(mount.get('target', mount['source']), variables)
         if mount['access'] not in ('ro', 'rw'):
             raise ProfileError('Mount access must be ro or rw')
+        extra = {}
         try:
             host = str(Path(source).resolve(strict=True))
+        except PermissionError:
+            # Platform endpoints such as HarmonyOS /dev/unix/socket/hilogInput
+            # can be connectable yet not stat-able. Keep the explicit canonical
+            # spelling; nothing is inferred about links inside it.
+            host = source
+            extra['unresolved'] = True
         except (OSError, RuntimeError) as exc:
             raise ProfileError(f'Cannot resolve source: {source}') from exc
         # Keep the source spelling as guest destination, important for brew symlinks.
-        if host_contains(host, state) or host_contains(state, host):
+        overlaps = (contains(host, state) or contains(state, host)) if extra else (
+            host_contains(host, state) or host_contains(state, host))
+        if overlaps:
             raise ProfileError('Private state must be separate from all exposed host trees')
-        add(host, target, mount['access'], 'bind')
+        add(host, target, mount['access'], 'bind', **extra)
     for private in profile['private']:
         fields(private, {'name', 'target'}, {'name', 'target'})
         name = private['name']

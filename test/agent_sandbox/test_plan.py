@@ -110,5 +110,25 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(plan.access_for(p, '/workspace/tools-other'), 'rw')
 
 
+class UnresolvedSourceTests(unittest.TestCase):
+    def test_unstatable_explicit_source_keeps_spelling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'workspace').mkdir()
+            profile = {'version': 1, 'default': 'deny', 'private': [], 'mounts': [
+                {'source': '/opaque/socket', 'access': 'ro'}]}
+            original = plan.Path.resolve
+
+            def resolve(path, strict=False):
+                if str(path).startswith('/opaque'):
+                    raise PermissionError(13, 'Permission denied')
+                return original(path, strict=strict)
+            with mock.patch.object(plan.Path, 'resolve', resolve):
+                p = plan.compile_profile(profile, brew_prefix=str(root), workspace=str(root/'workspace'),
+                                         state=str(root/'state'))
+            self.assertEqual(p['mounts'], [dict(source='/opaque/socket', target='/opaque/socket',
+                                                access='ro', kind='bind', unresolved=True)])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -23,7 +23,7 @@
 #ifdef PROOT_PATH
 #define CONFIG_AUXV_PAIRS 64
 #endif
-#define CONFIG_MAX_BINDS    8
+#define CONFIG_MAX_BINDS    16
 #define CONFIG_MAX_ENVS     16
 #define CONFIG_MAX_OVERLAYS 8
 #define CONFIG_DEFAULT_LOADER_DST "/data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/elfloader"

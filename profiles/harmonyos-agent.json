@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "default": "deny",
+  "mounts": [
+    {"source": "${BREW_PREFIX}", "access": "ro"},
+    {"source": "/system", "access": "ro"},
+    {"source": "/system/lib", "target": "/lib", "access": "ro"},
+    {"source": "/etc", "access": "ro"},
+    {"source": "${WORKSPACE}", "target": "/workspace", "access": "rw"},
+    {"source": "/dev/null", "access": "rw"},
+    {"source": "/dev/unix/socket/hilogInput", "access": "ro"}
+  ],
+  "private": [
+    {"name": "home", "target": "/home/agent"},
+    {"name": "tmp", "target": "/tmp"},
+    {"name": "cache", "target": "/home/agent/.cache"}
+  ]
+}

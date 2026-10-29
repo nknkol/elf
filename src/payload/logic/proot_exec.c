@@ -16,7 +16,7 @@
 #endif
 
 #define EXEC_ARGS 128
-#define CHAIN_ARGS (EXEC_ARGS + 48)
+#define CHAIN_ARGS (EXEC_ARGS + 32 + CONFIG_MAX_BINDS * 2)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
 #define S_IFLNK 0120000

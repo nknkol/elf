@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         p = run(['--observe-mount-access', 'drw'] if enabled else [])
         assert p.returncode == 0 and 'PASS: policy observation' in p.stdout, (p.returncode, p.stdout, p.stderr)
         print('PASS: real exec transport, observation enabled =', enabled)
-    for options in (['--observe-mount-access', v] for v in ('', 'dr', 'drww', 'drx', 'w'*10)):
+    for options in (['--observe-mount-access', v] for v in ('', 'dr', 'drww', 'drx', 'w'*18)):
         p = run(options)
         assert p.returncode != 0 and 'mount access observation' in p.stdout+p.stderr, (options, p.stdout, p.stderr)
     p = run(['--observe-mount-access', 'drw', '--observe-mount-access', 'drw'])
@@ -50,8 +50,8 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         if kind == 1 and addr <= entry and entry+16 <= addr+size:
             offset = off+entry-addr
             break
-    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 12
-    for version in (11, 10, 9, 8, 7, 6, 5, 4, 3, 2):
+    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 13
+    for version in (12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2):
         old = bytearray(blob)
         struct.pack_into('<I', old, offset+12, version)
         payload = root / f'old-{version}.bin'
@@ -61,4 +61,4 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         p = subprocess.run([str(loader), '-c', str(config), '--mode', 'compat',
                             '--', str(root / 'probe')], capture_output=True, text=True, timeout=20)
         assert p.returncode != 0 and 'payload ABI mismatch' in p.stdout+p.stderr, (p.stdout, p.stderr)
-    print('PASS: experimental ABI 12 rejects older payload layouts')
+    print('PASS: experimental ABI 13 rejects older payload layouts')

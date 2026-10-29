@@ -77,8 +77,16 @@ LANG, TMPDIR/XDG_CACHE_HOME for private tmp/cache, the host TERM, and explicit
 `--env KEY=VALUE`; no other host variable is passed. `--print` shows the
 launch as JSON without creating state.
 
-Backend limits are checked before launch: at most 8 mounts (private ones
+Backend limits are checked before launch: at most 16 mounts (private ones
 included), 16 environment entries, 255-byte paths/entries, no ":" in paths.
+`profiles/harmonyos-agent.json` is a verified HarmonyOS profile: brew prefix,
+/system, /lib (from /system/lib) and /etc readonly, workspace and /dev/null
+writable, and the hilog input socket so libc logging does not fail. A source
+whose canonical spelling cannot be resolved because of EACCES (that socket and
+its directory are connectable but not stat-able) keeps its explicit spelling,
+is marked `unresolved` in the plan and only gets lexical overlap checks.
+Container mode reports uid 0 while stat shows real owners; git therefore needs
+`-c safe.directory=/workspace` (command-line configuration is trusted).
 The command needs an absolute guest path. Profiles must expose the platform
 programs, libraries and the dynamic linker's guest path (on merged-usr systems
 `/lib` is a symlink to expose explicitly). This is the experimental file access

@@ -27,7 +27,7 @@ plan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plan)
 ProfileError = plan.ProfileError
 
-MAX_BINDS = 8   # CONFIG_MAX_BINDS in src/payload/include/config.h
+MAX_BINDS = 16  # CONFIG_MAX_BINDS in src/payload/include/config.h
 MAX_ENVS = 16   # CONFIG_MAX_ENVS
 MAX_VALUE = 255  # CONFIG_MAX_PATH including NUL
 MARKER = '.elf-skeleton'

@@ -88,14 +88,17 @@ with tempfile.TemporaryDirectory(prefix='agent-launch-', dir=build) as tmp:
     print('PASS: persistent private state and guest exec errors')
 
     many = dict(json.loads(profile.read_text()))
-    many['mounts'] = many['mounts'] + [{'source': str(alpine / 'sbin'), 'target': '/sbin',
-                                        'access': 'ro'}]
+    # 8 mounts used; nine more exceed the 16-mount backend limit.
+    for index in range(9):
+        (base / f'extra{index}').mkdir()
+        many['mounts'].append({'source': str(base / f'extra{index}'), 'target': f'/x{index}',
+                               'access': 'ro'})
     crowded = base / 'many.json'
     crowded.write_text(json.dumps(many))
     foreign = base / 'foreign-state'
     (foreign / 'root').mkdir(parents=True)
     for args, marker in (
-            ([str(crowded), *common[1:], '--', '/bin/true'], 'at most 8 mounts'),
+            ([str(crowded), *common[1:], '--', '/bin/true'], 'at most 16 mounts'),
             ([*common, '--', 'bin/true'], 'absolute guest path'),
             ([*common[:-1], str(foreign), '--', '/bin/true'], 'not created by this launcher'),
             ([*common[:-1], str(workspace / 'state'), '--', '/bin/true'], 'Private state'),

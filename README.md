@@ -27,7 +27,7 @@ make check
 Clang、ld.lld、llvm-objcopy、llvm-ar、llvm-nm 及本地 Linux ABI 头文件；构建会使用
 `/bin/sh`。未验证其他架构，也不自动安装依赖。
 
-当前 PRoot payload ABI 为 3，自定义 payload 必须与 loader 匹配，否则启动时拒绝。
+当前 PRoot payload ABI 为 4（FD 实验版为 13），自定义 payload 必须与 loader 匹配，否则启动时拒绝。
 构建入口强制重编译 loader/payload，通过临时文件替换可执行文件，生成：
 
 - `vendor/proot/svc/build/elfloader-proot`：运行工具。
