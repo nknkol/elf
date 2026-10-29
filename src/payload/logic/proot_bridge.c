@@ -45,6 +45,7 @@ typedef struct {
     BindingTable table;
     bool mutation;
     bool traverse; /* Final ancestor-only paths are acceptable for this call. */
+    bool follow_final; /* Resolution dereferences a final symlink. */
 #ifdef FD_EXPERIMENT
     bool reads; /* Immutable read policy snapshot below is active. */
     enum fs_access access[CONFIG_MAX_BINDS + 1];
@@ -131,6 +132,19 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
     int rc = host_map(opaque, guest, host);
     if (rc < 0)
         return rc;
+    Bridge *b = opaque;
+    /* Each host lstat walks the whole host path, which dominates path calls.
+     * Skip it where the answer cannot change resolution: a non-followed final
+     * name (an existing link stays a link; a missing one is fine), and the
+     * root or a bind mount point, whose configured host path the kernel
+     * follows itself rather than PRoot reinterpreting it as a guest link. */
+    if (finality == FINAL_NORMAL && !b->follow_final)
+        return 0;
+    if (!strcmp(guest, "/"))
+        return 0;
+    for (size_t i = 0; i < b->table.count; i++)
+        if (!strcmp(guest, b->table.entries[i].guest))
+            return 0;
     struct stat st;
     long ret = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)host, (long)&st,
                           AT_SYMLINK_NOFOLLOW, 0, 0);
@@ -280,6 +294,7 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
     ops.detranslate = ordinary_link;
     ops.proc_link = proc_link;
     PathResolver resolver = {{b, &ops}, b->cwd, host_fd, host_map};
+    b->follow_final = follow;
     int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
 #ifdef FD_EXPERIMENT
     if (rc >= 0 && b->reads) {
@@ -700,6 +715,47 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     return ret;
 }
 
+/* A few per-process bridges avoid mmap/munmap and page faults on every path
+ * call. Slots are claimed atomically, so threads share them safely; every
+ * bridge is released before any call that does not return (exec runs from
+ * its own scratch). An experimental vfork child keeps its reserved scratch. */
+#define BRIDGE_POOL 4
+static Bridge *bridge_pool[BRIDGE_POOL];
+static int bridge_used[BRIDGE_POOL];
+static long bridge_acquire(void)
+{
+#ifdef FD_EXPERIMENT
+    if (!fd_experiment_shared_scratch()) return proot_scratch_alloc(sizeof(Bridge));
+#endif
+    for (int i = 0; i < BRIDGE_POOL; i++) {
+        int free_slot = 0;
+        if (!__atomic_compare_exchange_n(&bridge_used[i], &free_slot, 1, 0,
+                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            continue;
+        Bridge *b = __atomic_load_n(&bridge_pool[i], __ATOMIC_ACQUIRE);
+        if (!b) {
+            long mem = proot_scratch_alloc(sizeof(Bridge));
+            if ((unsigned long)mem >= (unsigned long)-4095) {
+                __atomic_store_n(&bridge_used[i], 0, __ATOMIC_RELEASE);
+                return mem;
+            }
+            b = (void *)mem;
+            __atomic_store_n(&bridge_pool[i], b, __ATOMIC_RELEASE);
+        }
+        return (long)b;
+    }
+    return proot_scratch_alloc(sizeof(Bridge));
+}
+static void bridge_release(Bridge *b)
+{
+    for (int i = 0; i < BRIDGE_POOL; i++)
+        if (__atomic_load_n(&bridge_pool[i], __ATOMIC_ACQUIRE) == b) {
+            __atomic_store_n(&bridge_used[i], 0, __ATOMIC_RELEASE);
+            return;
+        }
+    proot_scratch_free(b, sizeof(Bridge));
+}
+
 static long bridge_create(Bridge **out)
 {
     payload_config_t *cfg = &g_payload_config;
@@ -707,11 +763,12 @@ static long bridge_create(Bridge **out)
         return -EOPNOTSUPP;
     if (cfg->bind_count < 0 || cfg->bind_count > CONFIG_MAX_BINDS)
         return -EINVAL;
-    long mem = proot_scratch_alloc(sizeof(Bridge));
+    long mem = bridge_acquire();
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     Bridge *b = (void *)mem;
     b->context = NULL;
+    b->follow_final = true;
     b->mutation = false;
     b->traverse = false;
     b->anchor_fd = AT_FDCWD;
@@ -739,7 +796,7 @@ static long bridge_create(Bridge **out)
     }
 #endif
     if (ret < 0) {
-        proot_scratch_free((void *)mem,sizeof(Bridge));
+        bridge_release(b);
         return ret;
     }
     *out = b;
@@ -778,7 +835,7 @@ int proot_revalidate_cwd(struct proot_open_origin *origin)
         ret=unique_mount(b,b->first_host,&selected);
         if(!ret)*origin=(struct proot_open_origin){selected,true};
     }
-    proot_scratch_free(b,sizeof(Bridge));return (int)ret;
+    bridge_release(b);return (int)ret;
 }
 
 int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
@@ -819,7 +876,7 @@ int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
     }
     *origin=(struct proot_open_origin){selected,true};ret=0;
  done:
-    proot_scratch_free(b,sizeof(Bridge));return ret;
+    bridge_release(b);return ret;
 }
 
 #ifdef FD_EXPERIMENT
@@ -899,7 +956,7 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
         if (kept) { ret = (long)kept; goto done; }
     }
 done:
-    proot_scratch_free(b, sizeof(Bridge));
+    bridge_release(b);
     return ret;
 }
 #endif
@@ -918,7 +975,7 @@ static long bridge_syscall(long number, long args[6], const struct proot_open_or
         b->anchor_fd = (number == SYS_chdir || number == SYS_getcwd) ? AT_FDCWD : (int)args[0];
     }
     ret = dispatch(b, number, args, origin);
-    proot_scratch_free(b,sizeof(Bridge));
+    bridge_release(b);
     return ret;
 }
 
@@ -952,7 +1009,7 @@ long proot_context_syscall(long number, long args[6], const struct proot_path_co
     if (ret < 0) return ret;
     b->context = context;
     ret = dispatch(b, number, args, NULL);
-    proot_scratch_free(b, sizeof(Bridge));
+    bridge_release(b);
     return ret;
 }
 
@@ -976,7 +1033,7 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
             strcpy(host, b->host);
         }
     }
-    proot_scratch_free(b,sizeof(Bridge));
+    bridge_release(b);
     return (int)ret;
 }
 
@@ -1034,6 +1091,6 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
 close_anchor:
     if (dirfd == AT_FDCWD) raw_syscall(__NR_close, anchor, 0, 0, 0, 0, 0);
 out:
-    proot_scratch_free(b, sizeof(Bridge));
+    bridge_release(b);
     return ret;
 }

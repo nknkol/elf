@@ -85,6 +85,9 @@ writable, and the hilog input socket so libc logging does not fail. A source
 whose canonical spelling cannot be resolved because of EACCES (that socket and
 its directory are connectable but not stat-able) keeps its explicit spelling,
 is marked `unresolved` in the plan and only gets lexical overlap checks.
+Multithreaded programs work in the guarded modes: pthread clones share the
+FD table, cwd and mapping admissions under a metadata lock that never spans a
+blocking guest syscall; racing FD-number reuse is recorded as unknown.
 Container mode reports uid 0 while stat shows real owners; git therefore needs
 `-c safe.directory=/workspace` (command-line configuration is trusted).
 The command needs an absolute guest path. Profiles must expose the platform

@@ -12,6 +12,8 @@ int fd_experiment_check_path_mutation(size_t mount, bool known);
 /* Validated root+bind access vector; ENODATA without a configured policy. */
 int fd_experiment_mount_access(enum fs_access access[CONFIG_MAX_BINDS + 1], size_t *count);
 long fd_experiment_scratch_alloc(size_t);
+/* False in the vfork child, which must keep its reserved scratch. */
+bool fd_experiment_shared_scratch(void);
 void fd_experiment_scratch_free(void *,size_t);
 /* Query selector 6: observed policy decision for mount=a[2], operation=a[3].
  * ENODATA without observation config. Does not authorize or intercept IO. */

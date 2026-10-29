@@ -230,6 +230,7 @@ long fd_experiment_scratch_alloc(size_t size)
     }
     return -ENOMEM;
 }
+bool fd_experiment_shared_scratch(void) { return current()!=&vfork_child; }
 void fd_experiment_scratch_free(void *address,size_t size)
 {
     if(current()==&vfork_child) {

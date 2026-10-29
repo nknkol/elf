@@ -184,6 +184,27 @@ exec 链参数容量按挂载数计算，launch.py 上限同步。新增 `profil
 检查。HarmonyOS 真机新增 agent_brew 用例：harmonybrew python3 经 subprocess 运行 git init/add/commit/log，
 cwd/HOME、根与 /dev 列表、宿主项目目录不可见、/system 写入 EROFS 均核对。容器模式 getuid 报告 0 而
 stat 返回真实属主，git 的所有权检查需 `safe.directory`；这是既有 uid 模拟的语义差异。
+2026-10-30 线程增量：FD 实验版此前拒绝一切非 vfork 的共享 VM clone，所有权限保护模式（含 launch.py）
+都无法运行多线程程序。现接受 pthread 标志组合（VM|FS|FILES|SIGHAND|THREAD，可带 SYSVSEM/SETTLS/
+PARENT_SETTID/CHILD_CLEARTID/CHILD_SETTID 及 musl 的 DETACHED），同进程线程共享 FD 表、cwd 与映射
+准入。重入租约：首个任务仍用私有槽，其他线程使用每进程私有映射的 64 槽表，私有 fork 子进程清空副本。
+元数据由 futex 互斥保护，只覆盖表/cwd/映射/预留更新与非阻塞查询（fstat、TCGETS），可能阻塞的 guest
+调用（读写、accept、FIFO open、recvmsg）不持锁；mmap 系列连同准入记录在锁内完成；fork 持锁取得一致
+快照，子进程重置。close 改为锁内记录 generation、内核关闭、按 generation 撤销，结果原样返回，不再因
+租约竞争返回 EAGAIN；不确定的关闭结果撤销来源与授权。FD 号复用竞争按失败关闭处理：没有记录或其记录
+已在关闭中的号码被关闭（含 dup3 目标）时登记到 64 项环，创建期间该号码被登记则记录为未知且无授权；
+已记录且无人关闭的对象占用号码，无法被并发创建取得，其关闭不登记。创建前在锁内预留记录槽，recvmsg
+导入同样预留。HarmonyOS 真机 threads 用例：8 个 Python 线程各 150 轮 open/write/mmap 共享映射/dup/
+关闭/只读拒绝/socketpair，同时另一线程 fork+exec 子进程，连续多次通过；只读文件内容与时间戳不变。
+harmonybrew python3/git 用例与全部既有回归通过。已知限制：检查与内核使用之间，另一线程可把继承的
+未知对象 dup3 到同一号码（仅涉及启动时继承的对象）；信号处理器以 siglongjmp 离开钩子会遗留锁与租约。
+2026-10-30 性能基准增量：新增 `make bench`（test/bench，原生与默认/实验/修改保护/完整访问保护
+五种配置的中位 ns/op，见 [BENCHMARKS](BENCHMARKS.md)）。首次测量发现 payload 以 -O0 编译，保护模式的
+匿名 mmap 为原生 27.9 倍、路径 stat 为 6 倍以上。改为 -O2 后暴露 loader 从不应用 payload 的
+R_AARCH64_RELATIVE 重定位（-O0 payload 也带两个未重定位 GOT 项）；loader 现于全部段可写时应用 RELATIVE
+并拒绝其他动态重定位类型。路径调用改用每进程 4 个复用 scratch（vfork 子进程仍用预留区），并跳过不改变
+解析结果的宿主 lstat（根与 bind 挂载点、不跟随的最终名）。HarmonyOS 结果：stat 3.1 倍、open+close 2.5 倍、
+保护模式目录读取 1.5 倍、mmap 2.0 倍，FD 读写 1.4-1.8 倍；全部回归与 rootfs 验收通过。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
@@ -199,8 +220,8 @@ bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回
 | --- | --- | --- |
 | root/bind、路径翻译、动态 ELF/exec | 已接入并有回归 | 已接入并有回归 |
 | FD 元数据 | 未启用 | 常用创建/dup/关闭、CLOEXEC、SCM_RIGHTS 已接入；最多 128 条 |
-| fork/vfork/exec 的 FD 状态 | 不跟踪 FD 元数据 | 私有 fork、单层受限 vfork、exec 快照交接通过；普通线程/共享 VM 及嵌套 vfork 不支持 |
-| 同线程嵌套慢调用 | 保留重入透传 | 返回 EDEADLK；非拥有者任务拒绝 |
+| fork/vfork/exec 的 FD 状态 | 不跟踪 FD 元数据 | 私有 fork、单层受限 vfork、exec 快照交接、pthread 线程（共享 FD 表）通过；其他共享 VM 组合及嵌套 vfork 不支持 |
+| 同线程嵌套慢调用 | 保留重入透传 | 返回 EDEADLK；同进程其他线程使用每进程 64 槽租约表 |
 | openat2 | HarmonyOS 返回 ENOSYS | 24 字节 how、O_PATH\|O_NOFOLLOW 子集；resolve=0 经 PRoot，BENEATH 仅单分量及受限尾斜杠 |
 | 已确认危险 syscall | 公共 guard 返回 ENOSYS | 同一公共 guard 加实验拒绝项 |
 | 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径/FD 修改保护，`--guard-file-access` 增加默认拒绝读取与目录可见性；仍非完整隔离 |

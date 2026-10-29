@@ -4,13 +4,14 @@
 PYTHON ?= python3
 ALPINE_ARCHIVE ?=
 UBUNTU_ARCHIVE ?=
-.PHONY: help build check check-alpine check-ubuntu check-fd-runtime
+.PHONY: help build check check-alpine check-ubuntu check-fd-runtime bench
 help:
 	@echo 'make build        Build the AArch64 ELF/PRoot backend'
 	@echo 'make check        Build and run core/backend regressions'
 	@echo 'make check-fd-runtime Build and test single-task FD tracking experiment'
 	@echo 'make check-alpine ALPINE_ARCHIVE=/path/to/rootfs.tar.gz'
 	@echo 'make check-ubuntu UBUNTU_ARCHIVE=/path/to/rootfs.tar.gz'
+	@echo 'make bench        Native vs loader micro benchmarks (both backends)'
 	@echo 'Output: vendor/proot/svc/build/elfloader-proot'
 build:
 	$(PYTHON) vendor/proot/svc/build_elf.py
@@ -67,3 +68,8 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/agent_brew.py
 	$(PYTHON) test/fs_policy/threads.py
 	$(PYTHON) test/fd_runtime/run.py
+
+bench:
+	$(PYTHON) vendor/proot/svc/build_elf.py
+	$(PYTHON) vendor/proot/svc/build_elf.py --fd-experiment
+	$(PYTHON) test/bench/bench.py
