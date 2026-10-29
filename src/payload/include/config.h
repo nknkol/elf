@@ -97,6 +97,7 @@ typedef struct payload_config {
     int32_t guard_path_mutations; /* 0=observe, 1=path guard, 2=path+FD guard; not isolation. */
     int32_t guard_file_reads; /* Requires guard 2: path/FD read checks and listing visibility. */
     int32_t allow_stream_input; /* Inherited pipe/socket/verified TTY reads in read guard mode. */
+    int32_t allow_local_output; /* Writes to locally created sockets/eventfd/memfd. */
 #endif
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];

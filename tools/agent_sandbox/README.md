@@ -63,7 +63,11 @@ the launcher's marker is refused, never deleted. Private home/tmp/cache persist.
 
 Every mount becomes a loader volume with its ro/rw access, behind deny for the
 root: `--guard-file-access` plus `--allow-stdio-output`, `--allow-pipe-output`,
-`--allow-stream-input` and `--revalidate-file-fds`. The loader and the static
+`--allow-local-output`, `--allow-stream-input` and `--revalidate-file-fds`.
+`--allow-local-output` admits write/sizing/shared mapping only for sockets,
+socket pairs, accepted connections, eventfds and memfds created by the current
+program image; grants survive dup/fork, are cleared on exec and never cross a
+snapshot. Pipes keep `--allow-pipe-output`; inherited objects stay denied. The loader and the static
 exec helper must match the FD build manifest. The helper enters the guest
 working directory (`--cwd`, default the rw workspace target) and execs the
 command through the payload, so the command path, shebang and dynamic linker

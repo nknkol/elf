@@ -312,6 +312,9 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     if(fd==AT_FDCWD && (n==__NR_utimensat || n==__NR_fchownat || n==__NR_faccessat2))
         return mount_decision(s->cwd.mount_id,s->cwd.known,FS_MUTATE);
     const struct fd_record *r=fd_table_get(t,fd);
+    /* Local socket/eventfd/memfd output, including memfd sizing; never a
+     * mount object and never inherited across exec. */
+    if(r && r->local_writer)return 0;
     if((n==__NR_write || n==__NR_writev) && r && r->description &&
        (r->description==s->stdio_output[0] || r->description==s->stdio_output[1]))return 0;
     if(g_payload_config.allow_pipe_output && r && r->pipe_writer &&
@@ -477,7 +480,8 @@ static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, lo
         if(type!=MAP_PRIVATE && type!=MAP_SHARED && type!=MAP_SHARED_VALIDATE)return -EINVAL;
         if(!(a[3]&MAP_ANONYMOUS) && type!=MAP_PRIVATE) {
             const struct fd_record *r=fd_table_get(t,(int)a[4]);
-            rc=mount_decision(r?r->origin.mount_id:0,
+            /* A local memfd has no mount backing; the kernel refuses sockets. */
+            rc=r && r->local_writer ? 0 : mount_decision(r?r->origin.mount_id:0,
                              r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
             if(rc)return rc;
             /* The legacy executable-file fallback produces an anonymous copy,
@@ -696,6 +700,7 @@ long fd_experiment_dispatch(long n,long a[6])
     int stream=pair || n==__NR_memfd_create || n==__NR_eventfd2 || n==__NR_epoll_create1 ||
         n==__NR_timerfd_create || n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
         n==__NR_inotify_init1 || n==__NR_signalfd4;
+    int local_output=g_payload_config.allow_local_output && g_payload_config.guard_path_mutations==2;
     if(pair) {
         /* Read only after kernel success. This relies on the experimental
          * single-task AArch64 address space and nested slow-call exclusion;
@@ -709,6 +714,8 @@ long fd_experiment_dispatch(long n,long a[6])
             fd_table_open(t,second,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
         if(!rc)rc=fd_table_grant_stream(t,first);
         if(!rc)rc=fd_table_grant_stream(t,second);
+        if(!rc && n==__NR_socketpair && local_output)rc=fd_table_grant_local_writer(t,first);
+        if(!rc && n==__NR_socketpair && local_output)rc=fd_table_grant_local_writer(t,second);
     }
     else if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
@@ -723,6 +730,9 @@ long fd_experiment_dispatch(long n,long a[6])
             fd_table_open(t,(int)result,(struct fd_origin){opened.mount_id,
                           opened.known?FD_ACCESS_RW:FD_ACCESS_UNKNOWN},cloexec);
         if(!rc && stream)rc=fd_table_grant_stream(t,(int)result);
+        if(!rc && local_output && (n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
+                                   n==__NR_eventfd2 || n==__NR_memfd_create))
+            rc=fd_table_grant_local_writer(t,(int)result);
     }
     else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
     else rc=fd_table_dup(t,(int)a[0],(int)result,n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC);

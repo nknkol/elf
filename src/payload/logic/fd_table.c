@@ -63,6 +63,14 @@ int fd_table_grant_stream(struct fd_table *t, int fd)
     return -ENOENT;
 }
 
+int fd_table_grant_local_writer(struct fd_table *t, int fd)
+{
+    if (fd < 0) return -EINVAL;
+    for (size_t i = 0; i < t->capacity; i++)
+        if (t->slots[i].fd == fd) { t->slots[i].local_writer = 1; return 0; }
+    return -ENOENT;
+}
+
 int fd_table_import_unknown(struct fd_table *t, int fd, int cloexec)
 {
     if (cloexec != 0 && cloexec != 1) return -EINVAL;
@@ -130,7 +138,7 @@ void fd_table_exec(struct fd_table *t)
     for (size_t i = 0; i < t->capacity; i++) {
         if (t->slots[i].fd >= 0 && t->slots[i].cloexec)
             t->slots[i] = (struct fd_record){.fd = -1};
-        else t->slots[i].pipe_writer = t->slots[i].stream_reader = 0;
+        else t->slots[i].pipe_writer = t->slots[i].stream_reader = t->slots[i].local_writer = 0;
     }
 }
 

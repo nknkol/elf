@@ -63,4 +63,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/reads.py
 	$(PYTHON) test/fs_policy/agent_launch.py
 	$(PYTHON) test/fs_policy/sockets.py
+	$(PYTHON) test/fs_policy/local_output.py
 	$(PYTHON) test/fd_runtime/run.py

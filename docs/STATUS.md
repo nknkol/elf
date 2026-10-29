@@ -167,6 +167,15 @@ PASS、`make check-fd-runtime` 158 项 PASS（仅既有的 2 项硬链接夹具 
 隐藏的大记录会让小缓冲返回 EINVAL；现读取完整私有批次，仅复制放得下的可见记录并把目录游标
 退回首个未返回记录，首个可见记录放不下时才 EINVAL 且不移动游标。/storage/Users 与 /tmp 拒绝
 创建 socket inode，socket 用例改为探测可用目录（应用 TMPDIR）。
+2026-10-30 本地对象输出增量：文件修改模式此前拒绝对 guest 自建 socket/eventfd/memfd 的 write、
+memfd ftruncate 与共享可写映射（来源未知），事件循环唤醒、socket write 和 memfd 用法因此失败。
+新增显式 `--allow-local-output`：仅授权本进程映像中由 socket/socketpair/accept/accept4/eventfd2/
+memfd_create 创建的对象，随 dup/fork 保留、exec 清除且不进快照；memfd 可共享映射（PROT_EXEC 共享
+映射仍拒绝）。pipe 仍只由 `--allow-pipe-output` 授权，继承/导入对象仍拒绝。实验 ABI 升至 12，
+launch.py 默认启用。HarmonyOS 真机 local_output 用例覆盖开启/关闭、dup/fork/exec、sendfile、继承
+socket 与 pipe 契约。HarmonyOS 上经 launch.py 运行 harmonybrew python3（暴露 brew、/system、/lib、
+/etc）成功读写工作区且根目录只见暴露项；libc 的 hilog socket 不在视图内，连接被拒并在 stderr 输出
+告警，需要在 profile 中显式暴露，而 8 个挂载上限已用满。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
 bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；返回给 guest 的 socket 地址、新式 xattrat
 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。

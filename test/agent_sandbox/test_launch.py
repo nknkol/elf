@@ -33,6 +33,7 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--'):], ['--', './.elf-exec', '/workspace',
                                                    '/bin/sh', '/bin/sh', '-c', 'true'])
         self.assertIn('--revalidate-file-fds', argv)
+        self.assertIn('--allow-local-output', argv)
 
     def test_limits(self):
         many = dict(self.compiled, mounts=self.compiled['mounts'] * 2)

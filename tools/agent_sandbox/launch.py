@@ -121,7 +121,7 @@ def command_line(compiled, root, loader, workdir, command, env):
         argv += ['-v', f'{mount["source"]}:{mount["target"]}']
         vector += 'r' if mount['access'] == 'ro' else 'w'
     argv += ['--guard-file-access', vector, '--allow-stdio-output', '--allow-pipe-output',
-             '--allow-stream-input', '--revalidate-file-fds']
+             '--allow-local-output', '--allow-stream-input', '--revalidate-file-fds']
     for entry in env:
         argv += ['-e', entry]
     return argv + ['--', f'./{HELPER}', workdir, command[0], *command]

@@ -21,6 +21,7 @@ struct fd_record {
     struct fd_origin origin;
     int pipe_writer;           /* Local capability; never exported in snapshots. */
     int stream_reader;         /* Locally created non-file object; same lifetime. */
+    int local_writer;          /* Local socket/eventfd/memfd output grant; same lifetime. */
 };
 struct fd_table {
     struct fd_record *slots;
@@ -38,6 +39,9 @@ int fd_table_open_pipe_writer(struct fd_table *, int fd, int cloexec);
 /* Caller has just created a non-file kernel object (pipe, socket, eventfd...).
  * Reading it exposes no mount content. Copies through dup/fork, cleared on exec. */
 int fd_table_grant_stream(struct fd_table *, int fd);
+/* Output to a locally created socket, eventfd or memfd changes no mount
+ * content. Caller decides admission; same lifetime as the stream grant. */
+int fd_table_grant_local_writer(struct fd_table *, int fd);
 /* Imported FD with unknown provenance AND unknown open-description identity. */
 int fd_table_import_unknown(struct fd_table *, int fd, int cloexec);
 /* Successful dup/dup3/F_DUPFD. same-FD success is dup2's no-op. Unknown source

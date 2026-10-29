@@ -1446,6 +1446,11 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
             cfg->revalidate_file_fds = 1;
             continue;
         }
+        if (z_strncmp(arg, "--allow-local-output", 21) == 0) {
+            if (cfg->allow_local_output) z_errx(1, "duplicate local output option");
+            cfg->allow_local_output = 1;
+            continue;
+        }
         if (z_strncmp(arg, "--allow-pipe-output", 20) == 0) {
             if (cfg->allow_pipe_output) z_errx(1, "duplicate pipe output option");
             cfg->allow_pipe_output = 1;
@@ -2036,6 +2041,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
         z_errx(1, "mount access observation requires root plus every bind");
     if (bootstrap_cfg.revalidate_file_fds && bootstrap_cfg.guard_path_mutations != 2)
         z_errx(1, "file FD revalidation requires file mutation guard");
+    if (bootstrap_cfg.allow_local_output && bootstrap_cfg.guard_path_mutations != 2)
+        z_errx(1, "local output requires file mutation guard");
     if (bootstrap_cfg.allow_pipe_output && bootstrap_cfg.guard_path_mutations != 2)
         z_errx(1, "pipe output requires file mutation guard");
     if (bootstrap_cfg.allow_stdio_output && bootstrap_cfg.guard_path_mutations != 2)

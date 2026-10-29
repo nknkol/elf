@@ -247,6 +247,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     }
     if (cfg->revalidate_file_fds)s->argv[pos++] = "--revalidate-file-fds";
     if (cfg->allow_pipe_output)s->argv[pos++] = "--allow-pipe-output";
+    if (cfg->allow_local_output)s->argv[pos++] = "--allow-local-output";
     if (cfg->allow_stdio_output)s->argv[pos++] = "--allow-stdio-output";
     if (cfg->allow_stream_input)s->argv[pos++] = "--allow-stream-input";
     transport = fd_experiment_export();
