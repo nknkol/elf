@@ -307,3 +307,24 @@ so this does not establish complete hostile-agent isolation.
 writable origins for read-only/denied files, disabled-option behavior, outside
 files, ambiguous aliases and unlinked/replaced files. Available Alpine/Ubuntu
 fixtures verify shell pipeline redirection and append through exec.
+
+
+## Pathname extended attributes
+
+The PRoot bridge maps set/get/list/remove xattr and their `l*` pathname forms.
+Ordinary forms follow the final symlink; `l*` forms operate on the link itself.
+Both mutation-guard modes apply mount policy to set/remove operations, including
+known cwd-relative paths and nested binds. An unknown relative cwd cannot grant
+mutation rights. Names, values, sizes and flags retain the native syscall ABI;
+FD forms retain the existing descriptor handling. No content VFS or new slow
+syscall selection is introduced.
+
+`test/fs_policy/xattrs.py` checks real xattr IO and host state in both guard
+modes, observation mode and unguarded FD mode; `--normal` checks the default
+build. It requires native xattr support on the fixture backing and fails clearly
+if that prerequisite is unavailable. The native capability probe runs in a
+separate child. Tests include symlink follow/no-follow, dangling links, nested
+mounts, cwd provenance, create/replace/remove and size queries/short buffers.
+Read visibility is still not default-deny. ACL/security attribute semantics are
+left to the host, newer xattrat interfaces are not added, and pathname races
+remain outside this increment's guarantee.

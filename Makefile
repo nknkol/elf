@@ -25,6 +25,7 @@ check: build
 	$(MAKE) -C vendor/proot/svc check
 	$(PYTHON) vendor/proot/port-tests/test_svc.py
 	$(PYTHON) vendor/proot/port-tests/test_modify.py
+	$(PYTHON) test/fs_policy/xattrs.py --normal
 	$(PYTHON) vendor/proot/port-tests/test_inotify.py
 	$(PYTHON) vendor/proot/port-tests/test_exec.py
 	$(PYTHON) vendor/proot/port-tests/test_auxv.py
@@ -52,4 +53,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/stdio.py
 	$(PYTHON) test/fs_policy/pipes.py
 	$(PYTHON) test/fs_policy/revalidate.py
+	$(PYTHON) test/fs_policy/xattrs.py
 	$(PYTHON) test/fd_runtime/run.py

@@ -216,6 +216,10 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
 int proot_handles_syscall(long number)
 {
     switch (number) {
+    case __NR_setxattr: case __NR_lsetxattr:
+    case __NR_getxattr: case __NR_lgetxattr:
+    case __NR_listxattr: case __NR_llistxattr:
+    case __NR_removexattr: case __NR_lremovexattr:
     case __NR_inotify_add_watch:
     case SYS_fchmodat:
     case SYS_fchownat:
@@ -322,6 +326,8 @@ static bool path_mutation(long number, long a[6])
         if (a[2] & O_PATH) return false;
         return (a[2] & (O_ACCMODE | O_CREAT | O_TRUNC)) ||
                ((a[2] & O_TMPFILE) == O_TMPFILE);
+    case __NR_setxattr: case __NR_lsetxattr:
+    case __NR_removexattr: case __NR_lremovexattr:
     case SYS_mknodat: case SYS_mkdirat: case SYS_unlinkat: case SYS_symlinkat:
     case SYS_linkat: case SYS_renameat: case SYS_renameat2:
     case SYS_fchmodat: case SYS_fchownat: case SYS_utimensat: case __NR_truncate:
@@ -334,6 +340,20 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
 {
     b->mutation = path_mutation(number, a);
     long ret;
+    switch (number) {
+    case __NR_setxattr: case __NR_getxattr:
+    case __NR_listxattr: case __NR_removexattr:
+    case __NR_lsetxattr: case __NR_lgetxattr:
+    case __NR_llistxattr: case __NR_lremovexattr: {
+        /* l* operates on the final symlink itself; intermediate links still
+         * resolve normally. Preserve the native name/value/size/flags ABI. */
+        bool follow = number != __NR_lsetxattr && number != __NR_lgetxattr &&
+                      number != __NR_llistxattr && number != __NR_lremovexattr;
+        ret = resolve(b, AT_FDCWD, (const char *)a[0], follow);
+        if (ret < 0) return ret;
+        return raw_syscall(number, (long)b->host, a[1], a[2], a[3], a[4], a[5]);
+    }
+    }
     if (number == __NR_inotify_add_watch) {
         if (!a[1]) return -EFAULT;
         ret = resolve(b, AT_FDCWD, (const char *)a[1], !(a[2] & IN_DONT_FOLLOW));
