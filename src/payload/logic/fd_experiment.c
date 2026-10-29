@@ -240,20 +240,28 @@ static int room(struct fd_table *t,int target,int assign)
     for(size_t i=0;i<t->capacity;i++)if(t->slots[i].fd<0)return 0;
     return -ENOSPC;
 }
-static int mount_decision(size_t mount, bool known, enum fs_operation operation)
+int fd_experiment_mount_access(enum fs_access access[CONFIG_MAX_BINDS+1], size_t *count)
 {
     const char *v=g_payload_config.mount_access_observe;
     if(!v[0])return -ENODATA;
-    enum fs_access access[CONFIG_MAX_BINDS+1];
-    size_t count=0;
-    for(;count<CONFIG_MAX_BINDS+1 && v[count];count++) {
-        if(v[count]!='d' && v[count]!='r' && v[count]!='w')return -EINVAL;
-        access[count]=v[count]=='d'?FS_DENY:v[count]=='r'?FS_READ_ONLY:FS_READ_WRITE;
+    size_t n=0;
+    for(;n<CONFIG_MAX_BINDS+1 && v[n];n++) {
+        if(v[n]!='d' && v[n]!='r' && v[n]!='w')return -EINVAL;
+        access[n]=v[n]=='d'?FS_DENY:v[n]=='r'?FS_READ_ONLY:FS_READ_WRITE;
     }
-    if(v[count])return -EINVAL;
-    struct fs_policy policy={access,count};
+    if(v[n])return -EINVAL;
+    struct fs_policy policy={access,n};
     int valid=fs_policy_validate(&policy,g_payload_config.bind_count);
     if(valid)return valid;
+    *count=n;return 0;
+}
+static int mount_decision(size_t mount, bool known, enum fs_operation operation)
+{
+    enum fs_access access[CONFIG_MAX_BINDS+1];
+    size_t count;
+    int rc=fd_experiment_mount_access(access,&count);
+    if(rc)return rc;
+    struct fs_policy policy={access,count};
     return fs_policy_check(&policy,mount,known,operation);
 }
 int fd_experiment_check_path_mutation(size_t mount, bool known)
@@ -306,6 +314,49 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
 }
+/* Content reads in file access mode. Known file origins follow the mount
+ * policy; locally created non-file objects carry a stream grant. Unknown
+ * (inherited/imported/exec-restored) FDs are denied unless stream input is
+ * explicitly allowed and the kernel object is a pipe, socket or a terminal
+ * that answers TCGETS. Invalid FDs keep EBADF ahead of policy. */
+static int check_fd_read(struct fd_table *t, int fd)
+{
+    const struct fd_record *r=fd_table_get(t,fd);
+    if(r && r->stream_reader)return 0;
+    if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
+        return mount_decision(r->origin.mount_id,true,FS_OBSERVE);
+    struct stat st;
+    long rc=raw_syscall(__NR_fstat,fd,(long)&st,0,0,0,0);
+    if(rc<0)return (int)rc;
+    if(!g_payload_config.allow_stream_input)return -EACCES;
+    unsigned type=st.st_mode&0170000;
+    if(type==0010000 || type==0140000)return 0;
+    if(type!=0020000)return -EACCES;
+    struct termios term;
+    return raw_syscall(__NR_ioctl,fd,TCGETS,(long)&term,0,0,0)<0 ? -EACCES : 0;
+}
+static int check_read_call(struct fd_table *t, long n, long a[6])
+{
+    if(!g_payload_config.guard_file_reads)return 0;
+    switch(n) {
+    case __NR_read: case __NR_readv: case __NR_pread64:
+    case __NR_preadv: case __NR_preadv2:
+    case __NR_splice: case __NR_tee: case __NR_copy_file_range:
+    case __NR_fgetxattr: case __NR_flistxattr:
+        return check_fd_read(t,(int)a[0]);
+    case __NR_sendfile:
+        return check_fd_read(t,(int)a[1]);
+    case __NR_mmap:
+        /* Private file mappings read content too, not just shared ones. */
+        return (a[3]&MAP_ANONYMOUS) ? 0 : check_fd_read(t,(int)a[4]);
+    case __NR_readlinkat:
+        /* Empty path reads the target of an O_PATH symlink FD itself. */
+        if(!a[1] || ((const char *)a[1])[0])return 0;
+        return check_fd_read(t,(int)a[0]);
+    default:return 0;
+    }
+}
+
 /* Only audited fcntl families are admitted in file-mutation mode. Advisory
  * locks do not grant content access: known visible sources may lock, while
  * access mode and flock validation remain the kernel's responsibility. */
@@ -470,6 +521,9 @@ long fd_experiment_dispatch(long n,long a[6])
             return -ENOSYS;
         }
     }
+    /* Not bridged: the raw guest path would reach the host and reveal
+     * existence/identity of hidden names. Handles have no read model. */
+    if(g_payload_config.guard_file_reads && n==__NR_name_to_handle_at)return -ENOSYS;
     if(n==__NR_prctl && a[0]==PR_ELF_FD_QUERY) {
         /* Diagnostic only: decision for a supplied mount ID, not an FD grant. */
         if(a[1]==6) {
@@ -487,6 +541,9 @@ long fd_experiment_dispatch(long n,long a[6])
     /* advice is an int in the kernel ABI. Normalize before deciding whether
      * MADV_REMOVE needs mapping authorization; high bits cannot hide a punch. */
     if(n==__NR_madvise)a[2]=(int)a[2];
+    /* Content sources, including private file mappings, before any mapping
+     * bookkeeping or transfer destination checks. */
+    rc=check_read_call(t,n,a);if(rc<0)return rc;
     if(g_payload_config.guard_path_mutations==2 &&
        (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
         n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE)))
@@ -498,6 +555,13 @@ long fd_experiment_dispatch(long n,long a[6])
         rc=check_fcntl(t,a);if(rc<0)return rc;
     }
     rc=check_fd_mutation(t,s,n,a);if(rc<0)return rc;
+    if(n==__NR_getdents64 && g_payload_config.guard_file_reads) {
+        const struct fd_record *r=fd_table_get(t,(int)a[0]);
+        struct proot_open_origin anchor={0,false};
+        if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
+            anchor=(struct proot_open_origin){r->origin.mount_id,true};
+        return proot_getdents_visible((int)a[0],(void *)a[1],(unsigned int)a[2],&anchor);
+    }
     if(n==__NR_ioctl) { rc=check_ioctl(t,a);if(rc<0)return rc; }
     if(n==__NR_chdir || n==__NR_fchdir || n==__NR_getcwd) {
         struct proot_open_origin anchor=s->cwd,next={0,false};
@@ -610,6 +674,10 @@ long fd_experiment_dispatch(long n,long a[6])
     } else if(n==__NR_openat)result=proot_openat(a,&anchor,&opened);
     else result=syscall_handle_common(n,a);
     if(result<0)return result;
+    /* Non-file objects created here hold no mount content. */
+    int stream=pair || n==__NR_memfd_create || n==__NR_eventfd2 || n==__NR_epoll_create1 ||
+        n==__NR_timerfd_create || n==__NR_socket || n==__NR_accept || n==__NR_accept4 ||
+        n==__NR_inotify_init1 || n==__NR_signalfd4;
     if(pair) {
         /* Read only after kernel success. This relies on the experimental
          * single-task AArch64 address space and nested slow-call exclusion;
@@ -621,6 +689,8 @@ long fd_experiment_dispatch(long n,long a[6])
                    g_payload_config.guard_path_mutations==2)?
             fd_table_open_pipe_writer(t,second,!!(a[1]&O_CLOEXEC)):
             fd_table_open(t,second,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(a[1]&O_CLOEXEC));
+        if(!rc)rc=fd_table_grant_stream(t,first);
+        if(!rc)rc=fd_table_grant_stream(t,second);
     }
     else if(create) {
         /* MFD_CLOEXEC is bit 0, unlike O_CLOEXEC/EFD_CLOEXEC. */
@@ -634,6 +704,7 @@ long fd_experiment_dispatch(long n,long a[6])
              * imported FDs and exec restore deliberately remain UNKNOWN. */
             fd_table_open(t,(int)result,(struct fd_origin){opened.mount_id,
                           opened.known?FD_ACCESS_RW:FD_ACCESS_UNKNOWN},cloexec);
+        if(!rc && stream)rc=fd_table_grant_stream(t,(int)result);
     }
     else if(setfd)rc=fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
     else rc=fd_table_dup(t,(int)a[0],(int)result,n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC);

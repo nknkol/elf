@@ -180,13 +180,15 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = s->guest;
 #ifdef FD_EXPERIMENT
     if (cfg->mount_access_observe[0]) {
-        s->argv[pos++] = cfg->guard_path_mutations == 2 ? "--guard-file-mutations" :
+        s->argv[pos++] = cfg->guard_file_reads ? "--guard-file-access" :
+            cfg->guard_path_mutations == 2 ? "--guard-file-mutations" :
             cfg->guard_path_mutations ? "--guard-path-mutations" : "--observe-mount-access";
         s->argv[pos++] = cfg->mount_access_observe;
     }
     if (cfg->revalidate_file_fds)s->argv[pos++] = "--revalidate-file-fds";
     if (cfg->allow_pipe_output)s->argv[pos++] = "--allow-pipe-output";
     if (cfg->allow_stdio_output)s->argv[pos++] = "--allow-stdio-output";
+    if (cfg->allow_stream_input)s->argv[pos++] = "--allow-stream-input";
     transport = fd_experiment_export();
     if (transport < 0) { ret = transport; goto done; }
     unsigned value = (unsigned)transport;

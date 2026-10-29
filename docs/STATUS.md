@@ -113,6 +113,30 @@ EINVAL；保留宿主限制，不尝试绕过系统沙盒，也不把该项记�
 本轮新增测试、权限核心、路径/FD 修改保护、xattr 回归，以及默认版 82 项路径和
 20 项元数据检查通过。使用自建临时文件进行沙盒开发验证，未运行网络相关探针；
 未重跑完整套件，ABI 未变。
+2026-10-30 默认拒绝读取与目录可见性增量：新增 `--guard-file-access`，在文件修改模式之上
+检查读取与可见性。权限核心新增纯词法可见性判定：非 deny 挂载可见；deny 路径若是有效
+非 deny bind 的严格祖先则仅可遍历，否则隐藏。PRoot 解析在每个分量、相对基准和 symlink
+目标交给宿主前判定，隐藏名统一 EACCES，不因存在与否、symlink 路由或 `..` 而不同；
+祖先目录只允许 stat/statx/statfs、非写 access、chdir/fchdir、O_DIRECTORY 只读或 O_PATH
+打开及枚举。getdents64 在原缓冲区内压缩记录，隐藏项不返回，整批隐藏时继续读取，
+不会提前返回 0。FD 读取覆盖 read/readv/pread/preadv(2)、sendfile/splice/tee/
+copy_file_range 的来源、fd 型 xattr 读取、空路径 readlinkat 和全部文件 mmap（含 private）。
+已知来源按挂载判定；本地创建的 pipe/socketpair/socket/accept/eventfd/timerfd/signalfd/
+epoll/inotify/memfd 带本地 stream 授权，随 dup/fork 保留，exec 清除且不进快照。
+未知（继承/导入/exec 恢复）FD 默认拒绝；显式 `--allow-stream-input` 时仅放行 fstat 为
+pipe/socket 或通过 TCGETS 的终端，无效 FD 仍先返回 EBADF。name_to_handle_at 未桥接，
+此模式返回 ENOSYS。实验 ABI 升至 11。
+验证环境不是 HarmonyOS：Android 14 AArch64 真机（内核 5.10，root）上的 Alpine 工具链
+chroot。新增 reads 用例覆盖隐藏/祖先/嵌套 deny 再暴露、symlink 与 `..`、cwd/dirfd、
+小缓冲枚举、继承 FD 各读取入口、stream 开关、exec 后策略保持及非法参数组合；
+Alpine 3.24.3 与 Ubuntu 26.04.1 的受保护 shell 只读系统树、管道、命令替换、重定向和
+`ls /` 隐藏通过。全部 fs_policy 运行时用例、shell 工作流与默认构建 port/dispatch/guard
+测试通过。check_fd_clone、test_inotify、check_runtime 及 fd_runtime/run 在该设备上
+对未修改的 HEAD 同样失败，属环境差异，未计为通过。该设备的 Linux 不按低地址 mmap 提示
+放置 SVC stub，静态探针改用自重定位 static-pie 链接；这只是设备测试环境调整，未入库。
+仍未完成：PT_INTERP 由 loader 直接加载、不经读取策略；祖先目录的 stat 仍是宿主元数据，
+bind 目标在宿主中缺少挂载点目录时枚举不合成 glue 项；UNIX socket 路径、新式 xattrat
+入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**
@@ -129,7 +153,7 @@ EINVAL；保留宿主限制，不尝试绕过系统沙盒，也不把该项记�
 | 同线程嵌套慢调用 | 保留重入透传 | 返回 EDEADLK；非拥有者任务拒绝 |
 | openat2 | HarmonyOS 返回 ENOSYS | 24 字节 how、O_PATH\|O_NOFOLLOW 子集；resolve=0 经 PRoot，BENEATH 仅单分量及受限尾斜杠 |
 | 已确认危险 syscall | 公共 guard 返回 ENOSYS | 同一公共 guard 加实验拒绝项 |
-| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径和部分 FD 修改保护，完整权限仍未实现 |
+| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径/FD 修改保护，`--guard-file-access` 增加默认拒绝读取与目录可见性；仍非完整隔离 |
 | agent JSON 配置 | 只输出计划 | 同样未连接执行层 |
 
 `src/elfloader` 是最后一次构建的产物，不能用它的名称判断启用了哪种能力。
@@ -157,8 +181,8 @@ EINVAL；保留宿主限制，不尝试绕过系统沙盒，也不把该项记�
 ## 尚未完成的验收门槛
 
 1. **agent 权限执行**：配置只规划不运行；所有 bind 仍可写。绝对/已知目录 FD/cwd 相对打开已有
-   mount/access 观察值，但未知 cwd/目录 FD、导入和 exec 恢复仍 UNKNOWN；尚无可信来源链、
-   只读执行或默认拒绝。
+   mount/access 观察值，但未知 cwd/目录 FD、导入和 exec 恢复仍 UNKNOWN；尚无可信来源链。
+   实验版的只读修改保护与默认拒绝读取已可选启用，但 PT_INTERP、socket 路径和竞争仍有缺口。
 2. **完整 FD/任务语义**：普通线程与共享 VM/FD、通用 clone、close_range 真正实现、
    更多 ioctl/辅助消息 FD 通道仍有缺口。不能把 128 条元数据表视作全部内核 FD。
 3. **路径与挂载语义**：目录 FD 仍经 `/proc/self/fd` 反向路径映射；往返检查可拒绝

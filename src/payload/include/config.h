@@ -93,6 +93,8 @@ typedef struct payload_config {
     int32_t allow_pipe_output; /* Newly created pipe2 write ends only. */
     int32_t allow_stdio_output; /* Revalidate pipe/TTY stdout+stderr, write/writev only. */
     int32_t guard_path_mutations; /* 0=observe, 1=path guard, 2=path+FD guard; not isolation. */
+    int32_t guard_file_reads; /* Requires guard 2: path/FD read checks and listing visibility. */
+    int32_t allow_stream_input; /* Inherited pipe/socket/verified TTY reads in read guard mode. */
 #endif
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];

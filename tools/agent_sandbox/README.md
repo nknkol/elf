@@ -482,3 +482,37 @@ paths. Host contents/mode/size/mtime/ctime must remain unchanged. Native control
 on the actual fixture backing currently return EACCES for W_OK on its symlink
 and EINVAL for AT_EMPTY_PATH queries. These restrictions are retained, not
 emulated away or counted as successful empty-path compatibility.
+
+
+## Default-deny reads and directory visibility (file access mode)
+
+`--guard-file-access drw` includes every `--guard-file-mutations` check and
+adds read and visibility checks. A path in a deny mount is hidden unless it is
+a strict ancestor of an effective non-deny bind; such ancestors are traversal
+only. PRoot resolution classifies every component, relative base and symlink
+referee before the host sees it, so a hidden name returns EACCES whether or not
+it exists, and neither a symlink nor `..` can route through it. Ancestors allow
+stat/statx/statfs, non-write access checks, chdir/fchdir, read-only
+`O_DIRECTORY` or `O_PATH` opens and listing; content, links, xattrs, watches and
+exec are refused. getdents64 compacts the kernel batch in place and drops
+hidden names, and it retries batches that are entirely hidden so that zero
+still means end of directory. Listings only contain names the host directory
+actually has: missing bind mountpoints are not synthesized.
+
+Content reads from FDs (read/readv/pread/preadv/preadv2, the source of
+sendfile/splice/tee/copy_file_range, fgetxattr/flistxattr, empty-path
+readlinkat and every file mmap including MAP_PRIVATE) follow the FD's mount
+origin. Pipes, socketpairs, sockets, accepted sockets, eventfd, timerfd,
+signalfd, epoll, inotify and memfd created inside the guest carry a local
+stream grant that is kept across dup/fork, cleared on exec and never
+serialized. Unknown FDs (inherited, imported or restored after exec) are denied
+by default. `--allow-stream-input` admits them only when fstat reports a pipe
+or socket, or a character device that answers TCGETS; invalid FDs still return
+EBADF first. Combine it with `--revalidate-file-fds` for file redirections that
+cross exec. name_to_handle_at is not bridged and returns ENOSYS in this mode.
+
+Known gaps: the ELF interpreter (PT_INTERP) is loaded by the loader without the
+read policy; ancestor stat reports host metadata; UNIX socket paths, xattrat
+entries and path races are not covered. `test/fs_policy/reads.py` covers the
+probe matrix plus protected Alpine/Ubuntu shells (read-only system tree, pipes,
+command substitution, redirection, filtered `ls /`).

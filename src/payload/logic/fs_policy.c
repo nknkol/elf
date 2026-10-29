@@ -36,3 +36,27 @@ int fs_policy_check_pair(const struct fs_policy *p, size_t source, bool source_k
     if (rc < 0) return rc;
     return source == target ? 0 : -EXDEV;
 }
+
+/* Component-wise strict prefix: "/a" contains "/a/b" but not "/ab". */
+static bool strict_ancestor(const char *path, const char *descendant)
+{
+    size_t length = 0;
+    while (path[length] && path[length] == descendant[length]) length++;
+    if (path[length]) return false;
+    if (length == 1 && path[0] == '/') return descendant[1] != 0;
+    return descendant[length] == '/' && descendant[length + 1];
+}
+
+enum fs_visibility fs_policy_visibility(const struct fs_policy *p, size_t mount,
+                                        const char *guest, const char *const *exposed,
+                                        size_t count)
+{
+    if (!p || !p->mounts || mount >= p->count || !guest || guest[0] != '/')
+        return FS_HIDDEN;
+    if (p->mounts[mount] == FS_READ_ONLY || p->mounts[mount] == FS_READ_WRITE)
+        return FS_VISIBLE;
+    if (p->mounts[mount] != FS_DENY) return FS_HIDDEN;
+    for (size_t i = 0; exposed && i < count; i++)
+        if (exposed[i] && strict_ancestor(guest, exposed[i])) return FS_TRAVERSE;
+    return FS_HIDDEN;
+}

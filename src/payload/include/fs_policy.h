@@ -24,4 +24,13 @@ int fs_policy_check(const struct fs_policy *, size_t mount, bool known,
  * follow/no-follow rules. This does not implement copy, rename or link itself. */
 int fs_policy_check_pair(const struct fs_policy *, size_t source, bool source_known,
                          size_t target, bool target_known);
+/* Read visibility of one canonical guest path whose mount the caller selected.
+ * exposed lists canonical guest paths of effective non-deny binds. A denied
+ * path that is a strict ancestor of one stays traversable: lookup, listing and
+ * cwd may reach the exposed subtree, but its content and siblings stay hidden.
+ * Purely lexical; no host lookup, so hidden paths leak no existence. */
+enum fs_visibility { FS_HIDDEN, FS_TRAVERSE, FS_VISIBLE };
+enum fs_visibility fs_policy_visibility(const struct fs_policy *, size_t mount,
+                                        const char *guest, const char *const *exposed,
+                                        size_t count);
 #endif

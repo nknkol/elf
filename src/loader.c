@@ -1414,7 +1414,8 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 #ifdef FD_EXPERIMENT
         if (z_strncmp(arg, "--observe-mount-access", 23) == 0 ||
             z_strncmp(arg, "--guard-path-mutations", 23) == 0 ||
-            z_strncmp(arg, "--guard-file-mutations", 23) == 0) {
+            z_strncmp(arg, "--guard-file-mutations", 23) == 0 ||
+            z_strncmp(arg, "--guard-file-access", 20) == 0) {
             if (cfg->mount_access_observe[0]) z_errx(1, "duplicate mount access observation");
             if (i + 1 >= argc) z_errx(1, "missing mount access observation");
             const char *value = argv[++i];
@@ -1425,8 +1426,15 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
                 if (value[j] != 'd' && value[j] != 'r' && value[j] != 'w')
                     z_errx(1, "invalid mount access observation value");
             copy_cstr(cfg->mount_access_observe, sizeof(cfg->mount_access_observe), value);
-            cfg->guard_path_mutations = z_strncmp(arg, "--guard-file-mutations", 23) == 0 ? 2 :
+            cfg->guard_file_reads = z_strncmp(arg, "--guard-file-access", 20) == 0;
+            cfg->guard_path_mutations = (cfg->guard_file_reads ||
+                z_strncmp(arg, "--guard-file-mutations", 23) == 0) ? 2 :
                 z_strncmp(arg, "--guard-path-mutations", 23) == 0;
+            continue;
+        }
+        if (z_strncmp(arg, "--allow-stream-input", 21) == 0) {
+            if (cfg->allow_stream_input) z_errx(1, "duplicate stream input option");
+            cfg->allow_stream_input = 1;
             continue;
         }
         if (z_strncmp(arg, "--revalidate-file-fds", sizeof("--revalidate-file-fds")) == 0) {
@@ -2018,6 +2026,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
         z_errx(1, "pipe output requires file mutation guard");
     if (bootstrap_cfg.allow_stdio_output && bootstrap_cfg.guard_path_mutations != 2)
         z_errx(1, "stdio output requires file mutation guard");
+    if (bootstrap_cfg.allow_stream_input && !bootstrap_cfg.guard_file_reads)
+        z_errx(1, "stream input requires file access guard");
     if (bootstrap_cfg.fd_state >= 0 && !child_loader)
         z_errx(1, "fd state requires child loader");
 #endif

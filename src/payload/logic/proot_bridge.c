@@ -12,6 +12,7 @@
 #include "proot_bridge.h"
 #ifdef FD_EXPERIMENT
 #include "fd_experiment.h"
+#include "fs_policy.h"
 #endif
 #include "proot_scratch.h"
 #include "path/resolve_core.h"
@@ -28,6 +29,14 @@ _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 1
 typedef struct {
     BindingTable table;
     bool mutation;
+    bool traverse; /* Final ancestor-only paths are acceptable for this call. */
+#ifdef FD_EXPERIMENT
+    bool reads; /* Immutable read policy snapshot below is active. */
+    enum fs_access access[CONFIG_MAX_BINDS + 1];
+    struct fs_policy policy;
+    const char *exposed[CONFIG_MAX_BINDS];
+    size_t exposed_count;
+#endif
     const struct proot_path_context *context;
     int anchor_fd;
     struct proot_open_origin anchor;
@@ -44,10 +53,29 @@ static int host_map(void *opaque, const char *guest, char *host)
     return binding_table_map(&b->table, GUEST, guest, host);
 }
 
+#ifdef FD_EXPERIMENT
+/* Lexical decision for a canonical guest path, before any host lookup. */
+static int path_visibility(Bridge *b, const char *guest)
+{
+    if (!b->reads) return FS_VISIBLE;
+    size_t mount;
+    int rc = binding_table_mount_id(&b->table, guest, &mount);
+    if (rc < 0) return rc;
+    return fs_policy_visibility(&b->policy, mount, guest, b->exposed, b->exposed_count);
+}
+#endif
+
 static int host_lookup(void *opaque, Finality finality, unsigned int depth,
                        const char *guest, char *host)
 {
     (void)depth;
+#ifdef FD_EXPERIMENT
+    /* Every component, base and symlink referee is checked before the host
+     * sees it: a hidden name yields EACCES whether or not it exists. */
+    int visibility = path_visibility(opaque, guest);
+    if (visibility < 0) return visibility;
+    if (visibility == FS_HIDDEN) return -EACCES;
+#endif
     int rc = host_map(opaque, guest, host);
     if (rc < 0)
         return rc;
@@ -202,6 +230,13 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
     PathResolver resolver = {{b, &ops}, b->cwd, host_fd, host_map};
     int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
 #ifdef FD_EXPERIMENT
+    if (rc >= 0 && b->reads) {
+        /* ".." skips lookup, so the final name is classified again. */
+        int visibility = path_visibility(b, b->guest);
+        if (visibility < 0) return visibility;
+        if (visibility == FS_HIDDEN || (visibility == FS_TRAVERSE && !b->traverse))
+            return -EACCES;
+    }
     if (rc >= 0 && b->mutation && g_payload_config.guard_path_mutations) {
         size_t mount;
         rc = binding_table_mount_id(&b->table, b->guest, &mount);
@@ -338,6 +373,24 @@ static bool path_mutation(long number, long a[6])
     }
 }
 
+/* Ancestors of exposed binds stay reachable for lookup, listing and cwd only:
+ * no content, links, xattrs, watches, execution or namespace changes. */
+static bool path_traversal(long number, long a[6])
+{
+    switch (number) {
+    case SYS_newfstatat: case SYS_statx: case SYS_statfs: case SYS_chdir:
+        return true;
+    case SYS_faccessat: case SYS_faccessat2:
+        return !((unsigned int)a[2] & 2);
+    case SYS_openat:
+        if (a[2] & O_PATH) return true;
+        /* O_DIRECTORY makes the kernel refuse a non-directory host object. */
+        return (a[2] & O_DIRECTORY) && (a[2] & O_TMPFILE) != O_TMPFILE &&
+               !(a[2] & (O_ACCMODE | O_CREAT | O_TRUNC));
+    default: return false;
+    }
+}
+
 static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
     if(number==SYS_faccessat || number==SYS_faccessat2) {
@@ -351,6 +404,7 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         }
     }
     b->mutation = path_mutation(number, a);
+    b->traverse = path_traversal(number, a);
     long ret;
     switch (number) {
     case __NR_setxattr: case __NR_getxattr:
@@ -418,6 +472,11 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         ret = host_fd(b, (int)a[0], b->guest);
         if (ret < 0)
             return ret;
+#ifdef FD_EXPERIMENT
+        ret = path_visibility(b, b->guest);
+        if (ret < 0) return ret;
+        if (ret == FS_HIDDEN) return -EACCES;
+#endif
         ret = raw_syscall(SYS_fchdir, a[0], 0, 0, 0, 0, 0);
         if (ret >= 0 && origin) *origin = b->anchor;
         return ret;
@@ -515,6 +574,7 @@ static long bridge_create(Bridge **out)
     Bridge *b = (void *)mem;
     b->context = NULL;
     b->mutation = false;
+    b->traverse = false;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
     b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings,
@@ -522,6 +582,23 @@ static long bridge_create(Bridge **out)
     for (int i = 0; i < cfg->bind_count; i++)
         b->bindings[i] = (PathBinding){cfg->binds[i].src, cfg->binds[i].dst};
     long ret = binding_table_validate(&b->table);
+#ifdef FD_EXPERIMENT
+    b->reads = false;
+    if (ret >= 0 && cfg->guard_file_reads) {
+        size_t count;
+        ret = fd_experiment_mount_access(b->access, &count);
+        b->policy = (struct fs_policy){b->access, count};
+        b->exposed_count = 0;
+        for (size_t i = 0; ret >= 0 && i < b->table.count; i++) {
+            size_t id;
+            ret = binding_table_mount_id(&b->table, b->bindings[i].guest, &id);
+            /* Shadowed duplicate destinations expose nothing. */
+            if (ret >= 0 && id == i + 1 && b->access[id] != FS_DENY)
+                b->exposed[b->exposed_count++] = b->bindings[i].guest;
+        }
+        b->reads = ret >= 0;
+    }
+#endif
     if (ret < 0) {
         proot_scratch_free((void *)mem,sizeof(Bridge));
         return ret;
@@ -573,6 +650,72 @@ int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
  done:
     proot_scratch_free(b,sizeof(Bridge));return ret;
 }
+
+#ifdef FD_EXPERIMENT
+/* Kernel getdents64 record: ino, off, reclen, type, NUL-terminated name. */
+#define DIRENT_RECLEN 16
+#define DIRENT_NAME 19
+long proot_getdents_visible(int fd, void *buffer, unsigned long count,
+                            const struct proot_open_origin *anchor)
+{
+    if (!anchor) return -EINVAL;
+    Bridge *b;
+    long ret = bridge_create(&b);
+    if (ret < 0) return ret;
+    b->anchor = *anchor;
+    b->anchor_fd = fd;
+    ret = host_fd(b, fd, b->first_guest);
+    if (ret == -ENOTDIR) {
+        /* Not a directory: the kernel reports its own error, no names. */
+        ret = raw_syscall(__NR_getdents64, fd, (long)buffer, (long)count, 0, 0, 0);
+        goto done;
+    }
+    /* A directory without a faithful guest name cannot be filtered. */
+    if (ret == -EXDEV) ret = -EACCES;
+    if (ret < 0) goto done;
+    ret = path_visibility(b, b->first_guest);
+    if (ret == FS_HIDDEN) ret = -EACCES;
+    if (ret < 0) goto done;
+    size_t base = strlen(b->first_guest);
+    for (;;) {
+        /* The kernel validates the buffer and advances the directory offset.
+         * Records are compacted in place; a batch hiding every entry is
+         * retried, so zero still means end of directory. */
+        ret = raw_syscall(__NR_getdents64, fd, (long)buffer, (long)count, 0, 0, 0);
+        if (ret <= 0) goto done;
+        unsigned char *bytes = buffer;
+        size_t kept = 0;
+        for (size_t offset = 0; offset < (size_t)ret;) {
+            unsigned short length;
+            memcpy(&length, bytes + offset + DIRENT_RECLEN, sizeof(length));
+            if (length < DIRENT_NAME + 1 || offset + length > (size_t)ret) { ret = -EIO; goto done; }
+            const char *name = (const char *)bytes + offset + DIRENT_NAME;
+            bool keep = !strcmp(name, ".") || !strcmp(name, "..");
+            if (!keep) {
+                size_t size = strnlen(name, length - DIRENT_NAME);
+                if (base + 1 + size >= PATH_MAX) { ret = -ENAMETOOLONG; goto done; }
+                memcpy(b->guest, b->first_guest, base);
+                size_t at = base;
+                if (base != 1) b->guest[at++] = '/';
+                memcpy(b->guest + at, name, size);
+                b->guest[at + size] = 0;
+                int visibility = path_visibility(b, b->guest);
+                if (visibility < 0) { ret = visibility; goto done; }
+                keep = visibility != FS_HIDDEN;
+            }
+            if (keep) {
+                if (kept != offset) memmove(bytes + kept, bytes + offset, length);
+                kept += length;
+            }
+            offset += length;
+        }
+        if (kept) { ret = (long)kept; goto done; }
+    }
+done:
+    proot_scratch_free(b, sizeof(Bridge));
+    return ret;
+}
+#endif
 
 static long bridge_syscall(long number, long args[6], const struct proot_open_origin *anchor,
                            struct proot_open_origin *origin)
@@ -686,6 +829,7 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
         if (anchor < 0) { ret = anchor; goto out; }
     }
     if (hint) { b->anchor = *hint; b->anchor_fd = (int)anchor; }
+    b->traverse = true; /* This subset always opens O_PATH. */
     ret = host_fd(b, (int)anchor, b->first_guest);
     if (ret < 0) goto close_anchor;
     size_t base_mount, target_mount;
