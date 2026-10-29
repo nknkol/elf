@@ -1429,6 +1429,11 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
                 z_strncmp(arg, "--guard-path-mutations", 23) == 0;
             continue;
         }
+        if (z_strncmp(arg, "--allow-stdio-output", 21) == 0) {
+            if (cfg->allow_stdio_output) z_errx(1, "duplicate stdio output option");
+            cfg->allow_stdio_output = 1;
+            continue;
+        }
         if (z_strncmp(arg, "--fd-state", 11) == 0) {
             if (i + 1 >= argc || !argv[i + 1][0]) z_errx(1, "missing fd state");
             unsigned value = 0;
@@ -1997,6 +2002,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
     if (bootstrap_cfg.mount_access_observe[0] &&
         z_strlen(bootstrap_cfg.mount_access_observe) != (size_t)bootstrap_cfg.bind_count + 1)
         z_errx(1, "mount access observation requires root plus every bind");
+    if (bootstrap_cfg.allow_stdio_output && bootstrap_cfg.guard_path_mutations != 2)
+        z_errx(1, "stdio output requires file mutation guard");
     if (bootstrap_cfg.fd_state >= 0 && !child_loader)
         z_errx(1, "fd state requires child loader");
 #endif

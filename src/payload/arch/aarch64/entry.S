@@ -16,7 +16,7 @@ _start:
     /* Payload Header: used by loader to find config block */
     .word   0x484F4F4B          /* Magic: "HOOK" */
     .word   g_payload_config - _start /* Offset to config struct */
-    .word   PAYLOAD_ABI_VERSION /* PRoot v3 clone gate; FD v7 requires mapping mutation guards. */
+    .word   PAYLOAD_ABI_VERSION /* PRoot v3 clone gate; FD v8 adds explicit stdio output config. */
 
 #ifdef PROOT_PATH
     /* Fixed offset 16, used only by the dedicated clone stub. */

@@ -43,6 +43,13 @@ private fork 复制记录；mremap 成功暂清空记录，vfork 共享 VM 窗�
 实验 ABI 升至 7，pkey_mprotect 在此模式返回 ENOSYS。区间模型、真实映射回归、
 完整 `make check-fd-runtime` 与普通版 `make check` 通过。
 初始映射不会自动获得准入、已有权限不撤销；标准 IO 授权和完整隔离仍待完成。
+2026-10-29 标准输出增量：新增显式 `--allow-stdio-output`，仅在文件修改模式
+初始化时授权可写 pipe/FIFO 或通过 TCGETS 的终端 stdout/stderr，限 write/writev。
+授权跟随本地 description ID，dup/fork 保留，编号替换/复用不继承；exec 后重新
+验证 fd 1/2，其他继承别名仍未知。普通文件、socket、非终端设备不会获得此授权。
+实验 ABI 升至 8。真实 pipe/PTY 与生命周期测试、Alpine/Ubuntu 受保护 shell
+read/printf/exec→cat、原有权限测试、完整 FD 回归和普通版 `make check` 通过。
+新建管道/复杂流水线和可信执行交接仍未完成，不能据此宣称完整 agent 隔离。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

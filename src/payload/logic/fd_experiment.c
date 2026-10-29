@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <asm/ioctls.h>
+#include <asm/termbits.h>
+#include <asm/stat.h>
 #include <linux/sched.h>
 #include <sys/mman.h>
 #include <elf.h>
@@ -31,6 +33,7 @@ struct fd_runtime {
     long owner_tid;
     struct proot_open_origin cwd;
     struct vm_write_guard mappings;
+    uint64_t stdio_output[2]; /* Local description IDs, never serialized as grants. */
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
@@ -147,6 +150,32 @@ void fd_experiment_scratch_free(void *address,size_t size)
     }
     raw_syscall(__NR_munmap,(long)address,size,0,0,0,0);
 }
+static int admit_stdio_output(struct fd_runtime *s)
+{
+    if(!g_payload_config.allow_stdio_output)return 0;
+    if(g_payload_config.guard_path_mutations!=2)return -EINVAL;
+    struct fd_table *table=fd_registry_table(&s->registry,s->owner);
+    for(int fd=1;fd<=2;fd++) {
+        struct stat st;
+        _Static_assert(sizeof(st)==128 && offsetof(struct stat,st_mode)==16,
+                       "AArch64 kernel stat layout required");
+        if(raw_syscall(__NR_fstat,fd,(long)&st,0,0,0,0)<0)continue;
+        unsigned type=st.st_mode&0170000;
+        if(type==0020000) {
+            struct termios settings;
+            if(raw_syscall(__NR_ioctl,fd,TCGETS,(long)&settings,0,0,0)<0)continue;
+        } else if(type!=0010000)continue; /* FIFO/pipe or verified TTY only. */
+        long flags=raw_syscall(__NR_fcntl,fd,F_GETFL,0,0,0,0);
+        long descriptor=raw_syscall(__NR_fcntl,fd,F_GETFD,0,0,0,0);
+        if(flags<0 || descriptor<0 || (flags&O_PATH) || (flags&O_ACCMODE)==O_RDONLY)continue;
+        /* New IDs exceed the restored serial; imported aliases cannot forge a
+         * grant by claiming the same description in an unauthenticated blob. */
+        int rc=fd_table_open(table,fd,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(descriptor&FD_CLOEXEC));
+        if(rc)return rc;
+        s->stdio_output[fd-1]=fd_table_get(table,fd)->description;
+    }
+    return 0;
+}
 static int start(struct fd_runtime *s)
 {
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
@@ -180,6 +209,12 @@ static int start(struct fd_runtime *s)
             __atomic_store_n(&s->initialized,3,__ATOMIC_RELEASE);
             return rc;
         }
+    }
+    int admission=admit_stdio_output(s);
+    if(admission) {
+        s->init_error=admission;
+        __atomic_store_n(&s->initialized,3,__ATOMIC_RELEASE);
+        return admission;
     }
     s->owner_tid=tid;
     __atomic_store_n(&s->initialized,2,__ATOMIC_RELEASE);
@@ -250,6 +285,8 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     if(fd==AT_FDCWD && (n==__NR_utimensat || n==__NR_fchownat))
         return mount_decision(s->cwd.mount_id,s->cwd.known,FS_MUTATE);
     const struct fd_record *r=fd_table_get(t,fd);
+    if((n==__NR_write || n==__NR_writev) && r && r->description &&
+       (r->description==s->stdio_output[0] || r->description==s->stdio_output[1]))return 0;
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
 }

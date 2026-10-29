@@ -119,7 +119,7 @@ origin tags. It is an explicitly unauthenticated observation protocol, not a
 secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
-The experimental payload ABI is now 7 (normal PRoot remains 3); older custom
+The experimental payload ABI is now 8 (normal PRoot remains 3); older custom
 payload layouts are rejected. Build and test with `make check-fd-runtime`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
@@ -176,9 +176,9 @@ still downgrade to unknown. A fresh absolute open can establish new provenance.
 FD access tags remain mapping observations; the permission vector is consulted
 separately on every guarded operation.
 
-There are no implicit stdio or pipe grants: inherited stdout/stderr, imported
-FDs and newly created pipes/sockets remain unknown. Consequently this mode is
-not yet suitable for a general shell/agent launch. The regression uses exit
+Without the explicit stdio option below, inherited stdout/stderr remain
+unknown. Imported aliases and newly created pipes/sockets still receive no
+implicit output grant. General shell pipelines/agent launches remain incomplete. The regression uses exit
 status and host-side file checks, including readonly content/metadata integrity,
 writable output, dup/fork/slot reuse and rejection of exec-imported FDs.
 
@@ -221,5 +221,37 @@ holes and atomic capacity failures against a reference bitmap; `mappings.py`
 uses real SVC calls to test COW versus shared writeback, upgrades after closing
 the FD, partial unmap/fixed replacement, failed operations, fork, conservative
 remap invalidation and exec. No per-byte interception or file content copy is
-added by the admission checks. Read visibility, stdio grants, ioctl/async IO,
+added by the admission checks. Read visibility, general stream grants, ioctl/async IO,
 initial mappings and trusted policy handoff remain outside complete isolation.
+
+## Explicit standard output authorization
+
+Combine `--allow-stdio-output` with `--guard-file-mutations` to let a guest use
+inherited stdout/stderr when they are writable pipes/FIFOs or verified TTYs.
+The option is rejected outside file-mutation mode and is preserved across exec.
+At runtime initialization, kernel fstat identifies the object type; character
+devices additionally need a successful TCGETS. F_GETFL excludes O_PATH and
+read-only ends. Regular files, sockets and non-TTY devices (including /dev/null)
+receive no output grant. Closed or ineligible descriptors simply stay unknown.
+Stdin reads retain the existing behavior; no read-visibility policy is added.
+
+The two output grants use fresh local open-description IDs, not permanently
+privileged FD numbers. They permit **write/writev only**, including tracked dup
+aliases and private-fork descendants. Replacing or closing/reusing fd 1/2 cannot
+transfer an old grant to a file. Metadata modifications and file shared mmap
+still require mount provenance. Checks after initialization use metadata only;
+no fstat/ioctl is added to each write.
+
+Grants are not serialized. After exec, all restored origins are downgraded and
+only the actual fd 1/2 objects are revalidated, assigning IDs newer than the
+snapshot serial. An inherited alias at another number stays unknown even if it
+used to duplicate stdout. A regular file redirected to stdout receives no
+stdio grant, including across exec. This does not authenticate the existing
+loader CLI/policy handoff or restrict loader-internal diagnostic output.
+ABI 8 distinguishes the new configuration layout from older custom payloads.
+
+`test/fs_policy/stdio.py` covers pipe/PTY output, stdin, writev, dup/fork/exec,
+FD reuse, regular-file/socket/non-TTY rejection and invalid options. Available
+Alpine and Ubuntu fixtures also run a protected shell read/printf followed by
+exec→cat. These simple workflows pass; newly created pipes/sockets, general
+pipelines, and authenticated preservation of other inherited FDs remain work.
