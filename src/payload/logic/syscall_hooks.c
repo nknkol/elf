@@ -11,6 +11,7 @@
 #include "vfs_core.h"
 #ifdef PROOT_PATH
 #include "proot_bridge.h"
+#include "fake_ids.h"
 #endif
 
 #define PROT_READ       0x1
@@ -161,6 +162,9 @@ long syscall_handle_common(long sys_no, long args[6]) {
         return proot_execve(sys_no, args);
     if (proot_handles_syscall(sys_no))
         return proot_syscall(sys_no, args);
+    long faked;
+    if (fake_ids_syscall(sys_no, args, &faked))
+        return faked;
 #endif
     long ret;
     struct syscall_common_scratch *scratch = NULL;

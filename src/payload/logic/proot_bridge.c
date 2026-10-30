@@ -14,6 +14,7 @@
 #include "config.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
+#include "fake_ids.h"
 #ifdef FD_EXPERIMENT
 #include "fd_experiment.h"
 #include "fs_policy.h"
@@ -831,6 +832,13 @@ static bool contains_mount(Bridge *b, const char *guest)
     return false;
 }
 
+/* PRoot fake_id0: a fake root may give files away; the kernel's EPERM for
+ * the real user is reported as success (ownership itself is unchanged). */
+static long fake_chown(long ret)
+{
+    return ret == -EPERM && fake_ids_privileged() ? 0 : ret;
+}
+
 static long mutate(Bridge *b, long number, long a[6])
 {
     long ret;
@@ -1109,8 +1117,9 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         return raw_syscall(number, a[0], (long)b->host, a[2], 0, 0, 0);
     }
     /* Descriptor operations retain kernel identity; FD policy is a later layer. */
-    if (number == SYS_fchmod || number == SYS_fchown ||
-        number == SYS_fstatfs || number == __NR_ftruncate)
+    if (number == SYS_fchown)
+        return fake_chown(raw_syscall(number, a[0], a[1], a[2], 0, 0, 0));
+    if (number == SYS_fchmod || number == SYS_fstatfs || number == __NR_ftruncate)
         return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
     if (number == SYS_statfs || number == __NR_truncate) {
         if (!a[0]) return -EFAULT;
@@ -1129,10 +1138,13 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         if (!a[1]) return -EFAULT;
         const char *path = (const char *)a[1];
         if (!*path && number == SYS_fchownat && (flags & AT_EMPTY_PATH))
-            return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
-        ret = resolve(b, (int)a[0], path, !(flags & AT_SYMLINK_NOFOLLOW));
-        if (ret < 0) return ret;
-        return raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
+            ret = raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+        else {
+            ret = resolve(b, (int)a[0], path, !(flags & AT_SYMLINK_NOFOLLOW));
+            if (ret < 0) return ret;
+            ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
+        }
+        return number == SYS_fchownat ? fake_chown(ret) : ret;
     }
     if (number == SYS_mkdirat || number == SYS_unlinkat || number == SYS_symlinkat ||
         number == SYS_linkat || number == SYS_renameat || number == SYS_renameat2)

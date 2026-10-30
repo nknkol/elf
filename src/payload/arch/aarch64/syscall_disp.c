@@ -5,6 +5,7 @@
 #include "config.h"
 #ifdef PROOT_PATH
 #include "proot_bridge.h"
+#include "fake_ids.h"
 #endif
 #ifdef FD_EXPERIMENT
 #include "fd_experiment.h"
@@ -66,8 +67,14 @@ static void fake_owner(long sys_no, const long *a)
         uid_hit |= owner[0] == owner_uid[i];
         gid_hit |= owner[1] == owner_gid[i];
     }
+#ifdef PROOT_PATH
+    /* The caller's own files belong to its fake saved ids, as in PRoot. */
+    if (uid_hit) owner[0] = fake_ids_owner(0);
+    if (gid_hit) owner[1] = fake_ids_owner(1);
+#else
     if (uid_hit) owner[0] = 0;
     if (gid_hit) owner[1] = 0;
+#endif
 }
 
 long syscall_dispatcher(long sys_no, pt_regs *regs)

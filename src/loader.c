@@ -1411,7 +1411,9 @@ static const char *find_config_path_arg(int argc, char **argv)
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_NAME,
 			      z_strlen(CONFIG_CHILD_EXEC_NAME) + 1) == 0 ||
 		    z_strncmp(arg, CONFIG_CHILD_GLUE_DIR,
-			      z_strlen(CONFIG_CHILD_GLUE_DIR) + 1) == 0) {
+			      z_strlen(CONFIG_CHILD_GLUE_DIR) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_FAKE_IDS,
+			      z_strlen(CONFIG_CHILD_FAKE_IDS) + 1) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			i++;
@@ -1592,6 +1594,27 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 			    z_strlen(argv[i + 1]) >= CONFIG_MAX_PATH)
 				z_errx(1, "invalid value for %s", arg);
 			copy_cstr(cfg->glue_dir, CONFIG_MAX_PATH, argv[i + 1]);
+			i++;
+			continue;
+		}
+		if (z_strncmp(arg, CONFIG_CHILD_FAKE_IDS,
+			      z_strlen(CONFIG_CHILD_FAKE_IDS) + 1) == 0) {
+			const char *p = i + 1 < argc ? argv[i + 1] : NULL;
+			for (int k = 0; p && k < 8; k++) {
+				unsigned long long value = 0;
+				const char *start = p;
+				while (*p >= '0' && *p <= '9' && value <= 0xffffffffULL)
+					value = value * 10 + (unsigned)(*p++ - '0');
+				if (p == start || value > 0xffffffffULL ||
+				    *p != (k == 7 ? '\0' : ':'))
+					p = NULL;
+				else {
+					cfg->fake_ids[k] = (uint32_t)value;
+					p += k < 7;
+				}
+			}
+			if (!p)
+				z_errx(1, "invalid value for %s", arg);
 			i++;
 			continue;
 		}

@@ -247,6 +247,11 @@ rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存�
 2026-10-30 新式路径调用增量：Linux 6.13 起的 setxattrat/getxattrat/listxattrat/removexattrat、open_tree_attr 与
 6.17 的 file_getattr/file_setattr（463-469）此前走快路径原样交给内核，guest 路径会按宿主解释。现在进入共享慢路径
 （共 146 项）并报告 ENOSYS，与旧内核相同，调用者回退到已翻译的旧接口。这是明确的不支持，不算实现。
+2026-10-30 伪 root 凭据增量：此前 get*id 恒为 0、set*id 一律假装成功，apt 等降权后校验 getresuid 的程序会失败。
+现按 PRoot fake_id0 为每个进程维护 guest 的 r/e/s/fs uid 与 gid（初始全 0）：set*id 按 Linux 规则以伪有效 uid 0
+作为特权判断，降权后无法再取回 root，setgroups 需特权；凭据经 fork 继承、经 exec 链 `--fake-ids` 传递。
+伪 root 的 chown 遇内核 EPERM 报告成功（属主实际不变，ENOENT 等照常）；调用者自己的文件在 stat 中归属
+当前的保存 uid/gid（PRoot 同样如此）。附加组未建模。新增 fake_ids 用例（两种构建）。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

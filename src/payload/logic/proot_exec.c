@@ -8,6 +8,7 @@
 #include <elf.h>
 #include <string.h>
 #include "config.h"
+#include "fake_ids.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
 #include "proot_scratch.h"
@@ -31,6 +32,7 @@ typedef struct {
     char header[SCRIPT_DEPTH + 1][256];
     char volumes[CONFIG_MAX_BINDS][CONFIG_MAX_PATH * 2 + 2];
     char *argv[CHAIN_ARGS];
+    char fake_ids[8 * 11];
 #ifdef FD_EXPERIMENT
     char fd_state[24];
     /* PT_INTERP as stored in the target, then its policy-checked resolution. */
@@ -260,6 +262,20 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     if (*name && *name != '/') {
         s->argv[pos++] = CONFIG_CHILD_EXEC_NAME;
         s->argv[pos++] = (char *)name;
+    }
+    uint32_t ids[8];
+    if (fake_ids_current(ids)) {
+        char *out = s->fake_ids;
+        for (int i = 0; i < 8; i++) {
+            char digits[12];
+            int count = 0;
+            uint32_t value = ids[i];
+            do { digits[count++] = '0' + value % 10; value /= 10; } while (value);
+            while (count) *out++ = digits[--count];
+            *out++ = i < 7 ? ':' : 0;
+        }
+        s->argv[pos++] = CONFIG_CHILD_FAKE_IDS;
+        s->argv[pos++] = s->fake_ids;
     }
     if (cfg->glue_dir[0]) {
         s->argv[pos++] = CONFIG_CHILD_GLUE_DIR;

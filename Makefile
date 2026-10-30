@@ -29,6 +29,7 @@ check: build
 	$(PYTHON) test/fs_policy/xattrs.py --normal
 	$(PYTHON) test/fs_policy/access.py --normal
 	$(PYTHON) test/fs_policy/ids.py
+	$(PYTHON) test/fs_policy/fake_ids.py
 	$(PYTHON) test/fs_policy/glue.py
 	$(PYTHON) test/fs_policy/interp_links.py
 	$(PYTHON) vendor/proot/port-tests/test_inotify.py

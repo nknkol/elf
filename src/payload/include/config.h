@@ -49,6 +49,8 @@
 #define CONFIG_CHILD_EXEC_NAME "--exec-name"
 /* Base directory of the glue tree, fixed by the initial loader. */
 #define CONFIG_CHILD_GLUE_DIR "--glue-dir"
+/* Guest credentials r:e:s:fs uid then gid (PRoot fake_id0), when not root. */
+#define CONFIG_CHILD_FAKE_IDS "--fake-ids"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -98,6 +100,7 @@ typedef struct payload_config {
     char exec_exe[CONFIG_MAX_PATH];
     /* Glue tree base: PROOT_TMP_DIR, TMPDIR or /tmp of the initial loader. */
     char glue_dir[CONFIG_MAX_PATH];
+    uint32_t fake_ids[8]; /* Guest r/e/s/fs uid then gid; all 0 initially. */
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
