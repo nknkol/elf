@@ -23,7 +23,10 @@ with (build/('elf-build'+suffix+'.log')).open('w') as log:
     subprocess.run(['make','-B','-C',str(elf/'src'),'ARCH=aarch64','CC=clang',
                     'LD=ld.lld','OBJCOPY=llvm-objcopy','SHELL_BIN_SRC=/bin/sh',
                     'PROOT_PATH=1', f'FD_EXPERIMENT={int(args.fd_experiment)}',
-                    f'LDFLAGS=-nostdlib -pie -e z_start -Wl,-Bsymbolic,--no-undefined,--build-id=none {build}/loader_memory.o'],
+                    # Static, non-PIE, at a fixed address: no host dynamic linker in
+                    # guest processes, and the seccomp backstop can allow the
+                    # loader's own syscalls by address across every exec.
+                    f'LDFLAGS=-nostdlib -static -no-pie -Wl,--image-base=0x3f00000000 -e z_start -Wl,--no-undefined,--build-id=none {build}/loader_memory.o'],
                    stdout=log,stderr=subprocess.STDOUT,check=True)
 snapshot=build/('elfloader-proot'+suffix)
 pending=build/('elfloader-proot'+suffix+'.next')

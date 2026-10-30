@@ -41,6 +41,9 @@ with tempfile.TemporaryDirectory(prefix='bench-', dir=build) as tmp:
         'guarded': ([str(build / 'elfloader-proot-fd-experiment'), '--mode', 'container',
                      '--root', str(root), '-v', f'{work}:/work', '--guard-file-access', 'dw',
                      '--allow-stdio-output', '--', './bench', '/work'], root),
+        # Default build with the opt-in seccomp backstop (filter on every call).
+        'backstop': ([str(build / 'elfloader-proot'), '--mode', 'container', '--root', str(root),
+                      '--seccomp-backstop', '-v', f'{work}:/work', '--', './bench', '/work'], root),
     }
     results = {}
     for name, (argv, cwd) in configs.items():

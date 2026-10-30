@@ -364,6 +364,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = s->fake_ids;
     }
     if (cfg->link_copy) s->argv[pos++] = "--link-copy";
+    if (cfg->seccomp_backstop) s->argv[pos++] = "--seccomp-backstop";
     uint32_t groups[32];
     int group_count = fake_ids_groups(groups);
     if (group_count != 1 || groups[0]) {

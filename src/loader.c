@@ -535,6 +535,101 @@ static int install_guest_debugger(void)
 	return 0;
 }
 
+#if defined(PROOT_PATH) && defined(__aarch64__)
+/* --seccomp-backstop: a seccomp filter traps every syscall that does not
+ * come from the loader image or the payload (both at fixed addresses, so
+ * the filter, which survives exec, stays valid in every descendant). The
+ * SIGSYS handler forwards the trapped call into the payload exactly as a
+ * stub would, so unhooked svc (JIT code, unreachable sites, the vDSO
+ * fallback) still gets guest semantics. rt_sigreturn, exit, exit_group,
+ * restart_syscall and clone are allowed by number: they take no paths and
+ * clone cannot run inside a signal handler. */
+#define PAYLOAD_FIXED_BASE 0x3f80000000ul
+static unsigned long g_payload_lo, g_payload_hi, g_payload_entry;
+extern char __ehdr_start[], _end[];
+
+static long backstop_call(unsigned long entry, const unsigned long *r)
+{
+	register long x0 __asm__("x0") = (long)r[0];
+	register long x1 __asm__("x1") = (long)r[1], x2 __asm__("x2") = (long)r[2];
+	register long x3 __asm__("x3") = (long)r[3], x4 __asm__("x4") = (long)r[4];
+	register long x5 __asm__("x5") = (long)r[5], x8 __asm__("x8") = (long)r[8];
+	register unsigned long x17 __asm__("x17") = entry;
+	/* The payload entry restores every register except x0 (and the x16,
+	 * x17 and x30 a stub saves itself). */
+	__asm__ volatile("blr x17"
+			 : "+r"(x0)
+			 : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8), "r"(x17)
+			 : "x16", "x30", "memory", "cc");
+	return x0;
+}
+
+/* Our TRAP action's data, delivered in si_errno: the host sandbox's own
+ * filter traps some calls too, and those must keep their native effect. */
+#define BACKSTOP_TRAP_DATA 0x0e1f
+
+static void loader_sigsys_handler(int sig, siginfo_t *si, void *ucontext)
+{
+	ucontext_t *uc = (ucontext_t *)ucontext;
+	if (!si || si->si_code != 1 /* SYS_SECCOMP */ || si->si_errno != BACKSTOP_TRAP_DATA || !uc) {
+		/* Not ours: die of SIGSYS as the program would natively. */
+		k_sigaction_t dfl;
+		z_memset(&dfl, 0, sizeof(dfl));
+		dbg_rt_sigaction(sig, &dfl, NULL);
+		z_syscall(__NR_tgkill, z_syscall(__NR_getpid), z_syscall(__NR_gettid), sig);
+		return;
+	}
+	unsigned long *regs = (unsigned long *)uc->uc_mcontext.regs;
+	regs[0] = (unsigned long)backstop_call(g_payload_entry, regs);
+}
+
+static int backstop_handler(void)
+{
+	k_sigaction_t sa;
+	z_memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = (k_sigaction_handler_t)loader_sigsys_handler;
+	/* NODEFER: a guest handler run from here may itself trap. */
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+	dbg_sigemptyset(&sa.sa_mask);
+	return dbg_rt_sigaction(SIGSYS, &sa, NULL);
+}
+
+static int backstop_filter(void)
+{
+	unsigned long ranges[2][2] = {{(unsigned long)__ehdr_start, (unsigned long)_end},
+				      {g_payload_lo, g_payload_hi}};
+	struct { unsigned short code; unsigned char jt, jf; unsigned int k; } f[32];
+	int n = 0;
+#define BPF(c, t, e, v) (f[n++] = (typeof(f[0])){(c), (t), (e), (v)})
+	/* seccomp_data: nr at 0, arch at 4, instruction_pointer at 8. */
+	BPF(0x20, 0, 0, 0); /* ld nr */
+	static const unsigned allowed[] = {139, 93, 94, 128, 220, 435};
+	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)
+		BPF(0x15, 0, 0, allowed[i]); /* jeq -> allow (patched below) */
+	int nr_checks = n;
+	for (int r = 0; r < 2; r++) {
+		if ((ranges[r][0] >> 32) != ((ranges[r][1] - 1) >> 32))
+			return -1; /* A range across a 4 GiB boundary: unsupported. */
+		BPF(0x20, 0, 0, 12);                                /* ld ip high */
+		BPF(0x15, 0, 4, (unsigned)(ranges[r][0] >> 32));    /* jeq hi */
+		BPF(0x20, 0, 0, 8);                                 /* ld ip low */
+		BPF(0x35, 0, 2, (unsigned)ranges[r][0]);            /* jge lo */
+		BPF(0x35, 1, 0, (unsigned)ranges[r][1]);            /* jge hi -> next */
+		BPF(0x06, 0, 0, 0x7fff0000u);                       /* ret ALLOW */
+	}
+	BPF(0x06, 0, 0, 0x00030000u | BACKSTOP_TRAP_DATA);          /* ret TRAP */
+	BPF(0x06, 0, 0, 0x7fff0000u);                               /* ret ALLOW */
+	for (int i = 1; i < nr_checks; i++)
+		f[i].jt = (unsigned char)(n - 1 - (i + 1));
+#undef BPF
+	struct { unsigned short len; void *filter; } prog = {(unsigned short)n, f};
+	if (z_syscall(__NR_prctl, 38 /* PR_SET_NO_NEW_PRIVS */, 1, 0, 0, 0) < 0)
+		return -1;
+	return (int)dbg_syscall_check(z_syscall(__NR_seccomp, 1 /* SET_MODE_FILTER */, 0,
+						&prog, 0, 0, 0));
+}
+#endif
+
 static void z_fini(void)
 {
 	/* No-op placeholder for atexit style hook */
@@ -722,10 +817,26 @@ static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 	maxva = ROUND_PG(maxva);
 	size_t total_size = maxva - minva;
 
-	void *base = z_mmap(NULL, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	void *base = (void *)-1;
+#if defined(PROOT_PATH) && defined(__aarch64__)
+	/* A fixed address, identical in every loader-run process (the seccomp
+	 * backstop allows the payload's syscalls by address across exec). */
+	base = z_mmap((void *)PAYLOAD_FIXED_BASE, total_size, PROT_NONE,
+		      MAP_PRIVATE | MAP_ANONYMOUS | 0x100000 /* MAP_FIXED_NOREPLACE */, -1, 0);
+	if (base != (void *)-1 && base != (void *)PAYLOAD_FIXED_BASE) {
+		z_munmap(base, total_size);
+		base = (void *)-1;
+	}
+#endif
+	if (base == (void *)-1)
+		base = z_mmap(NULL, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (base == (void *)-1) {
 		return NULL;
 	}
+#if defined(PROOT_PATH) && defined(__aarch64__)
+	g_payload_lo = (unsigned long)base;
+	g_payload_hi = (unsigned long)base + total_size;
+#endif
 
 	for (int i = 0; i < ehdr.e_phnum; i++) {
 		if (phdr[i].p_type != PT_LOAD)
@@ -1436,6 +1547,7 @@ static const char *find_config_path_arg(int argc, char **argv)
 		}
 		if (is_child_loader_arg(arg) || z_strncmp(arg, "--init", 7) == 0 ||
 		    z_strncmp(arg, "--link-copy", 12) == 0 ||
+		    z_strncmp(arg, "--seccomp-backstop", 19) == 0 ||
 		    z_strncmp(arg, "-d", 3) == 0 || z_strncmp(arg, "--detach", 9) == 0) {
 			continue;
 		}
@@ -1617,6 +1729,10 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 #ifdef PROOT_PATH
 		if (z_strncmp(arg, "--link-copy", 12) == 0) {
 			cfg->link_copy = 1;
+			continue;
+		}
+		if (z_strncmp(arg, "--seccomp-backstop", 19) == 0) {
+			cfg->seccomp_backstop = 1;
 			continue;
 		}
 		if (z_strncmp(arg, "--kernel-release", 17) == 0 ||
@@ -2860,6 +2976,18 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 	if (install_guest_debugger() < 0)
 		z_printf("[Debugger] SIGSEGV debugger setup failed, continuing without it\n");
+#if defined(PROOT_PATH) && defined(__aarch64__)
+	if (bootstrap_cfg.seccomp_backstop) {
+		g_payload_entry = payload_entry_addr;
+		if (g_payload_lo != PAYLOAD_FIXED_BASE)
+			z_errx(1, "seccomp backstop: payload not at its fixed address");
+		if (backstop_handler() < 0)
+			z_errx(1, "seccomp backstop: cannot install SIGSYS handler");
+		/* Installed once; it survives exec into every child loader. */
+		if (!child_loader && backstop_filter() < 0)
+			z_errx(1, "seccomp backstop: cannot install the filter (errno %d)", z_errno);
+	}
+#endif
 
 #ifdef PROOT_PATH
 	/* /proc/<pid>/{comm,stat,status} name the guest program, not the loader

@@ -108,6 +108,8 @@ typedef struct payload_config {
     uint32_t fake_ids[8]; /* Guest r/e/s/fs uid then gid; all 0 initially. */
     /* --link-copy: a hard link the storage refuses becomes a copy. */
     int32_t link_copy;
+    /* --seccomp-backstop: unhooked syscalls trap to the payload. */
+    int32_t seccomp_backstop;
     /* Supplementary groups (PRoot fake_id0); fake_group_count < 0: {0}. */
     int32_t fake_group_count;
     uint32_t fake_groups[32];

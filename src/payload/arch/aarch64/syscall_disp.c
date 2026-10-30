@@ -88,6 +88,22 @@ static void fake_owner(long sys_no, const long *a)
 #endif
 }
 
+#ifdef PROOT_PATH
+/* --seccomp-backstop: the loader's SIGSYS handler must stay installed. A
+ * guest's own SIGSYS action is recorded and reported back, never installed
+ * (signals the guest raises itself are then not delivered to it). */
+static unsigned char guest_sigsys[32];
+static long backstop_sigaction(long *a)
+{
+    if (a[3] != 8) return -EINVAL;
+    unsigned char previous[32];
+    memcpy(previous, guest_sigsys, sizeof(previous));
+    if (a[1]) memcpy(guest_sigsys, (const void *)a[1], sizeof(guest_sigsys));
+    if (a[2]) memcpy((void *)a[2], previous, sizeof(previous));
+    return 0;
+}
+#endif
+
 long syscall_dispatcher(long sys_no, pt_regs *regs)
 {
     long *a = (long *)regs->regs;
@@ -103,6 +119,17 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
 
     if (sys_no >= __NR_setxattrat && sys_no <= __NR_file_setattr)
         return -ENOSYS; /* Untranslated newer path calls (syscall_nums.h). */
+#ifdef PROOT_PATH
+    if (sys_no == __NR_rt_sigaction && (int)a[0] == 31 /* SIGSYS */ &&
+        g_payload_config.seccomp_backstop)
+        return backstop_sigaction(a);
+    /* The HarmonyOS kernel exempts syscalls from writable+executable pages
+     * from seccomp, and code written there after mapping is never hooked:
+     * under the backstop such mappings are refused (W^X). */
+    if (g_payload_config.seccomp_backstop && (sys_no == __NR_mmap || sys_no == __NR_mprotect ||
+        sys_no == __NR_pkey_mprotect) && (a[2] & 6) == 6)
+        return -EACCES;
+#endif
     int named = sys_no == __NR_accept || sys_no == __NR_accept4 ||
         sys_no == __NR_getsockname || sys_no == __NR_getpeername;
     unsigned capacity = named && a[1] && a[2] ? *(unsigned *)a[2] : 0;

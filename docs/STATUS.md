@@ -308,6 +308,15 @@ mmap/mprotect），桩页地址只是提示，超出 ±128 MiB 时该 SVC 被静
 整段失败（loader 退出，运行期映射返回 ENOMEM），不再留下原始 SVC。真机每次 exec 从约 40 ms 降到约 25 ms，
 python 进程的匿名可执行区从 948 个降到 13 个。新增 stub_islands 用例扫描 guest 内存：除 payload 与桩自身的
 rt_sigreturn 路径外不存在原始 svc。
+2026-10-30 seccomp 兜底（`--seccomp-backstop`，可选）：loader 改为静态非 PIE、固定链接在 0x3f00000000（guest 进程中
+不再映射宿主 musl 动态链接器及其约 980 条原始 svc），payload 固定装载在 0x3f80000000。首个 loader 安装按指令地址
+判定的过滤器：loader 映像与 payload 文本内的系统调用放行，rt_sigreturn/exit/exit_group/restart_syscall/clone 按编号
+放行，其余以带标记的 TRAP 交给 loader 的 SIGSYS 处理函数，后者像桩一样把调用交给 payload 派发；过滤器跨 exec
+保留，每个子 loader 进入 guest 前重新安装处理函数。宿主沙箱自身的 TRAP（如 pkey_mprotect）不带标记，照原生方式
+以 SIGSYS 终止。实测 HongMeng 对可写可执行（RWX）匿名页中的系统调用不做 seccomp 检查，因此该模式拒绝同时可写
+可执行的映射（W^X，EACCES）。经 /proc/self/mem 写入已可执行代码的原始 svc：无兜底时以宿主路径执行，有兜底时
+被截获并按 guest 语义翻译（backstop 用例）。代价：每个系统调用约多 2 µs（getpid 约 9 倍、pread 约 5 倍），
+因此默认关闭。python 子进程、gcc、git 在该模式下正常。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
