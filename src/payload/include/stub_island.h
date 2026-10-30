@@ -32,6 +32,52 @@
 
 long island_mmap(uintptr_t addr, size_t len, int prot, int flags);
 long island_munmap(uintptr_t addr, size_t len);
+/* Called for every finished island, so the payload can protect it. */
+void island_note(uintptr_t base, size_t len);
+long island_pread(int fd, void *buf, size_t len, long offset);
+
+/* Byte ranges of real code inside a mapping, relative to its start. */
+struct island_code { size_t start, end; };
+#define ISLAND_CODE_MAX 16
+
+/* Code ranges of the file bytes [file_off, file_off + len) of an ELF64
+ * AArch64 file, from its SHF_EXECINSTR sections, so literal data that
+ * happens to encode `svc #0` is never rewritten. Returns the count, or 0
+ * when the file has no usable section headers (scan everything then). */
+static inline int island_code_ranges(int fd, unsigned long file_off, size_t len,
+                                     struct island_code *out)
+{
+    unsigned char eh[64];
+    if (fd < 0 || island_pread(fd, eh, sizeof(eh), 0) != (long)sizeof(eh)) return 0;
+    if (eh[0] != 0x7f || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F' || eh[4] != 2) return 0;
+    uint64_t shoff = 0;
+    uint16_t shentsize = 0, shnum = 0;
+    __builtin_memcpy(&shoff, eh + 0x28, 8);
+    __builtin_memcpy(&shentsize, eh + 0x3a, 2);
+    __builtin_memcpy(&shnum, eh + 0x3c, 2);
+    if (!shoff || shentsize != 64 || !shnum || shnum > 4096) return 0;
+    int count = 0;
+    for (uint16_t i = 0; i < shnum; i++) {
+        unsigned char sh[64];
+        if (island_pread(fd, sh, sizeof(sh), (long)(shoff + (uint64_t)i * 64)) != (long)sizeof(sh))
+            return 0;
+        uint32_t type;
+        uint64_t flags, offset, size;
+        __builtin_memcpy(&type, sh + 4, 4);
+        __builtin_memcpy(&flags, sh + 8, 8);
+        __builtin_memcpy(&offset, sh + 24, 8);
+        __builtin_memcpy(&size, sh + 32, 8);
+        if (type != 1 /* PROGBITS */ || !(flags & 4 /* SHF_EXECINSTR */) || !size) continue;
+        if (offset + size <= file_off || offset >= file_off + len) continue;
+        if (count == ISLAND_CODE_MAX) return 0; /* Too fragmented: scan everything. */
+        size_t start = offset > file_off ? offset - file_off : 0;
+        size_t end = offset + size - file_off;
+        out[count++] = (struct island_code){start, end > len ? len : end};
+    }
+    /* Section headers that place no code here (e.g. a non-text executable
+     * segment) are not trusted: scan everything. */
+    return count;
+}
 long island_mprotect(uintptr_t addr, size_t len, int prot);
 
 struct island { uintptr_t base; size_t size, used; };
@@ -104,13 +150,23 @@ static inline void island_flush(uintptr_t start, size_t len)
  * threads may run it); final_prot is restored afterwards. Returns the
  * number of hooked sites, or a negative errno when any site could not be
  * covered (then nothing in the range is patched). */
-static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payload_entry,
-                                     int writable_prot, int final_prot)
+static inline int island_in_code(const struct island_code *code_ranges, int ranges, size_t byte)
+{
+    if (!ranges) return 1;
+    for (int r = 0; r < ranges; r++)
+        if (byte >= code_ranges[r].start && byte < code_ranges[r].end) return 1;
+    return 0;
+}
+#define ISLAND_SITE(i) (code[i] == ISLAND_SVC0 && island_in_code(code_ranges, ranges, (i) * 4))
+
+static inline long island_hook_code(uintptr_t base, size_t size, uintptr_t payload_entry,
+                                    int writable_prot, int final_prot,
+                                    const struct island_code *code_ranges, int ranges)
 {
     uint32_t *code = (uint32_t *)base;
     size_t words = size / 4, sites = 0;
     for (size_t i = 0; i < words; i++)
-        sites += code[i] == ISLAND_SVC0;
+        sites += ISLAND_SITE(i);
     if (!sites) return 0;
     size_t len = (sites * STUB_SIZE + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
     struct island after = {0, 0, 0}, before = {0, 0, 0};
@@ -118,7 +174,7 @@ static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payl
     /* Sites the after-island cannot reach (segments over 128 MiB). */
     size_t far = 0;
     for (size_t i = 0; i < words; i++)
-        if (code[i] == ISLAND_SVC0 &&
+        if (ISLAND_SITE(i) &&
             (!after.base || !island_slot_ok((uintptr_t)&code[i], after.base) ||
              !island_slot_ok((uintptr_t)&code[i], after.base + len - STUB_SIZE)))
             far++;
@@ -129,7 +185,7 @@ static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payl
     /* Assign every site before touching the code: all or nothing. */
     long rc = 0;
     for (size_t i = 0; i < words && !rc; i++) {
-        if (code[i] != ISLAND_SVC0) continue;
+        if (!ISLAND_SITE(i)) continue;
         uintptr_t site = (uintptr_t)&code[i];
         uintptr_t slot = island_take(&after, site);
         if (!slot) slot = island_take(&before, site);
@@ -146,6 +202,7 @@ static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payl
         island_flush(is->base, is->used);
         long p = island_mprotect(is->base, used, ISLAND_PROT_READ | ISLAND_PROT_EXEC);
         if (p < 0 && !rc) rc = p;
+        if (p >= 0) island_note(is->base, used);
     }
     if (rc) return rc;
     /* Patch: the stubs exist; each branch is one aligned 4-byte store. */
@@ -158,7 +215,7 @@ static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payl
     after.used = before.used = 0;
     long hooked = 0;
     for (size_t i = 0; i < words; i++) {
-        if (code[i] != ISLAND_SVC0) continue;
+        if (!ISLAND_SITE(i)) continue;
         uintptr_t site = (uintptr_t)&code[i];
         uintptr_t slot = island_take(&after, site);
         if (!slot) slot = island_take(&before, site);
@@ -170,6 +227,13 @@ static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payl
     island_flush(base, size);
     rc = island_mprotect(page_lo, span, final_prot);
     return rc < 0 ? rc : hooked;
+}
+#undef ISLAND_SITE
+
+static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payload_entry,
+                                     int writable_prot, int final_prot)
+{
+    return island_hook_code(base, size, payload_entry, writable_prot, final_prot, NULL, 0);
 }
 
 #endif /* STUB_ISLAND_H */

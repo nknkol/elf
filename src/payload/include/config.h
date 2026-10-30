@@ -110,6 +110,10 @@ typedef struct payload_config {
     int32_t link_copy;
     /* --seccomp-backstop: unhooked syscalls trap to the payload. */
     int32_t seccomp_backstop;
+    /* Loader image and the stub islands the loader created: guest memory
+     * calls may not unmap, remap or reprotect them. */
+    uint32_t protected_count;
+    uint64_t protected_ranges[64][2];
     /* Supplementary groups (PRoot fake_id0); fake_group_count < 0: {0}. */
     int32_t fake_group_count;
     uint32_t fake_groups[32];

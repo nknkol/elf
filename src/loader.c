@@ -664,6 +664,7 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 		void *start;
 		size_t size;
 		int prot;
+		unsigned long file_off;
 	} exec_seg_t;
 	exec_seg_t *exec_segs = z_alloca(ehdr->e_phnum * sizeof(exec_seg_t));
 	int exec_cnt = 0;
@@ -717,6 +718,7 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 			exec_segs[exec_cnt].start = (void *)((unsigned long)p + off);
 			exec_segs[exec_cnt].size = iter->p_filesz;
 			exec_segs[exec_cnt].prot = prot;
+			exec_segs[exec_cnt].file_off = iter->p_offset;
 			exec_cnt++;
 		}
 
@@ -732,8 +734,8 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 	/* Install hooks after mappings complete to keep stub pages intact */
 	for (int i = 0; i < exec_cnt; i++) {
 		/* Fail closed: a raw svc left unhooked would bypass the payload. */
-		if (install_hook_prot(exec_segs[i].start, exec_segs[i].size, payload_addr,
-				      exec_segs[i].prot) < 0)
+		if (install_hook_file(exec_segs[i].start, exec_segs[i].size, payload_addr,
+				      exec_segs[i].prot, fd, exec_segs[i].file_off) < 0)
 			z_errx(1, "cannot place syscall stubs within branch range");
 	}
 
@@ -2941,6 +2943,21 @@ void z_entry(unsigned long *sp, void (*fini)(void))
             z_errx(1, "guest auxv exceeds payload capacity");
         z_memcpy(payload_cfg->guest_auxv, av_start, pairs * sizeof(*av_start));
         payload_cfg->guest_auxv_bytes = pairs * sizeof(*av_start);
+        /* The loader image (code, data, the SIGSYS handler's state) and the
+         * islands for the initial images are protected from guest mm calls. */
+        {
+            extern uint64_t g_loader_islands[64][2];
+            extern unsigned g_loader_island_count;
+            extern char __ehdr_start[], _end[];
+            unsigned n = 0;
+            payload_cfg->protected_ranges[n][0] = (uint64_t)__ehdr_start;
+            payload_cfg->protected_ranges[n++][1] = ((uint64_t)_end + 4095) & ~4095ul;
+            for (unsigned i = 0; i < g_loader_island_count && n < 64; i++, n++) {
+                payload_cfg->protected_ranges[n][0] = g_loader_islands[i][0];
+                payload_cfg->protected_ranges[n][1] = g_loader_islands[i][1];
+            }
+            payload_cfg->protected_count = n;
+        }
     }
 #endif
 	if (!saw_execfn)

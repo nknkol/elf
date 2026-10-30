@@ -121,7 +121,8 @@ static long mmap_exec_anon_fallback(long *args)
     }
 
     /* Fail closed: never leave unhooked syscalls executable. */
-    if ((prot & PROT_EXEC) && install_hook_prot(mapped, len, (void *)&_start, prot) < 0) {
+    if ((prot & PROT_EXEC) &&
+        install_hook_file(mapped, len, (void *)&_start, prot, fd, (unsigned long)off) < 0) {
         raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
         return -ENOMEM;
     }

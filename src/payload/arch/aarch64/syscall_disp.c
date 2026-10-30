@@ -3,6 +3,7 @@
 #include <string.h>
 #include "syscall_nums.h"
 #include "syscall_hooks.h"
+#include "hook_runtime.h"
 #include "config.h"
 #ifdef PROOT_PATH
 #include "proot_bridge.h"
@@ -119,6 +120,19 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
 
     if (sys_no >= __NR_setxattrat && sys_no <= __NR_file_setattr)
         return -ENOSYS; /* Untranslated newer path calls (syscall_nums.h). */
+    /* Loader, payload and stub islands are sealed against the guest's own
+     * mm calls (EPERM, as for mseal'ed memory): unmapping or remapping an
+     * island would send later syscalls into whatever replaced it. */
+    if (sys_no == __NR_munmap || sys_no == __NR_mprotect || sys_no == __NR_pkey_mprotect ||
+        sys_no == __NR_mremap ||
+        (sys_no == __NR_mmap && (a[3] & 0x10) && !(a[3] & 0x100000)) ||
+        (sys_no == __NR_madvise && ((int)a[2] == 4 || (int)a[2] == 8 || (int)a[2] == 9 ||
+                                    (int)a[2] == 10 || (int)a[2] == 18))) {
+        if (hook_protected_overlap((uintptr_t)a[0], (size_t)a[1]) ||
+            (sys_no == __NR_mremap && (a[3] & 2 /* MREMAP_FIXED */) &&
+             hook_protected_overlap((uintptr_t)a[4], (size_t)a[2])))
+            return -EPERM;
+    }
 #ifdef PROOT_PATH
     if (sys_no == __NR_rt_sigaction && (int)a[0] == 31 /* SIGSYS */ &&
         g_payload_config.seccomp_backstop)

@@ -317,6 +317,12 @@ rt_sigreturn 路径外不存在原始 svc。
 可执行的映射（W^X，EACCES）。经 /proc/self/mem 写入已可执行代码的原始 svc：无兜底时以宿主路径执行，有兜底时
 被截获并按 guest 语义翻译（backstop 用例）。代价：每个系统调用约多 2 µs（getpid 约 9 倍、pread 约 5 倍），
 因此默认关闭。python 子进程、gcc、git 在该模式下正常。
+2026-10-30 桩岛加固：loader 映像、payload 与所有桩岛（loader 建的经配置传给 payload，运行期建的就地登记）对 guest
+自身的 munmap/mprotect/mremap/MAP_FIXED mmap/破坏性 madvise 封存，重叠时返回 EPERM（与 mseal 一致），避免桩被
+卸载或覆盖后系统调用跳进别的内存。只扫描代码：文件有节表时只在 SHF_EXECINSTR 节中寻找 `svc #0`，可执行段里
+恰好编码为 svc 的字面数据不再被改写（loader 映像与运行期按文件映射的代码都适用；匿名可执行内存与无节表文件仍
+整段扫描）。剩余已知风险：guest 代码可以跳进 loader/payload 自身的系统调用指令绕过派发（进程内拦截的固有限制，
+兜底模式同样放行这些地址）。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

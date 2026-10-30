@@ -170,6 +170,22 @@ long island_mprotect(uintptr_t addr, size_t len, int prot)
 {
     return z_syscall(__NR_mprotect, addr, len, prot);
 }
+long island_pread(int fd, void *buf, size_t len, long offset)
+{
+    return z_syscall(__NR_pread64, fd, buf, len, offset);
+}
+
+/* Islands made for the initial images; copied into the payload config. */
+uint64_t g_loader_islands[64][2];
+unsigned g_loader_island_count;
+void island_note(uintptr_t base, size_t len)
+{
+    if (g_loader_island_count < 64) {
+        g_loader_islands[g_loader_island_count][0] = base;
+        g_loader_islands[g_loader_island_count][1] = base + len;
+        g_loader_island_count++;
+    }
+}
 
 long install_hook_prot(void *target_base, size_t target_size, void *payload_entry, int prot)
 {
@@ -178,9 +194,21 @@ long install_hook_prot(void *target_base, size_t target_size, void *payload_entr
     /* --hook-range (debugging) selects individual sites: legacy path. */
     if (g_hook_min != 0 || g_hook_max != 0x7fffffff)
         return install_hook(target_base, target_size, payload_entry, 0);
+    return install_hook_file(target_base, target_size, payload_entry, prot, -1, 0);
+}
+
+long install_hook_file(void *target_base, size_t target_size, void *payload_entry, int prot,
+                       int fd, unsigned long file_off)
+{
+    if (!payload_entry || !target_base || !target_size)
+        return 0;
+    if (g_hook_min != 0 || g_hook_max != 0x7fffffff)
+        return install_hook(target_base, target_size, payload_entry, 0);
+    struct island_code code[ISLAND_CODE_MAX];
+    int ranges = island_code_ranges(fd, file_off, target_size, code);
     /* Nothing runs this code yet: patch through a read-write view. */
-    long rc = island_hook_range((uintptr_t)target_base, target_size, (uintptr_t)payload_entry,
-                                PROT_READ | PROT_WRITE, prot);
+    long rc = island_hook_code((uintptr_t)target_base, target_size, (uintptr_t)payload_entry,
+                               PROT_READ | PROT_WRITE, prot, code, ranges);
     if (rc < 0)
         HOOK_ERR("[Hook Error] cannot cover syscalls in %p (+%lu): %ld\n",
                  target_base, (unsigned long)target_size, rc);

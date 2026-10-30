@@ -9,6 +9,10 @@ int install_hook(void *target_base, size_t target_size, void *payload_entry, siz
 /* Hooks every svc #0 in an executable range, restoring prot afterwards.
  * Negative when a site could not be covered (nothing is patched then). */
 long install_hook_prot(void *target_base, size_t target_size, void *payload_entry, int prot);
+/* Same for a range loaded from fd at file_off: only its code sections are
+ * scanned when the file has section headers. */
+long install_hook_file(void *target_base, size_t target_size, void *payload_entry, int prot,
+                       int fd, unsigned long file_off);
 void set_hook_range(int min, int max);
 void set_hook_log_level(int level);
 
