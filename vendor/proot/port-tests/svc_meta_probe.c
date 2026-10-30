@@ -34,6 +34,9 @@ void run(long *sp)
         ret=op=='i'?sc(80,fd,(long)&st,0,0,0,0):sc(79,fd,(long)path,(long)&st,value,0,0);
         field("RET=",ret);
         if(ret==0){field("TYPE=",st.st_mode&0170000);field("SIZE=",st.st_size);}
+    }else if(op=='u'){
+        /* An unwritable result buffer is EFAULT, also on the lstat-reuse path. */
+        field("RET=",sc(79,-100,(long)path,8,value,0,0));
     }else if(op=='t'||op=='x'){
         if(op=='x'){
             fd=sc(56,-100,(long)path,O_PATH|O_NOFOLLOW,0,0,0);

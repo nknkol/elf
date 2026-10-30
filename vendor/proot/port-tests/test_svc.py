@@ -102,6 +102,8 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     metadata('lstat preserves symlink identity','s','/absolute',256,expected=['RET=0','TYPE=40960','SIZE=10'])
     metadata('stat bound file','s','/mnt/file',expected=['RET=0','SIZE=6'])
     metadata('stat missing file','s','/missing',expected=['RET=-2'])
+    metadata('stat into a bad buffer is EFAULT','u','/real/file',expected=['RET=-14'])
+    metadata('stat via symlink into a bad buffer is EFAULT','u','/absolute',expected=['RET=-14'])
     metadata('stat empty path without flag','s','',expected=['RET=-2'])
     metadata('stat empty path with symlink FD','e','/absolute',expected=['RET=0','TYPE=40960'])
     metadata('stat empty path with nofollow FD','e','/absolute',256,expected=['RET=0','TYPE=40960'])

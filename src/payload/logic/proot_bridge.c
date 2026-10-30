@@ -49,6 +49,13 @@ typedef struct {
     bool follow_final; /* Resolution dereferences a final symlink. */
     bool attributes; /* The call changes metadata of an existing name. */
     bool creates; /* The call creates a new name (EEXIST if it exists). */
+    /* Skip the final lstat: the call itself detects a final symlink
+     * (open with O_NOFOLLOW, ELOOP) and is then resolved again. */
+    bool defer_final;
+    /* The final lstat of a followed resolution found no symlink: that is
+     * the stat result for the same host path (saves one host walk). */
+    bool final_valid;
+    struct stat final_stat;
 #ifdef FD_EXPERIMENT
     bool reads; /* Immutable read policy snapshot below is active. */
     enum fs_access access[CONFIG_MAX_BINDS + 1];
@@ -76,7 +83,7 @@ typedef struct {
      * each followed symlink would otherwise cost 8 KiB of it. */
     char path_frames[6][2][PATH_MAX];
     char resolve_scratch[2][PATH_MAX];
-    char fd_host[PATH_MAX], mapped[PATH_MAX];
+    char fd_host[PATH_MAX], mapped[PATH_MAX], final_host[PATH_MAX];
 } Bridge;
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
@@ -396,7 +403,7 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
      * name (an existing link stays a link; a missing one is fine), and the
      * root or a bind mount point, whose configured host path the kernel
      * follows itself rather than PRoot reinterpreting it as a guest link. */
-    if (finality == FINAL_NORMAL && !b->follow_final)
+    if (finality == FINAL_NORMAL && (!b->follow_final || b->defer_final))
         return 0;
     if (!strcmp(guest, "/"))
         return 0;
@@ -414,6 +421,11 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
     unsigned int type = st.st_mode & S_IFMT;
     if (!IS_FINAL(finality) && type != S_IFDIR && type != S_IFLNK)
         return -ENOTDIR;
+    if (IS_FINAL(finality) && type != S_IFLNK && strlen(host) < PATH_MAX) {
+        b->final_stat = st;
+        strcpy(b->final_host, host);
+        b->final_valid = true;
+    }
     return type == S_IFLNK;
 }
 
@@ -725,7 +737,21 @@ static long guest_cwd(Bridge *b)
     return visible_guest_path(b, b->host, b->cwd);
 }
 
+static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow);
+/* A deferred final lookup does not know where a final symlink points, and
+ * policy decisions may depend on its target: any failure is resolved again
+ * with the full lookup before it is reported. */
 static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
+{
+    int rc = resolve_once(b, dirfd, path, follow);
+    if (rc < 0 && b->defer_final) {
+        b->defer_final = false;
+        rc = resolve_once(b, dirfd, path, follow);
+    }
+    return rc;
+}
+
+static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
 {
     if (!path)
         return -EFAULT;
@@ -745,6 +771,7 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
     PathResolver resolver = {{b, &ops, b->path_frames, 6}, b->cwd, host_fd, host_map,
                              b->resolve_scratch};
     b->follow_final = follow;
+    b->final_valid = false;
     int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
     if (rc >= 0) {
         int glue = glue_host(b);
@@ -1294,7 +1321,15 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
 
     bool observed_open = number == SYS_openat && origin &&
         (path[0] == '/' || b->anchor.known);
+    /* A followed open (not O_PATH, which would open the link itself) skips
+     * the final lstat and opens with O_NOFOLLOW; only ELOOP, a final
+     * symlink, needs the full resolution again. Saves one host walk. */
+    size_t length = strnlen(path, PATH_MAX);
+    b->defer_final = number == SYS_openat && follow && !(a[2] & O_PATH) &&
+        length && length < PATH_MAX && path[length - 1] != '/';
+    bool deferred = b->defer_final;
     ret = resolve(b, (int)a[0], path, follow);
+    b->defer_final = false;
     if (ret < 0)
         return ret;
     if (number == SYS_readlinkat) {
@@ -1321,8 +1356,31 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (number == SYS_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT)))
         ret = proc_cmdline(b, (int)a[2]);
     else ret = -ENOENT;
+    if (ret == -ENOENT && number == SYS_newfstatat && follow && b->final_valid &&
+        !strcmp(b->final_host, b->host)) {
+        /* Copied by the kernel so a bad buffer is still EFAULT. */
+        struct { const void *base; size_t length; } local = {&b->final_stat, sizeof(b->final_stat)},
+            remote = {(void *)a[2], sizeof(b->final_stat)};
+        long pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+        long n = raw_syscall(__NR_process_vm_writev, pid, (long)&local, 1, (long)&remote, 1, 0);
+        if (n == (long)sizeof(b->final_stat)) return 0;
+        if (n == -EFAULT) return n;
+    }
+    if (ret == -ENOENT && deferred) {
+        ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2] | O_NOFOLLOW, a[3], 0, 0);
+        if (ret != -ELOOP) goto opened;
+        /* A final symlink: resolve it in guest terms after all. */
+        ret = resolve(b, (int)a[0], path, follow);
+        if (ret < 0) return ret;
+        if (observed_open) {
+            ret = binding_table_mount_id(&b->table, b->guest, &mount_id);
+            if (ret < 0) return ret;
+        }
+        ret = -ENOENT;
+    }
     if (ret == -ENOENT)
         ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
+ opened:
     if (ret >= 0 && observed_open)
         *origin = (struct proot_open_origin){mount_id, true};
     return ret;
@@ -1385,6 +1443,8 @@ static long bridge_create(Bridge **out)
     b->mutation = false;
     b->attributes = false;
     b->creates = false;
+    b->defer_final = false;
+    b->final_valid = false;
     b->traverse = false;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
