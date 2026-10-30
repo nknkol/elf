@@ -7,8 +7,9 @@
 #include <stdint.h>
 
 /* With the seccomp backstop no memory may be writable and executable at
- * once: HarmonyOS does not filter syscalls issued from such pages, and code
- * written there after mapping is never hooked. */
+ * once: code written there after mapping is never hooked. (HongMeng does
+ * not run syscalls issued from anonymous RWX pages at all, they fail with
+ * ENOENT; the rule matters for kernels that do.) */
 static inline int integrity_wx(int prot)
 {
     return (prot & 6) == 6; /* PROT_WRITE | PROT_EXEC */

@@ -313,7 +313,7 @@ rt_sigreturn 路径外不存在原始 svc。
 判定的过滤器：loader 映像与 payload 文本内的系统调用放行，rt_sigreturn/exit/exit_group/restart_syscall/clone 按编号
 放行，其余以带标记的 TRAP 交给 loader 的 SIGSYS 处理函数，后者像桩一样把调用交给 payload 派发；过滤器跨 exec
 保留，每个子 loader 进入 guest 前重新安装处理函数。宿主沙箱自身的 TRAP（如 pkey_mprotect）不带标记，照原生方式
-以 SIGSYS 终止。实测 HongMeng 对可写可执行（RWX）匿名页中的系统调用不做 seccomp 检查，因此该模式拒绝同时可写
+以 SIGSYS 终止。当时认为 HongMeng 对可写可执行（RWX）匿名页中的系统调用不做 seccomp 检查（2026-10-31 已更正：这类调用根本不执行），因此该模式拒绝同时可写
 可执行的映射（W^X，EACCES）。经 /proc/self/mem 写入已可执行代码的原始 svc：无兜底时以宿主路径执行，有兜底时
 被截获并按 guest 语义翻译（backstop 用例）。代价：每个系统调用约多 2 µs（getpid 约 9 倍、pread 约 5 倍），
 因此默认关闭。python 子进程、gcc、git 在该模式下正常。
@@ -374,6 +374,20 @@ fexecve 带 AT_SYMLINK_NOFOLLOW 时不再把内部 /proc/self/fd/N 魔链接当�
   `fake_ids.c`；代码注释统一英文。
 - 测试：公共辅助 `test/lib.py`；`port-tests` 移到 `test/proot`。
 - 约定见 [架构说明](ARCHITECTURE.md)。
+2026-10-31 隔离可行性探测（真机，HongMeng Kernel 1.13.0）：
+- **更正**：此前记录的“HongMeng 对 RWX 匿名页中的系统调用不做 seccomp 检查”是误读。实测从 RWX 匿名页
+  （mmap 时即为 RWX，无论是否在 JIT 窗口内）发出的系统调用根本不执行：write、mkdirat、getpid 都返回
+  ENOENT，无副作用，与是否安装过滤器无关。先映射为可写、再 mprotect 成可执行（含 RWX，含 JIT 窗口内）的页，
+  其系统调用正常受 seccomp 约束。JIT 窗口本身不带来豁免；匿名页 mprotect 为可执行在本进程中也无需 JIT 窗口。
+  `personality(READ_IMPLIES_EXEC)` 不会让可读页变为可执行；SysV 共享内存不可用（shmget 返回 EACCES）。
+  结论：没有发现能绕过 seccomp 过滤器的内存类型。兜底模式拒绝 W+X 映射的理由因此不成立，该限制可以放宽。
+- seccomp 用户通知（`SECCOMP_RET_USER_NOTIF`）不支持（EOPNOTSUPP，监听过滤器 EINVAL）；KILL/TRAP/ERRNO/
+  TRACE/LOG/ALLOW 可用。`pidfd_open`、`pidfd_getfd`、`process_vm_readv` 可用。
+- 代理进程（broker）模型可行：过滤器无论调用地址一律拒绝 openat 后，进程自身 open 返回 EACCES，经 socket +
+  SCM_RIGHTS 由另一进程打开传回的 FD 可正常读取。开销：空往返约 20 µs，stat 约 35 µs、open+close 约 43 µs
+  （原生约 7 / 8.5 µs，当前 loader 约 23 / 28 µs）；不涉及路径的调用不受影响。
+- 进程内拦截（当前架构）对恶意代码不构成安全边界：guest 可跳进 loader/payload 的系统调用指令或改写
+  payload 数据；该限制无法在同一进程内解决，只能由 broker 一类的进程外策略解决。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

@@ -39,7 +39,7 @@ build/elfloader --mode container --root /absolute/path/to/rootfs \
 | `-e KEY=VALUE` | 设置 guest 环境变量 |
 | `--link-copy` | 存储拒绝硬链接时改为复制（dpkg/apt 需要） |
 | `--kernel-release R`、`--kernel-sysname S` | 改写 uname（同 PRoot -k） |
-| `--seccomp-backstop` | seccomp 兜底：截获未改写的系统调用；每次调用约多 2 µs，拒绝 W+X 内存 |
+| `--seccomp-backstop` | seccomp 兜底：截获未改写的系统调用；每次调用约多 2 µs，拒绝同时可写可执行的内存 |
 | `--log LEVEL` | loader 诊断输出（0-4）；非零时崩溃会打印寄存器转储 |
 | `--payload FILE` | 改用外部 payload（测试用；ABI 必须一致） |
 
