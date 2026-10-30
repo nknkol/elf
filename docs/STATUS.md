@@ -301,6 +301,13 @@ sysname 不是 Linux，按 uname -s 识别系统的脚本（config.guess 等）�
 2026-10-30 真实负载（真机 Ubuntu rootfs，应用私有存储，`--link-copy`）：apt 安装/卸载、gcc（动态/静态/多线程）、
 make -j8、git clone、python3 venv + pip（含从源码编译 C 扩展）、node 与 npm install、cargo 安装并编译运行
 hello 均通过。
+2026-10-30 桩岛：此前每个 SVC 单独占一个 4 KiB 桩页（只连 glibc 的小程序约 900 个映射区、每次 exec 数千次
+mmap/mprotect），桩页地址只是提示，超出 ±128 MiB 时该 SVC 被静默跳过，原样执行宿主系统调用，桩到返回地址越界时
+会写入自跳转。现在每个可执行段在段尾之后（够不着时再在段首之前）用 MAP_FIXED_NOREPLACE 放置一个桩岛，可覆盖
+至 256 MiB 的段；每个桩去返两向都检查跳转范围；岛填满后一次设为可执行，代码段一次改写；任何站点无法覆盖时
+整段失败（loader 退出，运行期映射返回 ENOMEM），不再留下原始 SVC。真机每次 exec 从约 40 ms 降到约 25 ms，
+python 进程的匿名可执行区从 948 个降到 13 个。新增 stub_islands 用例扫描 guest 内存：除 payload 与桩自身的
+rt_sigreturn 路径外不存在原始 svc。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

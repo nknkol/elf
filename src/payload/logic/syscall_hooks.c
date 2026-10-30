@@ -120,8 +120,11 @@ static long mmap_exec_anon_fallback(long *args)
         return mp;
     }
 
-    if (prot & PROT_EXEC)
-        install_hook(mapped, len, (void *)&_start, 0);
+    /* Fail closed: never leave unhooked syscalls executable. */
+    if ((prot & PROT_EXEC) && install_hook_prot(mapped, len, (void *)&_start, prot) < 0) {
+        raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
+        return -ENOMEM;
+    }
 
     return (long)mapped;
 }
@@ -522,8 +525,12 @@ long syscall_handle_common(long sys_no, long args[6]) {
             if (need_prctl)
                 raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 1, 0, 0, 0);
             
-            if (ret == 0 && (args[2] & PROT_EXEC)) {
-                install_hook((void *)args[0], (size_t)args[1], (void *)&_start, 0);
+            if (ret == 0 && (args[2] & PROT_EXEC) &&
+                install_hook_prot((void *)args[0], (size_t)args[1], (void *)&_start,
+                                  (int)args[2]) < 0) {
+                /* Fail closed: drop execute rather than run raw syscalls. */
+                raw_syscall(SYS_mprotect, args[0], args[1], args[2] & ~PROT_EXEC, 0, 0, 0);
+                ret = -ENOMEM;
             }
             break;
 
@@ -537,8 +544,11 @@ long syscall_handle_common(long sys_no, long args[6]) {
                 ret = mmap_exec_anon_fallback(args);
             } else {
                 ret = do_syscall(sys_no, args);
-                if (ret >= 0 && (args[2] & PROT_EXEC)) {
-                    install_hook((void *)ret, (size_t)args[1], (void *)&_start, 0);
+                if (ret >= 0 && (args[2] & PROT_EXEC) &&
+                    install_hook_prot((void *)ret, (size_t)args[1], (void *)&_start,
+                                      (int)args[2]) < 0) {
+                    raw_syscall(SYS_munmap, ret, args[1], 0, 0, 0, 0);
+                    ret = -ENOMEM;
                 }
             }
             break;

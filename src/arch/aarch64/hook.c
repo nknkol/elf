@@ -2,7 +2,10 @@
 #include "hook.h"
 #include "z_syscalls.h"
 #include "z_utils.h"
+#include "z_asm.h"
+#include <asm/unistd.h>
 #include "stub.h"
+#include "stub_island.h"
 
 #define ARM64_NOP   0xd503201f
 #define ARM64_SVC0  0xd4000001
@@ -155,7 +158,38 @@ void *load_raw_payload(const char *path, size_t *size_out) {
     return NULL;
 }
 
-/* Hook Installation */
+long island_mmap(uintptr_t addr, size_t len, int prot, int flags)
+{
+    return z_syscall(__NR_mmap, addr, len, prot, flags, -1, 0);
+}
+long island_munmap(uintptr_t addr, size_t len)
+{
+    return z_syscall(__NR_munmap, addr, len);
+}
+long island_mprotect(uintptr_t addr, size_t len, int prot)
+{
+    return z_syscall(__NR_mprotect, addr, len, prot);
+}
+
+long install_hook_prot(void *target_base, size_t target_size, void *payload_entry, int prot)
+{
+    if (!payload_entry || !target_base || !target_size)
+        return 0;
+    /* --hook-range (debugging) selects individual sites: legacy path. */
+    if (g_hook_min != 0 || g_hook_max != 0x7fffffff)
+        return install_hook(target_base, target_size, payload_entry, 0);
+    /* Nothing runs this code yet: patch through a read-write view. */
+    long rc = island_hook_range((uintptr_t)target_base, target_size, (uintptr_t)payload_entry,
+                                PROT_READ | PROT_WRITE, prot);
+    if (rc < 0)
+        HOOK_ERR("[Hook Error] cannot cover syscalls in %p (+%lu): %ld\n",
+                 target_base, (unsigned long)target_size, rc);
+    else
+        HOOK_DBG("[Hook] Installed: %ld hooks\n", rc);
+    return rc;
+}
+
+/* Hook Installation (legacy, one stub page per site; --hook-range only) */
 int install_hook(void *target_base, size_t target_size, void *payload_entry, size_t payload_size)
 {
     (void)payload_size;

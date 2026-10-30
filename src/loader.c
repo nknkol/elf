@@ -568,6 +568,7 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 	typedef struct {
 		void *start;
 		size_t size;
+		int prot;
 	} exec_seg_t;
 	exec_seg_t *exec_segs = z_alloca(ehdr->e_phnum * sizeof(exec_seg_t));
 	int exec_cnt = 0;
@@ -620,6 +621,7 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 		if ((prot & PROT_EXEC) && payload_addr) {
 			exec_segs[exec_cnt].start = (void *)((unsigned long)p + off);
 			exec_segs[exec_cnt].size = iter->p_filesz;
+			exec_segs[exec_cnt].prot = prot;
 			exec_cnt++;
 		}
 
@@ -634,7 +636,10 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 
 	/* Install hooks after mappings complete to keep stub pages intact */
 	for (int i = 0; i < exec_cnt; i++) {
-		install_hook(exec_segs[i].start, exec_segs[i].size, payload_addr, payload_sz);
+		/* Fail closed: a raw svc left unhooked would bypass the payload. */
+		if (install_hook_prot(exec_segs[i].start, exec_segs[i].size, payload_addr,
+				      exec_segs[i].prot) < 0)
+			z_errx(1, "cannot place syscall stubs within branch range");
 	}
 
 	return (unsigned long)base;

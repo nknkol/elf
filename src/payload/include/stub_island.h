@@ -1,0 +1,175 @@
+/* Shared syscall-stub placement for the loader (initial images) and the
+ * payload (code mapped at run time). The includer defines:
+ *   long island_mmap(uintptr_t addr, size_t len, int prot, int flags);
+ *       returns the address or a negative errno
+ *   long island_munmap(uintptr_t addr, size_t len);
+ *   long island_mprotect(uintptr_t addr, size_t len, int prot);
+ *
+ * Every `svc #0` gets a stub that its `b` (±128 MiB) can reach, in one or two
+ * islands placed right after and right before the code with
+ * MAP_FIXED_NOREPLACE, so any segment up to 256 MiB is fully covered. Both
+ * directions are checked (stub → return address too). Islands are filled,
+ * then made executable once; the code is made writable once. A site that
+ * cannot be covered fails the whole range instead of being left as a raw
+ * syscall that bypasses the payload. */
+#ifndef STUB_ISLAND_H
+#define STUB_ISLAND_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include "stub.h"
+
+#define ISLAND_SVC0 0xd4000001u
+#define ISLAND_PAGE 4096ul
+#define ISLAND_REACH 134217727l
+#define ISLAND_STEP (1ul << 20)
+#define ISLAND_PROT_READ 1
+#define ISLAND_PROT_WRITE 2
+#define ISLAND_PROT_EXEC 4
+#define ISLAND_MAP_PRIVATE 0x02
+#define ISLAND_MAP_ANONYMOUS 0x20
+#define ISLAND_MAP_FIXED_NOREPLACE 0x100000
+
+long island_mmap(uintptr_t addr, size_t len, int prot, int flags);
+long island_munmap(uintptr_t addr, size_t len);
+long island_mprotect(uintptr_t addr, size_t len, int prot);
+
+struct island { uintptr_t base; size_t size, used; };
+
+static inline int island_branch_ok(uintptr_t from, uintptr_t to)
+{
+    long offset = (long)to - (long)from;
+    return offset >= -ISLAND_REACH - 1 && offset <= ISLAND_REACH && !(offset & 3);
+}
+
+/* Every branch between the site and its stub, both ways (stub.c layout). */
+static inline int island_slot_ok(uintptr_t site, uintptr_t slot)
+{
+    return island_branch_ok(site, slot) && island_branch_ok(slot + 15 * 4, site + 4) &&
+           island_branch_ok(slot + 17 * 4, site + 4) && island_branch_ok(slot + 27 * 4, site + 4);
+}
+
+/* An island of len bytes at exactly `want`, or 0. Kernels that treat
+ * MAP_FIXED_NOREPLACE as a hint return another address: refused too. */
+static inline uintptr_t island_map_at(uintptr_t want, size_t len)
+{
+    long r = island_mmap(want, len, ISLAND_PROT_READ | ISLAND_PROT_WRITE,
+                         ISLAND_MAP_PRIVATE | ISLAND_MAP_ANONYMOUS | ISLAND_MAP_FIXED_NOREPLACE);
+    if (r < 0 && r > -4096) return 0;
+    if ((uintptr_t)r != want) { island_munmap((uintptr_t)r, len); return 0; }
+    return want;
+}
+
+/* Search outward from the code: after its end (dir > 0) or before its start. */
+static inline int island_place(struct island *is, uintptr_t lo, uintptr_t hi, size_t len, int dir)
+{
+    for (uintptr_t step = 0; step < (uintptr_t)ISLAND_REACH - ISLAND_STEP; step += ISLAND_STEP) {
+        uintptr_t want;
+        if (dir > 0) {
+            want = ((hi + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1)) + step;
+        } else {
+            uintptr_t top = (lo & ~(ISLAND_PAGE - 1)) - step;
+            if (top < len + ISLAND_PAGE) return 0;
+            want = top - len;
+        }
+        if (island_map_at(want, len)) {
+            *is = (struct island){want, len, 0};
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline uintptr_t island_take(struct island *is, uintptr_t site)
+{
+    if (!is->base || is->used + STUB_SIZE > is->size) return 0;
+    uintptr_t slot = is->base + is->used;
+    if (!island_slot_ok(site, slot)) return 0;
+    is->used += STUB_SIZE;
+    return slot;
+}
+
+static inline void island_flush(uintptr_t start, size_t len)
+{
+    for (uintptr_t p = start & ~63ul; p < start + len; p += 64)
+        __asm__ volatile("dc cvau, %0" : : "r"(p) : "memory");
+    __asm__ volatile("dsb ish");
+    for (uintptr_t p = start & ~63ul; p < start + len; p += 64)
+        __asm__ volatile("ic ivau, %0" : : "r"(p) : "memory");
+    __asm__ volatile("dsb ish\n isb" ::: "memory");
+}
+
+/* Hooks every svc #0 in [base, base + size). writable_prot is the protection
+ * used while patching (RW for code nothing executes yet, RWX when other
+ * threads may run it); final_prot is restored afterwards. Returns the
+ * number of hooked sites, or a negative errno when any site could not be
+ * covered (then nothing in the range is patched). */
+static inline long island_hook_range(uintptr_t base, size_t size, uintptr_t payload_entry,
+                                     int writable_prot, int final_prot)
+{
+    uint32_t *code = (uint32_t *)base;
+    size_t words = size / 4, sites = 0;
+    for (size_t i = 0; i < words; i++)
+        sites += code[i] == ISLAND_SVC0;
+    if (!sites) return 0;
+    size_t len = (sites * STUB_SIZE + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
+    struct island after = {0, 0, 0}, before = {0, 0, 0};
+    island_place(&after, base, base + size, len, 1);
+    /* Sites the after-island cannot reach (segments over 128 MiB). */
+    size_t far = 0;
+    for (size_t i = 0; i < words; i++)
+        if (code[i] == ISLAND_SVC0 &&
+            (!after.base || !island_slot_ok((uintptr_t)&code[i], after.base) ||
+             !island_slot_ok((uintptr_t)&code[i], after.base + len - STUB_SIZE)))
+            far++;
+    if (far) {
+        size_t far_len = (far * STUB_SIZE + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
+        island_place(&before, base, base + size, far_len, -1);
+    }
+    /* Assign every site before touching the code: all or nothing. */
+    long rc = 0;
+    for (size_t i = 0; i < words && !rc; i++) {
+        if (code[i] != ISLAND_SVC0) continue;
+        uintptr_t site = (uintptr_t)&code[i];
+        uintptr_t slot = island_take(&after, site);
+        if (!slot) slot = island_take(&before, site);
+        if (!slot) { rc = -12; break; } /* -ENOMEM: no reachable stub */
+        stub_emit((void *)slot, payload_entry, site + 4);
+    }
+    struct island *islands[2] = {&after, &before};
+    for (int k = 0; k < 2; k++) {
+        struct island *is = islands[k];
+        if (!is->base) continue;
+        if (rc || !is->used) { island_munmap(is->base, is->size); is->base = 0; continue; }
+        size_t used = (is->used + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
+        if (used < is->size) island_munmap(is->base + used, is->size - used);
+        island_flush(is->base, is->used);
+        long p = island_mprotect(is->base, used, ISLAND_PROT_READ | ISLAND_PROT_EXEC);
+        if (p < 0 && !rc) rc = p;
+    }
+    if (rc) return rc;
+    /* Patch: the stubs exist; each branch is one aligned 4-byte store. */
+    uintptr_t page_lo = base & ~(ISLAND_PAGE - 1);
+    size_t span = ((base + size + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1)) - page_lo;
+    rc = island_mprotect(page_lo, span, writable_prot);
+    if (rc < 0) return rc;
+    /* Same assignment order as above, so the same slots: after-island
+     * first, then before (unused tails were unmapped beyond the last). */
+    after.used = before.used = 0;
+    long hooked = 0;
+    for (size_t i = 0; i < words; i++) {
+        if (code[i] != ISLAND_SVC0) continue;
+        uintptr_t site = (uintptr_t)&code[i];
+        uintptr_t slot = island_take(&after, site);
+        if (!slot) slot = island_take(&before, site);
+        long offset = (long)slot - (long)site;
+        __atomic_store_n(&code[i], 0x14000000u | ((uint32_t)(offset >> 2) & 0x03ffffffu),
+                         __ATOMIC_RELEASE);
+        hooked++;
+    }
+    island_flush(base, size);
+    rc = island_mprotect(page_lo, span, final_prot);
+    return rc < 0 ? rc : hooked;
+}
+
+#endif /* STUB_ISLAND_H */
