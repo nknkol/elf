@@ -232,7 +232,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         ret = -EPERM;
         goto done;
     }
-    int n = read_executable(s->host, flags & AT_SYMLINK_NOFOLLOW, s->header[0]);
+    /* fexecve already checked the FD's own object (fstat above); its
+     * internal /proc/self/fd/N name is a magic link that must be followed,
+     * whatever AT_SYMLINK_NOFOLLOW asked of the (empty) path. */
+    int n = read_executable(s->host, exec_fd < 0 && (flags & AT_SYMLINK_NOFOLLOW), s->header[0]);
     if (n < 0) { ret = n; goto done; }
     char *target = s->host;
     /* Like the kernel, an interpreter may itself be a script: level i's

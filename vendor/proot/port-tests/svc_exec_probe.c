@@ -20,12 +20,13 @@ void run(long *sp)
    long ret;
    if(av[1][1]=='c')sc(49,(long)"/mnt",0,0,0,0,0);
    char m=av[1][1];
-   if(m=='f'||m=='g'||m=='s'||m=='d'||m=='x') {
+   if(m=='f'||m=='g'||m=='s'||m=='d'||m=='x'||m=='h') {
      /* s: O_PATH|O_NOFOLLOW symlink FD; x: O_CLOEXEC (script case). */
      long fd=sc(56,-100,(long)av[2],m=='s'?0x208000:m=='x'?0x80000:0,0,0,0);
      if(m=='g')sc(38,-100,(long)"/mnt/decoy",-100,(long)av[2],0,0); /* Swap the name. */
      if(m=='d')sc(35,-100,(long)av[2],0,0,0,0);                    /* Delete it. */
-     ret=sc(281,fd,(long)"",(long)args,(long)vars,4096,0);
+     /* h: AT_SYMLINK_NOFOLLOW on a regular file FD still executes it. */
+     ret=sc(281,fd,(long)"",(long)args,(long)vars,m=='h'?4096|256:4096,0);
    } else if(av[1][1]=='a'||av[1][1]=='n'||av[1][1]=='e') {
      long fd=sc(56,-100,(long)"/mnt",0,0,0,0);
      ret=sc(281,fd,(long)av[2],(long)args,(long)vars,av[1][1]=='n'?256:av[1][1]=='e'?4096:0,0);

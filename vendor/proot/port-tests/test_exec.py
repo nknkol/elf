@@ -44,6 +44,7 @@ with tempfile.TemporaryDirectory(prefix='exec-',dir=build) as tmp:
     check('empty pathname','!v','',['RET=-2'])
     check('FD exec of a directory is EACCES like the kernel','!e','',['RET=-13'])
     check('fexecve runs the program the FD names','!f','/mnt/child',common)
+    check('fexecve with AT_SYMLINK_NOFOLLOW on a regular file','!h','/mnt/child',common)
     # The FD's object, not its name: a later rename over the name or an
     # unlink must not change what runs.
     check('fexecve after the name was replaced','!g','/mnt/swapped',common)
