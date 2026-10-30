@@ -104,6 +104,8 @@ typedef struct payload_config {
     /* Glue tree base: PROOT_TMP_DIR, TMPDIR or /tmp of the initial loader. */
     char glue_dir[CONFIG_MAX_PATH];
     uint32_t fake_ids[8]; /* Guest r/e/s/fs uid then gid; all 0 initially. */
+    /* --link-copy: a hard link the storage refuses becomes a copy. */
+    int32_t link_copy;
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */

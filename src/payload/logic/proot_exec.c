@@ -349,6 +349,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = CONFIG_CHILD_FAKE_IDS;
         s->argv[pos++] = s->fake_ids;
     }
+    if (cfg->link_copy) s->argv[pos++] = "--link-copy";
     if (cfg->glue_dir[0]) {
         s->argv[pos++] = CONFIG_CHILD_GLUE_DIR;
         s->argv[pos++] = (char *)cfg->glue_dir;

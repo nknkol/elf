@@ -846,12 +846,14 @@ static long fake_chown(long ret)
     return ret == -EPERM && fake_ids_privileged() ? 0 : ret;
 }
 
-/* Some storage refuses every hard link (HarmonyOS shared storage and Android
- * FUSE with EPERM, HarmonyOS app storage with EACCES), which breaks dpkg's
- * backups like PRoot without -l. A copy needs the same directory write
- * permission, so a genuine permission error still fails as before. Make
- * the new name a copy of a regular file or symlink instead: same content,
- * mode and times, but not the same inode. Anything else keeps the error. */
+/* --link-copy (opt-in, like PRoot's -l): some storage refuses every hard
+ * link (HarmonyOS shared storage and Android FUSE with EPERM, HarmonyOS app
+ * storage with EACCES), which breaks dpkg's backups. The new name becomes a
+ * copy of a regular file or symlink: same content, mode and times, but NOT
+ * the same inode, so later changes to one name do not reach the other. A
+ * copy needs the same directory write permission, so a genuine permission
+ * error still fails; so does any failed step, leaving no partial copy.
+ * Anything else keeps the error. */
 static long copy_link(Bridge *b, long error)
 {
     struct stat st;
@@ -884,9 +886,8 @@ static long copy_link(Bridge *b, long error)
     if (ret == 1) {
         struct { long sec, nsec; } times[2] = {{st.st_atime, st.st_atime_nsec},
                                                {st.st_mtime, st.st_mtime_nsec}};
-        raw_syscall(SYS_fchmod, out, st.st_mode & 07777, 0, 0, 0, 0);
-        raw_syscall(SYS_utimensat, out, 0, (long)times, 0, 0, 0);
-        ret = 0;
+        ret = raw_syscall(SYS_fchmod, out, st.st_mode & 07777, 0, 0, 0, 0);
+        if (!ret) ret = raw_syscall(SYS_utimensat, out, 0, (long)times, 0, 0, 0);
     }
     raw_syscall(__NR_close, in, 0, 0, 0, 0, 0);
     if (out >= 0) raw_syscall(__NR_close, out, 0, 0, 0, 0, 0);
@@ -945,7 +946,7 @@ static long mutate(Bridge *b, long number, long a[6])
         return -EXDEV;
     ret = raw_syscall(number, AT_FDCWD, (long)b->first_host,
                       AT_FDCWD, (long)b->host, a[4], 0);
-    if (hardlink && (ret == -EPERM || ret == -EACCES))
+    if (hardlink && g_payload_config.link_copy && (ret == -EPERM || ret == -EACCES))
         ret = copy_link(b, ret);
     return ret;
 }

@@ -1423,6 +1423,7 @@ static const char *find_config_path_arg(int argc, char **argv)
 			continue;
 		}
 		if (is_child_loader_arg(arg) || z_strncmp(arg, "--init", 7) == 0 ||
+		    z_strncmp(arg, "--link-copy", 12) == 0 ||
 		    z_strncmp(arg, "-d", 3) == 0 || z_strncmp(arg, "--detach", 9) == 0) {
 			continue;
 		}
@@ -1602,6 +1603,10 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		}
 
 #ifdef PROOT_PATH
+		if (z_strncmp(arg, "--link-copy", 12) == 0) {
+			cfg->link_copy = 1;
+			continue;
+		}
 		if (z_strncmp(arg, CONFIG_CHILD_GLUE_DIR,
 			      z_strlen(CONFIG_CHILD_GLUE_DIR) + 1) == 0) {
 			if (i + 1 >= argc || argv[i + 1][0] != '/' ||

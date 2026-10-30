@@ -187,16 +187,11 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     (root/'native-relative').symlink_to('real/file')
     follow_rc=native_link(root/'native-relative',root/'native-hard-follow',1024)
     bound_rc=native_link(bound/'file',bound/'native-hard')
-    # Storage that refuses every hard link (EPERM/EACCES) gets a copy instead.
+    # Without --link-copy every hard link matches the host, refusal included.
     def linked(name,rc,source,target,old,new,follow=False,value=0,**kw):
-        refused=rc in (-errno.EPERM,-errno.EACCES)
-        mutate(name,'l',old,new,value=value,expected=0 if refused else rc,**kw)
+        mutate(name,'l',old,new,value=value,expected=rc,**kw)
         stat=(lambda p:p.stat()) if follow or not source.is_symlink() else (lambda p:p.lstat())
         if rc==0:assert stat(source).st_ino==stat(target).st_ino
-        elif refused:
-            assert stat(source).st_ino!=stat(target).st_ino
-            if source.is_symlink() and not follow:assert os.readlink(source)==os.readlink(target)
-            else:assert source.read_bytes()==target.read_bytes() and not target.is_symlink()
         else:assert not target.exists() and not target.is_symlink()
     linked('hardlink within root matches host',regular_rc,root/'real/file',root/'newdir/hard','/real/file','/newdir/hard')
     linked('hardlink symlink matches host',symlink_rc,root/'absolute',root/'newdir/hard-symlink','/absolute','/newdir/hard-symlink')

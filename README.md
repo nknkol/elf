@@ -28,6 +28,10 @@ Clang、ld.lld、llvm-objcopy、llvm-ar、llvm-nm 及本地 Linux ABI 头文件�
 `/bin/sh`。未验证其他架构，也不自动安装依赖。
 
 当前 PRoot payload ABI 为 5（FD 实验版为 14），自定义 payload 必须与 loader 匹配，否则启动时拒绝。
+
+在拒绝硬链接的存储（HarmonyOS 共享存储、应用私有存储、Android FUSE）上运行 dpkg/apt 时，需要
+`--link-copy`：被拒绝的硬链接改为复制，得到的是独立文件而非共享 inode。默认不启用，保留宿主错误。
+glue 目录树位于 `PROOT_TMP_DIR`、`TMPDIR` 或 `/tmp`。
 构建入口强制重编译 loader/payload，通过临时文件替换可执行文件，生成：
 
 - `vendor/proot/svc/build/elfloader-proot`：运行工具。

@@ -252,7 +252,7 @@ rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存�
 作为特权判断，降权后无法再取回 root，setgroups 需特权；凭据经 fork 继承、经 exec 链 `--fake-ids` 传递。
 伪 root 的 chown 遇内核 EPERM 报告成功（属主实际不变，ENOENT 等照常）；调用者自己的文件在 stat 中归属
 当前的保存 uid/gid（PRoot 同样如此）。附加组未建模。新增 fake_ids 用例（两种构建）。
-2026-10-30 硬链接回退增量：HarmonyOS 共享存储（及 Android FUSE）对任何硬链接返回 EPERM，dpkg 用 link() 备份
+2026-10-30 硬链接回退增量（后改为 `--link-copy` 选项，见评审修复）：HarmonyOS 共享存储（及 Android FUSE）对任何硬链接返回 EPERM，dpkg 用 link() 备份
 状态数据库因而失败（PRoot 需 -l link2symlink）。现在内核以 EPERM 拒绝 linkat 时，普通文件以复制（内容、模式、
 时间相同，但不是同一 inode）、符号链接以同目标的新链接代替（HarmonyOS 应用私有存储以 EACCES 拒绝硬链接，同样回退；
 真正的目录权限错误会让复制同样失败而保留原错误）；其他类型、已存在的名称和跨挂载仍报原错误。
@@ -277,6 +277,18 @@ canonicalize_core 每跟随一层符号链接要 8 KiB，glibc posix_spawn 的�
 真机 Ubuntu rootfs（放在大小写敏感的应用私有存储上）中 gcc 编译运行动态/静态/多线程程序、git clone、
 python3 -m venv、pip install（含构建隔离与 gcc 调用）均通过；共享存储大小写不敏感，linux-libc-dev
 （xt_CONNMARK.h 与 xt_connmark.h）无法在其上解包，这是存储限制，PRoot 同样无法解决。
+2026-10-30 评审修复（三项）：
+- 并发 dup：复制完成后才读取源 FD 的当前记录，期间另一线程关闭并复用该号码时（已登记 FD 的关闭不进入关闭环），
+  内核复制的旧对象会被记上新对象的授权并永久保留。现在调用前在锁内快照源记录的代号；关闭与 dup3 替换在内核
+  调用期间把号码标为“变更中”（closing 表，表满时全局计数），源在快照或登记时处于变更中、或代号改变，副本一律
+  记为未知来源。新增 dup_race 压力用例：修复前约 10 万次复制出现 1~5 次错误授权，修复后 5 轮为 0。
+- fexecve：此前把 FD 转回路径再解析，名称被替换时会执行另一个文件，O_PATH 符号链接 FD 会被重新跟随。现在按内核
+  语义执行 FD 指向的对象本身：只接受可执行的普通文件（目录、符号链接 FD 为 EACCES），子 loader 通过
+  `--exec-fd` 收到该对象的副本并经 /proc/self/fd 打开（已删除文件与 memfd 也可执行），AT_EXECFN 与脚本参数为
+  /dev/fd/N，O_CLOEXEC 的脚本 FD 为 ENOENT；读取保护下 FD 必须有可读的已知来源。exec 用例覆盖改名替换、删除、
+  符号链接 FD 与脚本，fexecve_guard 覆盖读取保护。
+- 硬链接复制改为显式选项 `--link-copy`（类似 PRoot 的 -l），默认保留宿主错误；复制得到的是独立文件，不是
+  硬链接语义。设置模式或时间失败时删除副本并返回原错误。dpkg 在拒绝硬链接的存储上需要此选项。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
