@@ -653,6 +653,59 @@ static int check_ehdr(Elf_Ehdr *ehdr)
 		(ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN)) ? 0 : 1;
 }
 
+/* The whole layout is checked before anything is mapped: header and
+ * program table within the file, each loadable segment's file range within
+ * the file and no larger than its memory, no address overflow, a fixed
+ * image above the null guard, and a bounded PT_INTERP. */
+#define ELF_MAX_PHNUM 256
+#define ELF_MAX_VA (1ul << 47)
+static void validate_ehdr(int fd, const Elf_Ehdr *ehdr, const char *file)
+{
+	struct stat st;
+	if (z_newfstatat(fd, "", &st, AT_EMPTY_PATH) < 0)
+		z_errx(1, "can't stat %s", file);
+	unsigned long size = (unsigned long)st.st_size;
+	if (ehdr->e_phentsize != sizeof(Elf_Phdr) || !ehdr->e_phnum ||
+	    ehdr->e_phnum > ELF_MAX_PHNUM || ehdr->e_phoff > size ||
+	    size - ehdr->e_phoff < (unsigned long)ehdr->e_phnum * sizeof(Elf_Phdr))
+		z_errx(1, "bogus program header table %s", file);
+}
+static void validate_phdrs(int fd, const Elf_Ehdr *ehdr, const Elf_Phdr *phdr, const char *file)
+{
+	struct stat st;
+	if (z_newfstatat(fd, "", &st, AT_EMPTY_PATH) < 0)
+		z_errx(1, "can't stat %s", file);
+	unsigned long size = (unsigned long)st.st_size, minva = ELF_MAX_VA;
+	int loads = 0;
+	for (int i = 0; i < ehdr->e_phnum; i++) {
+		const Elf_Phdr *p = &phdr[i];
+		if (p->p_type != PT_LOAD && p->p_type != PT_INTERP)
+			continue;
+		if (p->p_offset > size || p->p_filesz > size - p->p_offset)
+			z_errx(1, "segment outside the file %s", file);
+		if (p->p_type == PT_INTERP) {
+			if (!p->p_filesz || p->p_filesz > CONFIG_MAX_PATH)
+				z_errx(1, "bogus interp segment %s", file);
+			continue;
+		}
+		if (p->p_filesz > p->p_memsz || p->p_vaddr >= ELF_MAX_VA ||
+		    p->p_memsz > ELF_MAX_VA - p->p_vaddr)
+			z_errx(1, "bogus loadable segment %s", file);
+		if (p->p_vaddr < minva)
+			minva = p->p_vaddr;
+		loads++;
+	}
+	if (!loads)
+		z_errx(1, "no loadable segment %s", file);
+	if (ehdr->e_type == ET_EXEC && TRUNC_PG(minva) < 0x10000)
+		z_errx(1, "fixed image below the null guard %s", file);
+}
+
+/* --seccomp-backstop: the kernel does not filter syscalls issued from
+ * writable+executable memory, so no initial segment may be both (the same
+ * rule the payload applies to run-time mappings). */
+static int g_deny_wx;
+
 static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *payload_addr, size_t payload_sz)
 {
 	unsigned long minva, maxva;
@@ -688,12 +741,19 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 	maxva = ROUND_PG(maxva);
 
 	hint = dyn ? NULL : (void *)minva;
-	flags = dyn ? 0 : MAP_FIXED;
+	/* A fixed image never replaces anything already mapped (the loader,
+	 * the payload, their islands, the stack): it must land where asked
+	 * on free space, or loading fails. */
+	flags = dyn ? 0 : 0x100000 /* MAP_FIXED_NOREPLACE */;
 	flags |= (MAP_PRIVATE | MAP_ANONYMOUS);
 
 	base = z_mmap(hint, maxva - minva, PROT_NONE, flags, -1, 0);
 	if (base == (void *)-1)
 		return -1;
+	if (!dyn && base != hint) {
+		z_munmap(base, maxva - minva);
+		return -1;
+	}
 	z_munmap(base, maxva - minva);
 
 	flags = MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE;
@@ -707,6 +767,8 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 		sz = ROUND_PG(iter->p_memsz + off);
 
 		int prot = PFLAGS(iter->p_flags);
+		if (g_deny_wx && (prot & PROT_WRITE) && (prot & PROT_EXEC))
+			z_errx(1, "seccomp backstop: writable and executable segment refused");
 		/* Read-only data (rodata, symbol tables) needs no private copy:
 		 * code signing only forbids executable file mappings. */
 		if (prot == PROT_READ && iter->p_filesz == iter->p_memsz &&
@@ -2520,6 +2582,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	z_printf_enabled = bootstrap_cfg.log_level != LOG_LEVEL_NONE;
 #ifdef PROOT_PATH
 	hook_set_section_scan(bootstrap_cfg.seccomp_backstop);
+	g_deny_wx = bootstrap_cfg.seccomp_backstop;
 #endif
 	if (bootstrap_cfg.root[0])
 		normalize_host_path(bootstrap_cfg.root, CONFIG_MAX_PATH);
@@ -2887,6 +2950,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "can't read ELF header %s", file);
 		if (!check_ehdr(ehdr))
 			z_errx(1, "bogus ELF header %s", file);
+		validate_ehdr(fd, ehdr, file);
 
 		sz = ehdr->e_phnum * sizeof(Elf_Phdr);
 		phdr = z_alloca(sz);
@@ -2894,6 +2958,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "can't lseek to program header %s", file);
 		if (z_read(fd, phdr, sz) != sz)
 			z_errx(1, "can't read program header %s", file);
+		validate_phdrs(fd, ehdr, phdr, file);
 
 		if ((base[i] = loadelf_anon(fd, ehdr, phdr, (void *)payload_entry_addr, 0)) == LOAD_ERR)
 			z_errx(1, "can't load ELF %s", file);

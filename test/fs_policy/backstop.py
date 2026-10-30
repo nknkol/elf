@@ -25,6 +25,11 @@ with tempfile.TemporaryDirectory(prefix='backstop-', dir=build) as tmp:
                     '-fno-stack-protector', '-Wl,-e,_start',
                     str(repo / 'test/fs_policy/backstop_probe.c'), '-o', str(work / 'probe')],
                    check=True)
+    # One RWX segment (--omagic): refused at load time under the backstop.
+    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
+                    '-fno-stack-protector', '-Wl,-e,_start', '-Wl,--omagic',
+                    str(repo / 'test/fs_policy/backstop_probe.c'), '-o', str(work / 'probe-wx')],
+                   check=True)
     for suffix in ('', '-fd-experiment'):
         loader = build / f'elfloader-proot{suffix}'
         manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
@@ -45,4 +50,12 @@ with tempfile.TemporaryDirectory(prefix='backstop-', dir=build) as tmp:
         # With it the call is trapped and translated; exec children keep it.
         assert run(['--seccomp-backstop'], 'm') == [f'open={release}', 'after=0'], suffix
         assert run(['--seccomp-backstop'], 'x') == ['rwx=-13', 'after=0'], suffix
+        def run_wx(options):
+            p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine), *options,
+                                '-v', f'{work}:/work', '--', './bin/busybox', 'sh', '-c',
+                                '/work/probe-wx x; /bin/busybox echo after=$?'],
+                               cwd=alpine, capture_output=True, text=True, timeout=60)
+            return p.stdout.split('\n')[:2]
+        assert run_wx([]) == ['rwx=0', 'after=0'], suffix
+        assert run_wx(['--seccomp-backstop']) == ['after=1', ''], suffix
         print('PASS: seccomp backstop translates unhooked syscalls and refuses RWX:', loader.name)
