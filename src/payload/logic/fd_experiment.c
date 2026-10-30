@@ -41,8 +41,12 @@ struct fd_runtime {
     size_t reserved; /* Record slots promised to creations still in the kernel. */
     uint64_t close_epoch;
     struct closed_fd { int fd; uint64_t epoch; } closed[64];
-    /* Recorded objects whose kernel close is in flight. */
+    /* Recorded numbers whose kernel close or dup3 replacement is in flight:
+     * the kernel may already name another object than the record. */
     struct closing_fd { int fd; uint64_t generation; } closing[64];
+    /* Such changes that found no free closing slot; while nonzero every
+     * number counts as in transition. */
+    unsigned untracked;
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
@@ -94,6 +98,13 @@ static void announce_close(struct fd_runtime *s,int fd,uint64_t generation)
     if(generation && closing_index(s,fd,generation)<0)return;
     uint64_t epoch=++s->close_epoch;
     s->closed[epoch%CLOSE_RING]=(struct closed_fd){fd,epoch};
+}
+static int in_transition(const struct fd_runtime *s,int fd)
+{
+    if(s->untracked)return 1;
+    for(size_t i=0;i<sizeof(s->closing)/sizeof(s->closing[0]);i++)
+        if(s->closing[i].generation && s->closing[i].fd==fd)return 1;
+    return 0;
 }
 /* A number announced closed after a creation began may now name another
  * thread's object. That creation records neither provenance nor grants. */
@@ -629,12 +640,13 @@ static long close_descriptor(struct fd_runtime *s,struct fd_table *t,int fd)
     int slot=generation?closing_index(s,0,0):-1;
     if(slot>=0)s->closing[slot]=(struct closing_fd){fd,generation};
     /* No free tracking slot: concurrent closes of this number stay announced. */
-    else if(generation)announce_close(s,fd,0);
+    else if(generation) { announce_close(s,fd,0);s->untracked++; }
     unlock(s);
     long result=raw_syscall(__NR_close,fd,0,0,0,0,0);
     if(!generation)return result;
     lock(s);
     if(slot>=0)s->closing[slot]=(struct closing_fd){0,0};
+    else s->untracked--;
     if(result==0 || result==-EBADF)fd_table_close_generation(t,fd,generation);
     else {
         /* Uncertain kernel effect: never keep authority or grants on a number
@@ -653,7 +665,8 @@ static long close_descriptor(struct fd_runtime *s,struct fd_table *t,int fd)
  * while the call ran is recorded as unknown, without provenance or grants. */
 static int record(struct fd_runtime *s,struct fd_table *t,long n,long a[6],long result,
                   uint64_t since,int create,int pair,int setfd,int ioctl_setfd,
-                  unsigned long openat2_flags,struct proot_open_origin opened)
+                  unsigned long openat2_flags,struct proot_open_origin opened,
+                  uint64_t source_generation)
 {
     int rc;
     int local_output=g_payload_config.allow_local_output && g_payload_config.guard_path_mutations==2;
@@ -703,8 +716,14 @@ static int record(struct fd_runtime *s,struct fd_table *t,long n,long a[6],long 
     }
     if(setfd)return fd_table_set_cloexec(t,(int)a[0],ioctl_setfd?(unsigned)a[1]==FIOCLEX:!!(a[2]&FD_CLOEXEC));
     int cloexec=n==__NR_dup3?!!(a[2]&O_CLOEXEC):n==__NR_fcntl && a[1]==F_DUPFD_CLOEXEC;
-    /* The kernel copied whatever the source number named at that time. */
-    if(reused_since(s,(int)a[0],since) || reused_since(s,(int)result,since))
+    /* The kernel copied whatever the source number named at that time. A
+     * recorded source closed by another thread is not announced (no creation
+     * can take its number), so also require the very record seen before the
+     * call: any close and reuse of the number changes its generation. */
+    const struct fd_record *source=fd_table_get(t,(int)a[0]);
+    if(!source || !source_generation || source->generation!=source_generation ||
+       in_transition(s,(int)a[0]) ||
+       reused_since(s,(int)a[0],since) || reused_since(s,(int)result,since))
         return fd_table_import_unknown(t,(int)result,cloexec);
     return fd_table_dup(t,(int)a[0],(int)result,cloexec);
 }
@@ -890,12 +909,26 @@ long fd_experiment_dispatch(long n,long a[6])
         if(directory && directory->origin.access!=FD_ACCESS_UNKNOWN)
             anchor=(struct proot_open_origin){directory->origin.mount_id,true};
     }
-    /* dup3 replaces its target atomically; announce it like a close. */
+    /* dup3 replaces its target atomically; announce it like a close and
+     * keep the number in transition until the replacement is recorded. */
+    int replacing=-1,replacing_untracked=0;
     if(n==__NR_dup3 && (int)a[0]!=(int)a[1]) {
         const struct fd_record *target=fd_table_get(t,(int)a[1]);
-        announce_close(s,(int)a[1],target?target->generation:0);
+        uint64_t generation=target?target->generation:0;
+        announce_close(s,(int)a[1],generation);
+        if(generation) {
+            replacing=closing_index(s,0,0);
+            if(replacing>=0)s->closing[replacing]=(struct closing_fd){(int)a[1],generation};
+            else { announce_close(s,(int)a[1],0);s->untracked++;replacing_untracked=1; }
+        }
     }
-    uint64_t since=s->close_epoch;
+    /* The record the kernel's copy must match; 0 (none or mid-change)
+     * makes the copy unknown. */
+    uint64_t since=s->close_epoch,source_generation=0;
+    if(duplicate && !in_transition(s,(int)a[0])) {
+        const struct fd_record *source=fd_table_get(t,(int)a[0]);
+        if(source)source_generation=source->generation;
+    }
     unlock(s);
     long result;
     if(n==__NR_openat2) {
@@ -913,9 +946,11 @@ long fd_experiment_dispatch(long n,long a[6])
     lock(s);
     s->reserved-=(size_t)reserved;
     rc=result<0?0:record(s,t,n,a,result,since,create,pair,setfd,ioctl_setfd,
-                         openat2_flags,opened);
+                         openat2_flags,opened,source_generation);
     unlock(s);
     /* The reservation guarantees capacity/serial for the recording above. */
     if(rc)return rc;
     return result;
 }
+    if(replacing>=0)s->closing[replacing]=(struct closing_fd){0,0};
+    if(replacing_untracked)s->untracked--;
