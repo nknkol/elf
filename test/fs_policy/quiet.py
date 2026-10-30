@@ -27,4 +27,10 @@ for suffix in ('', '-fd-experiment'):
     assert p.returncode == 0, (suffix, p.stdout, p.stderr[-1500:])
     assert p.stdout.splitlines() == ['0 1 2 3', '0 1 2 3'], (suffix, p.stdout)
     assert p.stderr == '', (suffix, p.stderr[:800])
+    # Host bind sources are normalized: ".." used to fail every access below.
+    p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
+                        '-v', f'{alpine}/../{alpine.name}/./etc:/dotdot', '--', './bin/busybox',
+                        'cat', '/dotdot/alpine-release'],
+                       cwd=alpine, capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0 and p.stdout.strip(), (suffix, p.stdout, p.stderr[-500:])
     print('PASS: no loader descriptors or diagnostics reach the guest:', loader.name)

@@ -1214,6 +1214,51 @@ static void parse_payload_config(payload_config_t *cfg, char **env)
 	}
 }
 
+/* Host root and bind sources are compared and joined as strings: make them
+ * absolute and remove ".", ".." and repeated slashes (PRoot canonicalizes
+ * them too). "x/../y" in a bind source otherwise failed every access below
+ * it with EINVAL. Symlinks are left to the kernel, as before. */
+static void normalize_host_path(char *path, size_t cap)
+{
+	char joined[CONFIG_MAX_PATH * 2];
+	size_t len = 0;
+	if (!path[0])
+		return;
+	if (path[0] != '/') {
+		if (!z_getcwd(joined, CONFIG_MAX_PATH))
+			return;
+		len = z_strlen(joined);
+		joined[len++] = '/';
+	}
+	copy_cstr(joined + len, sizeof(joined) - len, path);
+	char out[CONFIG_MAX_PATH];
+	size_t o = 0;
+	const char *p = joined;
+	while (*p) {
+		while (*p == '/') p++;
+		if (!*p) break;
+		const char *q = p;
+		while (*q && *q != '/') q++;
+		size_t n = (size_t)(q - p);
+		if (n == 1 && p[0] == '.') {
+		} else if (n == 2 && p[0] == '.' && p[1] == '.') {
+			while (o && out[o - 1] != '/') o--;
+			if (o) o--;
+		} else {
+			if (o + n + 2 > sizeof(out))
+				return; /* Too long: keep the original spelling. */
+			out[o++] = '/';
+			z_memcpy(out + o, p, n);
+			o += n;
+		}
+		p = q;
+	}
+	if (!o)
+		out[o++] = '/';
+	out[o] = '\0';
+	copy_cstr(path, cap, out);
+}
+
 static int add_bind_entry(payload_config_t *cfg, const char *guest, const char *host)
 {
 	if (!cfg || !guest || !host || guest[0] == '\0' || host[0] == '\0')
@@ -2433,6 +2478,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
 			  &shell_mode, &child_proto);
 	z_printf_enabled = bootstrap_cfg.log_level != LOG_LEVEL_NONE;
+	if (bootstrap_cfg.root[0])
+		normalize_host_path(bootstrap_cfg.root, CONFIG_MAX_PATH);
+	for (int i = 0; i < bootstrap_cfg.bind_count && i < CONFIG_MAX_BINDS; i++)
+		normalize_host_path(bootstrap_cfg.binds[i].dst, CONFIG_MAX_PATH);
 #ifdef FD_EXPERIMENT
     if (bootstrap_cfg.mount_access_observe[0] &&
         z_strlen(bootstrap_cfg.mount_access_observe) != (size_t)bootstrap_cfg.bind_count + 1)
