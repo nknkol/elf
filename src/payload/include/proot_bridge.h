@@ -47,6 +47,9 @@ long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor
 struct proot_path_context {
     struct proot_open_origin cwd, directory[2];
     int fd[2];
+    /* fexecve: >0 is a close-on-exec copy of fd[0]'s object, made where it
+     * was checked; exec uses it, with fd[0]'s own close-on-exec flag. */
+    int pinned, pinned_cloexec;
 };
 long proot_context_syscall(long number, long args[6], const struct proot_path_context *context);
 int proot_handles_syscall(long number);

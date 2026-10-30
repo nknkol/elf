@@ -730,6 +730,54 @@ static int record(struct fd_runtime *s,struct fd_table *t,long n,long a[6],long 
         return fd_table_import_unknown(t,(int)result,cloexec);
     return fd_table_dup(t,(int)a[0],(int)result,cloexec);
 }
+/* Admitted by the object a number names and never blocking: these run
+ * while the lock is held, so no close or dup3 (both announce under it) can
+ * swap the object between check and call. Content IO may block and keeps
+ * the kernel's own access-mode check instead. -1: not such a call. */
+static int held_fd(long n,const long a[6])
+{
+    if(g_payload_config.guard_path_mutations!=2)return -1;
+    int fd=(int)a[0];
+    switch(n) {
+    case __NR_fchmod: case __NR_fchown: case __NR_ftruncate: case __NR_fallocate:
+    case __NR_fsetxattr: case __NR_fremovexattr:
+        break;
+    case __NR_utimensat:
+        if(a[1])return -1;
+        break;
+    case __NR_fchownat:
+        if(!a[1] || ((const char *)a[1])[0] || !(a[4]&AT_EMPTY_PATH))return -1;
+        break;
+    case __NR_faccessat2:
+        if(!a[1] || ((const char *)a[1])[0] || !(a[3]&AT_EMPTY_PATH))return -1;
+        break;
+    case __NR_ioctl:
+        if((unsigned)a[1]!=FS_IOC_SETFLAGS && (unsigned)a[1]!=FS_IOC_SETVERSION &&
+           (unsigned)a[1]!=FS_IOC_FSSETXATTR)return -1;
+        break;
+    case __NR_fcntl:
+        if(a[1]!=F_SET_RW_HINT && a[1]!=F_SET_FILE_RW_HINT)return -1;
+        break;
+    default:
+        return -1;
+    }
+    return fd<0?-1:fd;
+}
+/* Under the lock: wait while the record at fd is being closed or replaced
+ * (the kernel may already hold another object there). Returns locked; 0,
+ * or -EACCES when the transition does not settle (no known origin). */
+static int settle(struct fd_runtime *s,struct fd_table *t,int fd)
+{
+    for(int spins=0;;spins++) {
+        const struct fd_record *r=fd_table_get(t,fd);
+        if(!r || !in_transition(s,fd,r->generation))return 0;
+        if(spins==1000)return -EACCES;
+        unlock(s);
+        raw_syscall(__NR_sched_yield,0,0,0,0,0,0);
+        lock(s);
+    }
+}
+
 long fd_experiment_dispatch(long n,long a[6])
 {
     struct fd_runtime *s=current();
@@ -791,7 +839,9 @@ long fd_experiment_dispatch(long n,long a[6])
      * non-blocking kernel queries (fstat, TCGETS). Content sources, including
      * private file mappings, come before mapping or destination checks. */
     lock(s);
-    rc=check_read_call(t,n,a);
+    int held=held_fd(n,a);
+    rc=held>=0?settle(s,t,held):0;
+    if(!rc)rc=check_read_call(t,n,a);
     if(!rc && g_payload_config.guard_path_mutations==2 &&
        (n==__NR_mmap || n==__NR_mprotect || n==__NR_munmap || n==__NR_mremap ||
         n==__NR_pkey_mprotect || (n==__NR_madvise && a[2]==MADV_REMOVE))) {
@@ -804,6 +854,18 @@ long fd_experiment_dispatch(long n,long a[6])
     if(!rc)rc=check_fd_mutation(t,s,n,a);
     if(!rc && n==__NR_ioctl)rc=check_ioctl(t,a);
     if(rc<0) { unlock(s);return rc; }
+    if(held>=0) {
+        long result;
+        if(proot_handles_syscall(n)) {
+            struct proot_path_context context={.cwd=s->cwd,.fd={held,AT_FDCWD}};
+            const struct fd_record *r=fd_table_get(t,held);
+            if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
+                context.directory[0]=(struct proot_open_origin){r->origin.mount_id,true};
+            result=proot_context_syscall(n,a,&context);
+        } else result=syscall_handle_common(n,a);
+        unlock(s);
+        return result;
+    }
     if(n==__NR_getdents64 && g_payload_config.guard_file_reads) {
         const struct fd_record *r=fd_table_get(t,(int)a[0]);
         struct proot_open_origin anchor={0,false};
@@ -897,13 +959,24 @@ long fd_experiment_dispatch(long n,long a[6])
              * read (stream allowances do not cover program content). */
             if(g_payload_config.guard_file_reads && a[1] && !((const char *)a[1])[0] &&
                (a[4]&AT_EMPTY_PATH)) {
-                int denied=!r || r->origin.access==FD_ACCESS_UNKNOWN ||
+                int settled=settle(s,t,context.fd[0]);
+                r=fd_table_get(t,context.fd[0]);
+                int denied=settled || !r || r->origin.access==FD_ACCESS_UNKNOWN ||
                     mount_decision(r->origin.mount_id,true,FS_OBSERVE)<0;
                 if(denied) { unlock(s);return -EACCES; }
+                /* Exec runs the object checked here, not whatever the number
+                 * names later: a private copy, made before unlocking. */
+                long flags=raw_syscall(__NR_fcntl,context.fd[0],F_GETFD,0,0,0,0);
+                long pin=flags<0?flags:raw_syscall(__NR_fcntl,context.fd[0],F_DUPFD_CLOEXEC,256,0,0,0);
+                if(pin<0) { unlock(s);return pin; }
+                context.pinned=(int)pin;
+                context.pinned_cloexec=(int)(flags&FD_CLOEXEC);
             }
         }
         unlock(s);
-        return proot_execve_context(n,a,&context);
+        long result=proot_execve_context(n,a,&context);
+        if(context.pinned)raw_syscall(__NR_close,context.pinned,0,0,0,0,0);
+        return result;
     }
     if(receive) {
         struct fd_receive_sync sync={s,lock_callback,unlock_callback,&s->reserved};

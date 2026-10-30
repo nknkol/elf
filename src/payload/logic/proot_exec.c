@@ -159,28 +159,30 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     char fd_host[32] = "", fd_guest[32] = "";
     char named[CONFIG_MAX_PATH] = "";
     int exec_fd = -1;
+    /* The object to run: a copy pinned when the guard checked it. */
+    int object = context && context->pinned > 0 ? context->pinned : dirfd;
     if (!*path) {
         if (!(flags & AT_EMPTY_PATH))
             return -ENOENT;
         struct stat st;
-        long rc = raw_syscall(__NR_fstat, dirfd, (long)&st, 0, 0, 0, 0);
+        long rc = raw_syscall(__NR_fstat, object, (long)&st, 0, 0, 0, 0);
         if (rc < 0)
             return rc;
         if ((st.st_mode & S_IFMT) != S_IFREG)
             return -EACCES;
-        fd_name(fd_host, "/proc/self/fd/", dirfd);
+        fd_name(fd_host, "/proc/self/fd/", object);
         fd_name(fd_guest, "/dev/fd/", dirfd);
         rc = raw_syscall(SYS_faccessat, AT_FDCWD, (long)fd_host, 1, 0, 0, 0);
         if (rc < 0)
             return rc;
         /* /proc/self/exe: the guest name, else the kernel's own link text. */
-        if (proot_fd_guest_path(dirfd, named, sizeof(named)) < 0) {
+        if (proot_fd_guest_path(object, named, sizeof(named)) < 0) {
             rc = raw_syscall(SYS_readlinkat, AT_FDCWD, (long)fd_host, (long)named,
                              sizeof(named) - 1, 0, 0);
             named[rc > 0 ? rc : 0] = 0;
             if (rc <= 0) strcpy(named, fd_guest);
         }
-        exec_fd = dirfd;
+        exec_fd = object;
         path = fd_guest;
     }
     /* Preserve debugger policy explicitly rather than silently losing it. */
@@ -265,7 +267,8 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         }
         if (!*interpreter) { ret = -ENOEXEC; goto done; }
         if (!depth && exec_fd >= 0) {
-            long fd_flags = raw_syscall(__NR_fcntl, exec_fd, F_GETFD, 0, 0, 0, 0);
+            long fd_flags = object != dirfd ? context->pinned_cloexec :
+                raw_syscall(__NR_fcntl, exec_fd, F_GETFD, 0, 0, 0, 0);
             if (fd_flags < 0 || (fd_flags & FD_CLOEXEC)) { ret = -ENOENT; goto done; }
         }
         names[depth] = interpreter;
