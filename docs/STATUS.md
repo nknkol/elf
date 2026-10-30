@@ -236,8 +236,12 @@ access 报告目录（取根目录元数据）。不在宿主创建任何目录�
 属性修改报告 EPERM，对已有名称的创建保留内核的 EEXIST；无可写基目录时退回上一轮的仅 stat 行为。
 rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存在名称的创建先报告 EEXIST 而非只读挂载的 EROFS
 （内核先查找名称），使只读根下的 `mkdir -p` 可用。glue 父目录列表中仍不显示 glue 名称（PRoot 同样不显示）。
+2026-10-30 嵌套脚本增量：解释器本身是脚本时此前返回 EOPNOTSUPP。现按内核 binfmt_script 逐层展开（脚本加
+四层脚本解释器，第五层报告 ELOOP）：每层把解释器、可选参数和上一层的文件名放在 argv 前部，/proc/self/exe
+为最终 ELF 解释器的 guest 路径，各层解释器都经 guest 解析与策略检查。recvfrom/recvmsg 的发送方地址
+保持宿主名称，这与 PRoot 一致（PRoot 只在退出时改写 accept/getsockname/getpeername），不算差异。
 仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据；
-recvfrom 返回的发送方地址、新式 xattrat 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
+新式 xattrat 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

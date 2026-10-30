@@ -16,7 +16,10 @@
 #endif
 
 #define EXEC_ARGS 128
-#define CHAIN_ARGS (EXEC_ARGS + 32 + CONFIG_MAX_BINDS * 2)
+/* Script levels the kernel follows (exec_binprm allows five rewrites
+ * before ELOOP): the script plus four script interpreters. */
+#define SCRIPT_DEPTH 5
+#define CHAIN_ARGS (EXEC_ARGS + 40 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
 #define S_IFLNK 0120000
@@ -25,7 +28,7 @@ extern long raw_syscall(long, long, long, long, long, long, long);
 typedef struct {
     char guest[CONFIG_MAX_PATH], host[CONFIG_MAX_PATH];
     char interpreter_guest[CONFIG_MAX_PATH], interpreter_host[CONFIG_MAX_PATH];
-    char header[256];
+    char header[SCRIPT_DEPTH + 1][256];
     char volumes[CONFIG_MAX_BINDS][CONFIG_MAX_PATH * 2 + 2];
     char *argv[CHAIN_ARGS];
 #ifdef FD_EXPERIMENT
@@ -163,22 +166,26 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         ret = -EPERM;
         goto done;
     }
-    int n = read_executable(s->host, flags & AT_SYMLINK_NOFOLLOW, s->header);
+    int n = read_executable(s->host, flags & AT_SYMLINK_NOFOLLOW, s->header[0]);
     if (n < 0) { ret = n; goto done; }
     char *target = s->host;
-    char *interpreter = NULL, *optional_arg = NULL;
-    int script = !elf_magic(s->header, n);
-    if (script) {
-        if (n < 3 || s->header[0] != '#' || s->header[1] != '!') {
+    /* Like the kernel, an interpreter may itself be a script: level i's
+     * interpreter and optional argument are names[i] and options[i]. */
+    char *names[SCRIPT_DEPTH], *options[SCRIPT_DEPTH];
+    int depth = 0;
+    while (!elf_magic(s->header[depth], n)) {
+        char *header = s->header[depth];
+        if (n < 3 || header[0] != '#' || header[1] != '!') {
             ret = -ENOEXEC;
             goto done;
         }
-        char *end = strchr(s->header, '\n');
+        if (depth == SCRIPT_DEPTH) { ret = -ELOOP; goto done; }
+        char *end = strchr(header, '\n');
         if (!end && n == 255) { ret = -ENOEXEC; goto done; }
         if (end) *end = 0;
-        end = s->header + strlen(s->header);
-        while (end > s->header && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
-        interpreter = s->header + 2;
+        end = header + strlen(header);
+        while (end > header && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
+        char *interpreter = header + 2, *optional_arg = NULL;
         while (*interpreter == ' ' || *interpreter == '\t') interpreter++;
         char *arg = interpreter;
         while (*arg && *arg != ' ' && *arg != '\t') arg++;
@@ -188,17 +195,17 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
             if (*arg) optional_arg = arg;
         }
         if (!*interpreter) { ret = -ENOEXEC; goto done; }
+        names[depth] = interpreter;
+        options[depth++] = optional_arg;
         ret = proot_resolve_exec_path(AT_FDCWD, interpreter, true,
                                       s->interpreter_guest, s->interpreter_host,
                                       sizeof(s->interpreter_host), context);
         if (ret < 0) goto done;
-        /* Nested script interpreters require a bounded interpreter stack. */
-        char magic[256];
-        n = read_executable(s->interpreter_host, 0, magic);
+        n = read_executable(s->interpreter_host, 0, s->header[depth]);
         if (n < 0) { ret = n; goto done; }
-        if (!elf_magic(magic, n)) { ret = -EOPNOTSUPP; goto done; }
         target = s->interpreter_host;
     }
+    int script = depth > 0;
 #ifdef FD_EXPERIMENT
     int dynamic = 0;
     if (cfg->guard_file_reads) {
@@ -287,8 +294,12 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
 #endif
     s->argv[pos++] = "--";
     if (script) {
-        s->argv[pos++] = interpreter;
-        if (optional_arg) s->argv[pos++] = optional_arg;
+        /* Innermost interpreter first; each level's file is the name the
+         * previous level's line gave, the outermost one the script itself. */
+        for (int level = depth - 1; level >= 0; level--) {
+            s->argv[pos++] = names[level];
+            if (options[level]) s->argv[pos++] = options[level];
+        }
         s->argv[pos++] = s->guest;
         for (size_t i = 1; i < argc; i++) s->argv[pos++] = argv[i];
     } else if (argc) {

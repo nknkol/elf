@@ -192,12 +192,15 @@ Empty-path hardlinks remain unsupported without FD mount identity tracking.
 15 exec checks pass using static AArch64 guests. The signed loader is
 re-executed with root/binds and caller argv/env preserved, including an empty
 environment and explicit environment in container mode. Child cwd survives.
-Path-based execveat resolves directory FDs and honors final nofollow. A
-single shebang interpreter is resolved through the same guest filesystem;
-its optional argument remains a single string. Missing, nonexecutable,
-invalid-format and truncated-header files return errors to the caller.
+Path-based execveat resolves directory FDs and honors final nofollow. FD
+exec (AT_EMPTY_PATH) executes the FD's guest name. Shebang interpreters are
+resolved through the same guest filesystem and may themselves be scripts,
+up to the kernel's depth (the script plus four interpreter scripts, then
+ELOOP); each optional argument remains a single string. Missing,
+nonexecutable, invalid-format and truncated-header files return errors to
+the caller.
 
-Limits: FD exec (AT_EMPTY_PATH), nested script interpreters, custom hook
+Limits: FD exec of pathless objects (memfd, deleted files), custom hook
 ranges and colon-bearing bind serialization explicitly return EOPNOTSUPP.
 Exec paths remain bounded by 256-byte config fields, with fewer than 128
 caller arguments. Script argv uses the canonical guest script pathname.

@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix='exec-',dir=build) as tmp:
     subprocess.run(['clang','-nostdlib','-static','-ffreestanding','-fno-builtin','-fno-stack-protector','-O1','-Wl,-e,_start',str(base/'port-tests/svc_exec_probe.c'),'-o',str(root/'probe')],check=True)
     (bound/'child').write_bytes((root/'probe').read_bytes());(bound/'child').chmod(0o755)
     (bound/'link').symlink_to('child')
-    for name,body,mode in [('script','#!/mnt/child optional argument\n',0o755),('bad','invalid\n',0o755),('denied','invalid\n',0o644),('nested','#!/script\n',0o755)]:
+    for name,body,mode in [('script','#!/mnt/child optional argument\n',0o755),('bad','invalid\n',0o755),('denied','invalid\n',0o644),('nested','#!/script\n',0o755),('loop','#!/loop\n',0o755)]:
         (root/name).write_text(body);(root/name).chmod(mode)
     (root/'truncated').write_bytes(b'\x7fELF');(root/'truncated').chmod(0o755)
     def check(name,op,path,expected,mode='compat',absent=()):
@@ -41,5 +41,7 @@ with tempfile.TemporaryDirectory(prefix='exec-',dir=build) as tmp:
     check('empty pathname','!v','',['RET=-2'])
     check('FD exec of a directory is EACCES like the kernel','!e','',['RET=-13'])
     check('fexecve runs the program by its guest name','!f','/mnt/child',common)
-    check('nested interpreter explicitly unsupported','!v','/nested',['RET=-95'])
+    # Kernel binfmt_script: each level prepends its interpreter line and file name.
+    check('nested script interpreter','!v','/nested',['ARG=/mnt/child','ARG=optional argument','ARG=/script','ARG=/nested','ARG=/mnt/file','ROOT','BOUND'])
+    check('self-interpreting script loops like the kernel','!v','/loop',['RET=-40'])
 print(f'{len(results)} exec checks passed')
