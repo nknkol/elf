@@ -69,15 +69,8 @@ int integrity_check(long number, const long a[6], long *result)
         *result = -EPERM;
         return 1;
     }
-    if (!g_payload_config.seccomp_backstop)
-        return 0;
-    if (number == __NR_rt_sigaction && (int)a[0] == SIGSYS) {
+    if (g_payload_config.seccomp_backstop && number == __NR_rt_sigaction && (int)a[0] == SIGSYS) {
         *result = sigsys_action(a);
-        return 1;
-    }
-    if ((number == __NR_mmap || number == __NR_mprotect || number == __NR_pkey_mprotect) &&
-        integrity_wx((int)a[2])) {
-        *result = -EACCES;
         return 1;
     }
     return 0;

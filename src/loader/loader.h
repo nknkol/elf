@@ -67,7 +67,6 @@ int is_elf_file_at(int dirfd, const char *path);
 
 /* elf_load.c */
 #define ELF_MAX_PHNUM 256
-extern int g_deny_wx;
 extern unsigned long g_payload_lo, g_payload_hi;
 void elf_read_headers(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, const char *file);
 unsigned long elf_load_image(int fd, const Elf_Ehdr *ehdr, const Elf_Phdr *phdr,

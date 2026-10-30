@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* --seccomp-backstop probe. Mode m: write a raw `svc` into code that is
  * already executable (through /proc/self/mem, so no hook ever sees it) and
- * open /etc/alpine-release with it. Mode x: ask for an RWX mapping. Mode w:
- * a hooked svc whose x8 has high bits set above openat. */
+ * open /etc/alpine-release with it. Mode x: map RWX memory, write a raw svc
+ * into it and open argv[2] (a host-only path) with it: HongMeng runs no
+ * syscall from such pages, so it must not reach the host. Mode w: a hooked
+ * svc whose x8 has high bits set above openat. */
 #include <asm/unistd.h>
 static long sc(long n,long a,long b,long c,long d,long e,long f)
 {
@@ -20,6 +22,14 @@ void run(long *sp)
     if(mode=='x') {
         long r=sc(__NR_mmap,0,4096,7,0x22,-1,0);
         out("rwx=",-1);num(r<0 && r>-4096?r:0);
+        if(r<0 && r>-4096)sc(__NR_exit_group,0,0,0,0,0,0);
+        unsigned *rwx=(unsigned *)r;
+        rwx[0]=0xd2800000|(__NR_openat<<5)|8; /* mov x8, #openat */
+        rwx[1]=0xd4000001;                    /* svc #0 */
+        rwx[2]=0xd65f03c0;                    /* ret */
+        __asm__ volatile("dc cvau, %0\n dsb ish\n ic ivau, %0\n dsb ish\n isb"::"r"(rwx):"memory");
+        long fd=((long(*)(long,const char *,long,long))rwx)(-100,((char **)(sp+1))[2],0,0);
+        out("open=",-1);num(fd>=0?0:fd);
         sc(__NR_exit_group,0,0,0,0,0,0);
     }
     if(mode=='w') {

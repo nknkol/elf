@@ -4,7 +4,6 @@
 #include <asm/unistd.h>
 #include "loader.h"
 #include "elf_abi.h"
-#include "integrity.h"
 #include "arch.h"
 
 #define PFLAGS(x) ((((x) & PF_R) ? PROT_READ : 0) | \
@@ -38,7 +37,6 @@ int mprotect_exec(void *addr, size_t len, int prot)
 	return rc;
 }
 
-int g_deny_wx;
 unsigned long g_payload_lo, g_payload_hi;
 
 /* The whole layout is checked before anything is mapped: header and
@@ -135,8 +133,6 @@ unsigned long elf_load_image(int fd, const Elf_Ehdr *ehdr, const Elf_Phdr *phdr,
 		void *start = (void *)(bias + TRUNC_PG(ph->p_vaddr));
 		size_t size = ROUND_PG(ph->p_memsz + off);
 		int prot = PFLAGS(ph->p_flags);
-		if (g_deny_wx && integrity_wx(prot))
-			z_errx(1, "seccomp backstop: writable and executable segment refused");
 		if (prot == PROT_READ && ph->p_filesz == ph->p_memsz &&
 		    (ph->p_offset & (PAGE_SIZE - 1)) == off &&
 		    z_mmap(start, size, PROT_READ, MAP_FIXED | MAP_PRIVATE, fd,

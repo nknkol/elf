@@ -228,7 +228,6 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	options_parse(argc, argv, &cfg, &opt);
 	z_printf_enabled = cfg.log_level != LOG_LEVEL_NONE;
 	hook_set_section_scan(cfg.seccomp_backstop);
-	g_deny_wx = cfg.seccomp_backstop;
 	normalize_host_path(cfg.root, CONFIG_MAX_PATH);
 	for (int i = 0; i < cfg.bind_count; i++)
 		normalize_host_path(cfg.binds[i].dst, CONFIG_MAX_PATH);
