@@ -252,6 +252,12 @@ rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存�
 作为特权判断，降权后无法再取回 root，setgroups 需特权；凭据经 fork 继承、经 exec 链 `--fake-ids` 传递。
 伪 root 的 chown 遇内核 EPERM 报告成功（属主实际不变，ENOENT 等照常）；调用者自己的文件在 stat 中归属
 当前的保存 uid/gid（PRoot 同样如此）。附加组未建模。新增 fake_ids 用例（两种构建）。
+2026-10-30 硬链接回退增量：HarmonyOS 共享存储（及 Android FUSE）对任何硬链接返回 EPERM，dpkg 用 link() 备份
+状态数据库因而失败（PRoot 需 -l link2symlink）。现在内核以 EPERM 拒绝 linkat 时，普通文件以复制（内容、模式、
+时间相同，但不是同一 inode）、符号链接以同目标的新链接代替；其他类型、已存在的名称和跨挂载仍报原错误。
+允许硬链接的存储保持真实链接。真机 Ubuntu rootfs 中 apt-get update、apt-get install（jq/file/tree）、
+dpkg --configure 与 apt-get remove 均成功，降权与 chown 依赖上一项伪 root 凭据。新增 link_copy 用例，
+test_svc 的硬链接用例改为按宿主能力判定链接或复制。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

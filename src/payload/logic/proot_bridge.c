@@ -839,6 +839,53 @@ static long fake_chown(long ret)
     return ret == -EPERM && fake_ids_privileged() ? 0 : ret;
 }
 
+/* Some storage (HarmonyOS shared storage, Android FUSE) refuses every hard
+ * link with EPERM, which breaks dpkg's backups like PRoot without -l. Make
+ * the new name a copy of a regular file or symlink instead: same content,
+ * mode and times, but not the same inode. Anything else keeps the error. */
+static long copy_link(Bridge *b, long error)
+{
+    struct stat st;
+    if (raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->first_host, (long)&st,
+                    AT_SYMLINK_NOFOLLOW, 0, 0) < 0)
+        return error;
+    if ((st.st_mode & S_IFMT) == S_IFLNK) {
+        long n = raw_syscall(SYS_readlinkat, AT_FDCWD, (long)b->first_host,
+                             (long)b->proc_data, sizeof(b->proc_data) - 1, 0, 0);
+        if (n < 0 || n >= (long)sizeof(b->proc_data) - 1) return error;
+        b->proc_data[n] = 0;
+        return raw_syscall(SYS_symlinkat, (long)b->proc_data, AT_FDCWD, (long)b->host, 0, 0, 0) < 0 ?
+            error : 0;
+    }
+    if ((st.st_mode & S_IFMT) != S_IFREG) return error;
+    long in = raw_syscall(SYS_openat, AT_FDCWD, (long)b->first_host, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    if (in < 0) return error;
+    long out = raw_syscall(SYS_openat, AT_FDCWD, (long)b->host,
+                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, st.st_mode & 07777, 0, 0);
+    long ret = out < 0 ? out : 0;
+    while (!ret) {
+        long n = raw_syscall(SYS_read, in, (long)b->proc_data, sizeof(b->proc_data), 0, 0, 0);
+        if (n <= 0) { ret = n < 0 ? n : 1; break; }
+        for (long done = 0; done < n && !ret;) {
+            long w = raw_syscall(SYS_write, out, (long)b->proc_data + done, n - done, 0, 0, 0);
+            if (w <= 0) ret = w < 0 ? w : -EIO;
+            else done += w;
+        }
+    }
+    if (ret == 1) {
+        struct { long sec, nsec; } times[2] = {{st.st_atime, st.st_atime_nsec},
+                                               {st.st_mtime, st.st_mtime_nsec}};
+        raw_syscall(SYS_fchmod, out, st.st_mode & 07777, 0, 0, 0, 0);
+        raw_syscall(SYS_utimensat, out, 0, (long)times, 0, 0, 0);
+        ret = 0;
+    }
+    raw_syscall(__NR_close, in, 0, 0, 0, 0, 0);
+    if (out >= 0) raw_syscall(__NR_close, out, 0, 0, 0, 0, 0);
+    if (ret < 0 && out >= 0) raw_syscall(SYS_unlinkat, AT_FDCWD, (long)b->host, 0, 0, 0, 0);
+    /* A name that already exists stays the kernel's answer. */
+    return ret < 0 ? (out == -EEXIST ? -EEXIST : error) : 0;
+}
+
 static long mutate(Bridge *b, long number, long a[6])
 {
     long ret;
@@ -887,8 +934,11 @@ static long mutate(Bridge *b, long number, long a[6])
         return -EBUSY;
     if (first_mount != second_mount)
         return -EXDEV;
-    return raw_syscall(number, AT_FDCWD, (long)b->first_host,
-                       AT_FDCWD, (long)b->host, a[4], 0);
+    ret = raw_syscall(number, AT_FDCWD, (long)b->first_host,
+                      AT_FDCWD, (long)b->host, a[4], 0);
+    if (hardlink && ret == -EPERM)
+        ret = copy_link(b, ret);
+    return ret;
 }
 
 static bool path_mutation(long number, long a[6])

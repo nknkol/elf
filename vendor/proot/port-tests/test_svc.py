@@ -187,18 +187,20 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     (root/'native-relative').symlink_to('real/file')
     follow_rc=native_link(root/'native-relative',root/'native-hard-follow',1024)
     bound_rc=native_link(bound/'file',bound/'native-hard')
-    mutate('hardlink within root matches host','l','/real/file','/newdir/hard',expected=regular_rc)
-    if regular_rc==0:assert (root/'real/file').stat().st_ino==(root/'newdir/hard').stat().st_ino
-    else:assert not (root/'newdir/hard').exists()
-    mutate('hardlink symlink matches host','l','/absolute','/newdir/hard-symlink',expected=symlink_rc)
-    if symlink_rc==0:assert (root/'absolute').lstat().st_ino==(root/'newdir/hard-symlink').lstat().st_ino
-    else:assert not (root/'newdir/hard-symlink').is_symlink()
-    mutate('hardlink follows guest symlink before host call','l','/absolute','/newdir/hard-follow',value=1024,expected=follow_rc)
-    if follow_rc==0:assert (root/'real/file').stat().st_ino==(root/'newdir/hard-follow').stat().st_ino
-    else:assert not (root/'newdir/hard-follow').exists()
-    mutate('hardlink two bound directory FDs matches host','l','file','hard',olddir='/mnt',newdir='/mnt',expected=bound_rc)
-    if bound_rc==0:assert (bound/'file').stat().st_ino==(bound/'hard').stat().st_ino
-    else:assert not (bound/'hard').exists()
+    # Storage that refuses every hard link (EPERM) gets a copy instead.
+    def linked(name,rc,source,target,old,new,follow=False,value=0,**kw):
+        mutate(name,'l',old,new,value=value,expected=0 if rc==-errno.EPERM else rc,**kw)
+        stat=(lambda p:p.stat()) if follow or not source.is_symlink() else (lambda p:p.lstat())
+        if rc==0:assert stat(source).st_ino==stat(target).st_ino
+        elif rc==-errno.EPERM:
+            assert stat(source).st_ino!=stat(target).st_ino
+            if source.is_symlink() and not follow:assert os.readlink(source)==os.readlink(target)
+            else:assert source.read_bytes()==target.read_bytes() and not target.is_symlink()
+        else:assert not target.exists() and not target.is_symlink()
+    linked('hardlink within root matches host',regular_rc,root/'real/file',root/'newdir/hard','/real/file','/newdir/hard')
+    linked('hardlink symlink matches host',symlink_rc,root/'absolute',root/'newdir/hard-symlink','/absolute','/newdir/hard-symlink')
+    linked('hardlink follows guest symlink before host call',follow_rc,root/'real/file',root/'newdir/hard-follow','/absolute','/newdir/hard-follow',follow=True,value=1024)
+    linked('hardlink two bound directory FDs matches host',bound_rc,bound/'file',bound/'hard','file','hard',olddir='/mnt',newdir='/mnt')
     mutate('rename cross bind refused','r','/real/moved','/mnt/cross',expected=-errno.EXDEV)
     assert (root/'real/moved').exists() and not (bound/'cross').exists()
     mutate('hardlink cross bind refused','l','/real/file','/mnt/cross',expected=-errno.EXDEV)
