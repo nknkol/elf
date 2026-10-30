@@ -3,12 +3,12 @@
 Run from the repository root:
 
 ```sh
-make check-fd-runtime
-vendor/proot/svc/build/elfloader-proot-fd-experiment --mode compat -- /path/to/program
+make check-guarded
+build/elfloader-guarded --mode compat -- /path/to/program
 ```
 
 This builds a separate executable and manifest. Normal `make build`/`make check`
-continue to produce `elfloader-proot` with the existing behavior. Both builds
+continue to produce `elfloader` with the existing behavior. Both builds
 share intermediate object paths, so do not build them concurrently. The last
 build also determines `src/elfloader`; prefer the named snapshots above.
 
@@ -193,7 +193,7 @@ the transport. Imported origins are downgraded to UNKNOWN: sealing validates
 immutability, not authority. Initialization failure remains sticky rather than
 silently starting an empty table. The internal --fd-state option requires
 --child-loader and exists only in experimental builds; it is not an authenticated
-protocol. Loader and payload must be built together with FD_EXPERIMENT.
+protocol. Loader and payload must be built together with GUARDED.
 
 The exec guest uses a private loader copy to force a real kernel exec failure
 after snapshot creation, checks unchanged metadata/flags and transport cleanup,

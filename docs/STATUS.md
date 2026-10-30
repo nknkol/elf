@@ -358,6 +358,22 @@ fexecve 带 AT_SYMLINK_NOFOLLOW 时不再把内部 /proc/self/fd/N 魔链接当�
 - 保护区表不再惰性初始化：loader 写入配置的固定区间和 payload 自身映像直接参与检查，表里只追加运行期桩岛。
 - 不再吞掉 guest 的 SIGSEGV 处理器；loader 的崩溃转储只在开启日志时安装，转储后以原信号终止（不再 exit 139）。
 - 符号链接解析的每层缓冲全部移出栈：前 6 层在 bridge 内，更深的层在首次需要时映射一块（上限与 PRoot 相同，20 层）。
+2026-10-31 架构整理（打 `dev` 标签后进行）：只保留 PRoot 新架构。
+- 删除旧 ELF 后端：旧 VFS/overlay、旧 exec 处理、路径改写、loader.rc 配置文件与环境变量配置、
+  `--init`/tiny-init、`--shell` 内嵌 dash、`--detach`、`--hook-range` 与逐点桩页、x86 架构文件、
+  旧测试程序；`PROOT_PATH` 条件编译全部去掉。`vendor/proot` 只保留实际编译的路径核心与许可证。
+- loader 拆分为 `src/loader/{main,options,elf_load,paths,hook,backstop,signals}.c`；未知选项报错；
+  `--log LEVEL` 控制诊断输出；`--payload FILE` 取代配置文件加载外部 payload；
+  loader 自身的 shebang 处理与 child 路径解析删除（payload 已完成解析）。
+- 构建：`tools/build.py [--guarded]`，产物 `build/elfloader`、`build/elfloader-guarded`；
+  `make build` 同时构建两者，`check-fd-runtime` 改名 `check-guarded`；`FD_EXPERIMENT` 改名 `GUARDED`，
+  `fd_experiment` 模块改名 `fd_runtime`。
+- 统一：配置结构两种构建同一布局、同一 `PAYLOAD_ABI_VERSION`（16）；固定数字集中在 `elf_abi.h`
+  （`0x41555856` 即内核 `PR_GET_AUXV`）；自身完整性规则集中到 `integrity.{h,c}`，loader 与 payload
+  共用 W^X 判定；系统调用号统一用 `__NR_*`；payload 通用分发为 `dispatch.c`；stat 属主伪装并入
+  `fake_ids.c`；代码注释统一英文。
+- 测试：公共辅助 `test/lib.py`；`port-tests` 移到 `test/proot`。
+- 约定见 [架构说明](ARCHITECTURE.md)。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

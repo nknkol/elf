@@ -8,13 +8,13 @@ The archive identity is recorded locally, not authenticated against upstream.
 Run from the ELF repository root:
 
 ```sh
-python3 vendor/proot/svc/build_elf.py
+python3 tools/build.py
 python3 test/ubuntu/run.py ../ubuntu-base-26.04.1-base-arm64.tar.gz
 ```
 
 The survey exits nonzero when any case fails; the two known failures are not
 silently treated as passing. Full output is kept in the ignored build directory
-at `vendor/proot/svc/build/ubuntu-results.json`. Each run uses a temporary root
+at `build/ubuntu-results.json`. Each run uses a temporary root
 and host bind fixture, and explicitly binds host `/dev/null`. No package
 installation or network request is performed. The initial entry is
 `./usr/bin/dash`, with later exec routed through the guest filesystem resolver.

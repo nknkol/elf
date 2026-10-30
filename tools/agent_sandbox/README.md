@@ -48,7 +48,7 @@ before claiming hostile-agent isolation.
 ## Launching an agent
 
 ```sh
-make check-fd-runtime   # or: python3 vendor/proot/svc/build_elf.py --fd-experiment
+make check-guarded   # or: python3 tools/build.py --guarded
 python3 tools/agent_sandbox/launch.py profiles/agent.json \
   --brew-prefix /path/to/brew --workspace /path/to/project \
   --state /path/to/private-run -- /bin/sh -l
@@ -98,7 +98,7 @@ programs, libraries and the dynamic linker's guest path (on merged-usr systems
 mode, not hostile-code isolation; see the known gaps above and docs/STATUS.md.
 
 For the functioning experimental path backend and its tests, see
-[vendor/proot/SVC_PORT.md](../../vendor/proot/SVC_PORT.md).
+[docs/SVC_PORT.md](../../docs/SVC_PORT.md).
 
 ## Observe backing storage before selecting it
 
@@ -166,7 +166,7 @@ secure policy handoff: a guest can invoke the loader with different arguments.
 The JSON planner is still not connected to launch.
 
 The experimental payload ABI is now 10 (normal PRoot remains 3); older custom
-payload layouts are rejected. Build and test with `make check-fd-runtime`;
+payload layouts are rejected. Build and test with `make check-guarded`;
 its new `test/fs_policy/transport.py` runs real patched SVC calls, checks two
 successive execs with/without a vector, rejects invalid input, and verifies ABI
 mismatch rejection. Run it immediately after an experimental build because its
@@ -201,7 +201,7 @@ The ordinary build and observation mode do not enable these checks.
 writable success, both rename/link ends, symlink/nested mapping selection,
 cwd/dirfd origins and exec-import downgrade, then verifies host file contents,
 metadata and directory entries. It also proves observation and legacy modes
-still allow a write-access open. It is included in `make check-fd-runtime`.
+still allow a write-access open. It is included in `make check-guarded`.
 
 ## Partial file mutation guard (path + FD)
 
@@ -233,7 +233,7 @@ unmigrated pathname handlers, read visibility, policy handoff authentication and
 path/alias races are outstanding. Existing mappings are not revoked. The
 observation and path-only modes retain their previous behavior. ABI 6 prevents
 an older custom payload from silently treating file protection as path-only.
-`test/fs_policy/fd_mutations.py` is included in `make check-fd-runtime`.
+`test/fs_policy/fd_mutations.py` is included in `make check-guarded`.
 
 ## Mapping writeback guard
 

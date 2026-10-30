@@ -5,7 +5,7 @@ Run from the ELF repository root on the target AArch64 host:
 ```sh
 python3 tools/syscalls/scan.py --output /tmp/native-syscalls.json
 python3 test/syscalls/check_dispatch.py
-python3 vendor/proot/svc/build_elf.py
+python3 tools/build.py
 python3 test/syscalls/check_runtime.py
 ```
 

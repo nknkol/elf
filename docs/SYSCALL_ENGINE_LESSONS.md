@@ -74,7 +74,7 @@ redesign before hostile-code isolation can be claimed.
 - `test/syscalls/check_runtime.py`: native and loaded signal delivery/return,
   clone with a new stack, and six sandbox-fatal recipes returning ENOSYS.
 - `test/svc_probe/run.py`: generated SVC hooks and known raw-entry bypass.
-- `vendor/proot/port-tests/test_svc.py`, `test_exec.py`, `test_modify.py`:
+- `test/proot/test_svc.py`, `test_exec.py`, `test_modify.py`:
   filesystem behavior, exec continuity and native metadata mutation controls.
 - `make -C vendor/proot/svc check`: independent path/binding semantics.
 
@@ -401,7 +401,7 @@ there is no persisted format or default payload ABI change.
 
 ## First actual FD runtime loop
 
-The separate FD_EXPERIMENT build now routes real guest openat/dup/dup3/fcntl and
+The separate GUARDED build now routes real guest openat/dup/dup3/fcntl and
 close through a single-task registry. Its guest fixture links no metadata code:
 prctl diagnostics inspect the payload's table after actual syscalls. Missing fast
 routes matter: the first end-to-end test found pipe2 still bypassed the dispatcher,

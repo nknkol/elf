@@ -9,7 +9,7 @@ storage backing and load. Compare ratios on the same device and build.
 | Configuration | Meaning |
 | --- | --- |
 | native | the program without the loader |
-| default | `elfloader-proot`: PRoot path translation, no FD metadata |
+| default | `elfloader`: PRoot path translation, no FD metadata |
 | experiment | FD experiment without policy options |
 | mutation | `--guard-file-mutations dw` |
 | guarded | `--guard-file-access dw` (reads, visibility and mutations) |

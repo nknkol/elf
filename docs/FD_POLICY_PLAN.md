@@ -90,7 +90,7 @@ CLOEXEC 排除、失败 exec 原表保持和传输 FD 清理。注入 write/seal
 默认测试检查 loader 与 native 一致，并将上述已知 host deviation 单独报告；
 `python3 test/fd_table/check_clone.py --strict-linux` 会对三种语义差异返回非零。
 `make check` 使用兼容性对照模式，不能把其成功解释为全部 Linux clone 语义通过。
-完整即时输出写入忽略的 `vendor/proot/svc/build/clone-fd-results.json`。
+完整即时输出写入忽略的 `build/clone-fd-results.json`。
 
 运行时设计需调整：不能仅根据 CLONE_FILES 决定元数据表归属，也不能使用一个随
 CLONE_VM 共享的全局指针。本机观察更接近按进程共享 FD 表，但仅按 PID 惰性复制也不
@@ -330,9 +330,9 @@ clone/rt_sigreturn 等入口约束，并对未知接口采用经过设计的策�
 在绕过和竞争问题闭环前，不宣称可隔离恶意 guest。
 
 
-## 首条运行时闭环（FD_EXPERIMENT）
+## 首条运行时闭环（GUARDED）
 
-`make check-fd-runtime` 构建独立 `elfloader-proot-fd-experiment`。真实 dispatcher
+`make check-guarded` 构建独立 `elfloader-guarded`。真实 dispatcher
 现在可初始化单任务登记、跟踪 openat/dup/dup3/fcntl 和调用已有 close 执行流程；
 所有来源仍标记 UNKNOWN，不执行只读或默认拒绝策略。普通构建不启用这些入口。
 

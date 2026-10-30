@@ -41,7 +41,7 @@ FD table, and threads without CLONE_FILES still share it. Default mode reports
 these three host deviations explicitly while requiring native/loader parity.
 Use `--strict-linux` to fail on the deviations. The default passing result is
 compatibility parity, not full Linux clone conformance or metadata integration.
-The report is `vendor/proot/svc/build/clone-fd-results.json` (ignored by Git).
+The report is `build/clone-fd-results.json` (ignored by Git).
 
 `check_notify.py` links the production clone assembly and transaction manager
 with observable callbacks. It uses real clone, separate and inherited stacks,

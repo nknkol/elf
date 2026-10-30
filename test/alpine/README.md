@@ -9,7 +9,7 @@ the archive nor the extracted rootfs is committed.
 From the ELF repository root:
 
 ```sh
-python3 vendor/proot/svc/build_elf.py
+python3 tools/build.py
 python3 test/alpine/run.py ../alpine-minirootfs-3.24.3-aarch64.tar.gz
 python3 -m unittest discover -s test/alpine -p 'test_*.py' -v
 ```
@@ -17,7 +17,7 @@ python3 -m unittest discover -s test/alpine -p 'test_*.py' -v
 The harness checks the loader snapshot manifest, extracts into a fresh temporary
 root, runs bounded subprocesses, records stdout/stderr and checks exact expected
 outputs. Bind writes are also checked from the host. Results are written to
-`vendor/proot/svc/build/alpine-results.json`; the extracted fixture is removed.
+`build/alpine-results.json`; the extracted fixture is removed.
 
 Rootfs applets use absolute guest symlinks such as `/bin/sh -> /bin/busybox`.
 The extractor preserves them but rejects absolute/traversing member names,
