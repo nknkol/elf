@@ -1409,7 +1409,9 @@ static const char *find_config_path_arg(int argc, char **argv)
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_EXE,
 			      z_strlen(CONFIG_CHILD_EXEC_EXE) + 1) == 0 ||
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_NAME,
-			      z_strlen(CONFIG_CHILD_EXEC_NAME) + 1) == 0) {
+			      z_strlen(CONFIG_CHILD_EXEC_NAME) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_GLUE_DIR,
+			      z_strlen(CONFIG_CHILD_GLUE_DIR) + 1) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			i++;
@@ -1582,6 +1584,18 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 			i++;
 			continue;
 		}
+
+#ifdef PROOT_PATH
+		if (z_strncmp(arg, CONFIG_CHILD_GLUE_DIR,
+			      z_strlen(CONFIG_CHILD_GLUE_DIR) + 1) == 0) {
+			if (i + 1 >= argc || argv[i + 1][0] != '/' ||
+			    z_strlen(argv[i + 1]) >= CONFIG_MAX_PATH)
+				z_errx(1, "invalid value for %s", arg);
+			copy_cstr(cfg->glue_dir, CONFIG_MAX_PATH, argv[i + 1]);
+			i++;
+			continue;
+		}
+#endif
 
 		if (z_strncmp(arg, CONFIG_CHILD_EXEC_EXE,
 			      z_strlen(CONFIG_CHILD_EXEC_EXE) + 1) == 0) {
@@ -2282,6 +2296,22 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	/* /proc/<pid>/exe in guest terms. The exec chain names it; an initial
 	 * target is a host path relative to the root (or the guest path itself
 	 * without one). Loader-side shebang targets keep their interpreter name. */
+	/* PRoot's glue lives in PROOT_TMP_DIR, else TMPDIR, else /tmp. The
+	 * exec chain keeps the initial choice whatever the guest environment. */
+	if (!child_loader && !bootstrap_cfg.glue_dir[0]) {
+		const char *base = NULL;
+		for (int pass = 0; pass < 2 && !base; pass++) {
+			const char *key = pass ? "TMPDIR=" : "PROOT_TMP_DIR=";
+			size_t key_length = z_strlen(key);
+			for (char **e = env; e && *e; e++)
+				if (z_strncmp(*e, key, key_length) == 0 && (*e)[key_length] == '/' &&
+				    z_strlen(*e + key_length) < CONFIG_MAX_PATH) {
+					base = *e + key_length;
+					break;
+				}
+		}
+		copy_cstr(bootstrap_cfg.glue_dir, CONFIG_MAX_PATH, base ? base : "/tmp");
+	}
 	if (child_proto.exec_exe) {
 		copy_cstr(bootstrap_cfg.exec_exe, CONFIG_MAX_PATH, child_proto.exec_exe);
 	} else if (child_exec_path) {

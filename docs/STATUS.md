@@ -228,9 +228,16 @@ access 报告目录（取根目录元数据）。不在宿主创建任何目录�
 2026-10-30 fexecve 增量：execveat(fd, "", AT_EMPTY_PATH) 此前返回 EOPNOTSUPP。现由 /proc/self/fd 取得 FD 指向的
 宿主路径并映射为 guest 名称，按普通路径 exec（解析、解释器与策略一致）；目录得到与内核相同的 EACCES，
 已删除文件、memfd 等无路径对象仍为 EOPNOTSUPP。
-仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据，
-glue 目录不可打开、进入，也不出现在父目录列表中；返回给 guest 的 socket 地址、新式 xattrat
-入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
+2026-10-30 glue 目录增量：缺失的 glue 目录现在可以打开、列出和进入（cd、getcwd、/proc/self/cwd、exec 后
+相对路径均为 guest 名称）。与 PRoot 在临时目录建 glue 相同，内容来自一棵镜像全部 bind 目标的私有只读树，
+位于 PROOT_TMP_DIR、TMPDIR 或 /tmp（初始 loader 决定，经 exec 链 `--glue-dir` 传递），以用户与挂载表
+哈希命名，私下构建、封为只读后一次 rename 发布，同一视图的所有进程共享；只有属于本进程创建属主且他人
+不可写的树才被采用（HarmonyOS 共享存储忽略模式位并指定服务属主）。树内的创建、删除、改名报告 EACCES，
+属性修改报告 EPERM，对已有名称的创建保留内核的 EEXIST；无可写基目录时退回上一轮的仅 stat 行为。
+rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存在名称的创建先报告 EEXIST 而非只读挂载的 EROFS
+（内核先查找名称），使只读根下的 `mkdir -p` 可用。glue 父目录列表中仍不显示 glue 名称（PRoot 同样不显示）。
+仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据；
+recvfrom 返回的发送方地址、新式 xattrat 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
 **已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**

@@ -254,6 +254,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = CONFIG_CHILD_EXEC_NAME;
         s->argv[pos++] = (char *)name;
     }
+    if (cfg->glue_dir[0]) {
+        s->argv[pos++] = CONFIG_CHILD_GLUE_DIR;
+        s->argv[pos++] = (char *)cfg->glue_dir;
+    }
 #ifdef FD_EXPERIMENT
     if (dynamic) {
         s->argv[pos++] = CONFIG_CHILD_EXEC_INTERP;

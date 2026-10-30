@@ -47,6 +47,8 @@
 #define CONFIG_CHILD_EXEC_EXE "--exec-exe"
 /* Basename of the path as passed to execve, for the kernel comm. */
 #define CONFIG_CHILD_EXEC_NAME "--exec-name"
+/* Base directory of the glue tree, fixed by the initial loader. */
+#define CONFIG_CHILD_GLUE_DIR "--glue-dir"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -94,6 +96,8 @@ typedef struct payload_config {
     /* Guest path of the running executable (interpreter for scripts), for
      * /proc/<pid>/exe. The kernel link names the loader instead. */
     char exec_exe[CONFIG_MAX_PATH];
+    /* Glue tree base: PROOT_TMP_DIR, TMPDIR or /tmp of the initial loader. */
+    char glue_dir[CONFIG_MAX_PATH];
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
