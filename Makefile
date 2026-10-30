@@ -82,6 +82,7 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/threads.py
 	$(PYTHON) test/fs_policy/dup_race.py
 	$(PYTHON) test/fs_policy/fd_swap.py
+	$(PYTHON) test/fs_policy/case_alias.py
 	$(PYTHON) test/fs_policy/path_race.py
 	$(PYTHON) test/fs_policy/fexecve_guard.py
 	$(PYTHON) test/fs_policy/proc_links.py

@@ -99,6 +99,28 @@ typedef struct {
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
 
+/* A case variant of a marked mountpoint names it on this host storage: use
+ * its exact spelling, so mount selection and policy see the same object. */
+static void respell(void *opaque, char *path)
+{
+    Bridge *b = opaque;
+    for (size_t i = 0; i < b->table.count; i++) {
+        const PathBinding *e = &b->table.entries[i];
+        uint32_t fold = g_payload_config.binds[i].fold;
+        if (!fold) continue;
+        size_t from = fold - 1, n = strlen(e->guest), k = from;
+        if (strncmp(path, e->guest, from)) continue;
+        for (; k < n; k++) {
+            char x = path[k], y = e->guest[k];
+            if (x >= 'A' && x <= 'Z') x |= 0x20;
+            if (y >= 'A' && y <= 'Z') y |= 0x20;
+            if (x != y) break;
+        }
+        if (k == n && (path[n] == '\0' || path[n] == '/'))
+            memcpy(path + from, e->guest + from, n - from);
+    }
+}
+
 #define DEEP_FRAMES_SIZE ((CANON_LEVELS - BRIDGE_FRAMES) * sizeof(PathFrame))
 static PathFrame *deep_frames(void *opaque)
 {
@@ -940,6 +962,7 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
     ops.readlink = host_readlink;
     ops.detranslate = ordinary_link;
     ops.proc_link = proc_link;
+    ops.respell = respell;
     PathResolver resolver = {{b, &ops, b->path_frames, BRIDGE_FRAMES, deep_frames}, b->cwd,
                              host_fd, host_map, b->resolve_scratch};
     b->follow_final = follow;

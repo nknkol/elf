@@ -40,6 +40,9 @@ typedef struct {
     int (*readlink)(void *, const char *, char *, size_t);
     int (*detranslate)(void *, char *, const char *);
     int (*proc_link)(void *, char *, const char *, const char *, Comparison);
+    /* Optional: rewrite a guest path in place (same length) to the exact
+     * spelling of the mountpoint it names, before it is looked up. */
+    void (*respell)(void *, char *);
 } PathOps;
 /* Per-recursion-level scratch: one per followed symlink. */
 typedef struct {

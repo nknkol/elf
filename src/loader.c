@@ -2240,6 +2240,74 @@ static int has_prefix(const char *path, const char *prefix)
 	return tail == '\0' || tail == '/' ? 1 : 0;
 }
 
+#ifdef FD_EXPERIMENT
+/* Mounts are chosen by exact guest names, but some host storage (hmdfs,
+ * sharefs) matches names regardless of case: a guest name differing only in
+ * case from a nested mountpoint resolves through the parent mount to the
+ * host object the nested mount shadows. When the two mounts' access differs
+ * that would bypass the nested policy, so such mountpoints are marked and
+ * path walking spells any case variant of them exactly (ASCII case). */
+static void check_case_aliases(payload_config_t *cfg)
+{
+	const char *access = cfg->mount_access_observe;
+	if (!access[0])
+		return;
+	for (int i = 0; i < cfg->bind_count && i < CONFIG_MAX_BINDS; i++) {
+		const char *guest = cfg->binds[i].src;
+		int parent = -1;
+		size_t best = 0;
+		for (int j = 0; j < cfg->bind_count && j < CONFIG_MAX_BINDS; j++) {
+			size_t len = z_strlen(cfg->binds[j].src);
+			if (j != i && len > best && len < z_strlen(guest) &&
+			    has_prefix(guest, cfg->binds[j].src)) {
+				best = len;
+				parent = j;
+			}
+		}
+		if (access[parent + 1] == access[i + 1])
+			continue;
+		/* Walk the shadowed host path: parent source + the rest. */
+		char path[CONFIG_MAX_PATH], alias[CONFIG_MAX_PATH];
+		copy_cstr(path, sizeof(path), parent >= 0 ? cfg->binds[parent].dst : cfg->root);
+		size_t len = z_strlen(path);
+		while (len > 1 && path[len - 1] == '/')
+			path[--len] = 0;
+		for (const char *rest = guest + best; *rest && !cfg->binds[i].fold;) {
+			while (*rest == '/')
+				rest++;
+			size_t n = 0;
+			int letters = 0;
+			while (rest[n] && rest[n] != '/') {
+				char c = rest[n++];
+				letters |= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+			}
+			if (!n)
+				break;
+			if (len + 1 + n + 1 > sizeof(path))
+				z_errx(1, "mount path too long: %s", guest);
+			if (len != 1 || path[0] != '/')
+				path[len++] = '/';
+			z_memcpy(path + len, rest, n);
+			path[len + n] = 0;
+			z_memcpy(alias, path, len + n + 1);
+			for (size_t k = len; k < len + n; k++) {
+				char c = alias[k];
+				if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+					alias[k] = c ^ 0x20;
+			}
+			len += n;
+			rest += n;
+			unsigned long long dev, ino, alias_dev, alias_ino;
+			if (!get_path_stat(path, &dev, &ino))
+				break; /* Nothing shadowed here, so no alias of it either. */
+			if (letters && get_path_stat(alias, &alias_dev, &alias_ino) &&
+			    dev == alias_dev && ino == alias_ino)
+				cfg->binds[i].fold = (uint32_t)best + 1;
+		}
+	}
+}
+#endif
+
 static size_t join_paths(char *out, size_t out_sz,
 			 const char *left, size_t left_len,
 			 const char *right)
@@ -2596,6 +2664,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
     if (bootstrap_cfg.mount_access_observe[0] &&
         z_strlen(bootstrap_cfg.mount_access_observe) != (size_t)bootstrap_cfg.bind_count + 1)
         z_errx(1, "mount access observation requires root plus every bind");
+    check_case_aliases(&bootstrap_cfg);
     if (bootstrap_cfg.revalidate_file_fds && bootstrap_cfg.guard_path_mutations != 2)
         z_errx(1, "file FD revalidation requires file mutation guard");
     if (bootstrap_cfg.allow_local_output && bootstrap_cfg.guard_path_mutations != 2)

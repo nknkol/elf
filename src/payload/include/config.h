@@ -60,6 +60,10 @@
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
     char dst[CONFIG_MAX_PATH];
+    /* Set by the loader when host names below the parent mount match this
+     * mountpoint regardless of case: 1 + length of the parent's guest
+     * prefix (matched exactly); the rest matches ignoring ASCII case. */
+    uint32_t fold;
 };
 
 struct overlay_entry {

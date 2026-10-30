@@ -195,6 +195,8 @@ int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
 	status = join_paths(2, scratch_path, guest_path, component);
 	if (status < 0)
 	    return status;
+	if (ctx->ops->respell)
+	    ctx->ops->respell(ctx->opaque, scratch_path);
 
 	/* Resolve bindings and check that a non-final
 	 * component exists and either is a directory or is a
@@ -215,10 +217,8 @@ int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
 	 * components.  Errors are explicitly ignored since
 	 * they should be handled by the caller. */
 	if (status <= 0 || (finality == FINAL_NORMAL && !deref_final)) {
-	    strcpy(scratch_path, guest_path);
-	    status = join_paths(2, guest_path, scratch_path, component);
-	    if (status < 0)
-		return status;
+	    /* scratch_path is guest_path + component, possibly respelled. */
+	    strcpy(guest_path, scratch_path);
 	    continue;
 	}
 
