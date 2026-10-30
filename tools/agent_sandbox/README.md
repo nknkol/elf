@@ -567,9 +567,10 @@ path (`--exec-interp`) and refuses a dynamic target without one. A hidden or
 ancestor-only interpreter refuses the exec. Merged-usr `/lib` is a symlink in
 the root, so profiles must expose the interpreter's guest path explicitly.
 
-Known gaps: the launcher's initial target still maps PT_INTERP lexically;
-ancestor stat reports host metadata; recvfrom sender names are host paths;
-xattrat entries and path races are not covered (accept/getsockname/getpeername
+Known gaps: the loader resolves an initial target's PT_INTERP with guest
+symlink semantics but without the read policy (the exec helper supplies it);
+ancestor stat reports host metadata; recvfrom sender names are host paths, as
+under PRoot; xattrat entries and path races are not covered (accept/getsockname/getpeername
 names are reported in guest terms). Pathname AF_UNIX addresses of bind/connect/sendto/sendmsg are
 translated with guest semantics in both builds: bind follows the mutation
 policy, connect and sends need read visibility, host paths longer than

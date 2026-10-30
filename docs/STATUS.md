@@ -240,7 +240,11 @@ rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存�
 四层脚本解释器，第五层报告 ELOOP）：每层把解释器、可选参数和上一层的文件名放在 argv 前部，/proc/self/exe
 为最终 ELF 解释器的 guest 路径，各层解释器都经 guest 解析与策略检查。recvfrom/recvmsg 的发送方地址
 保持宿主名称，这与 PRoot 一致（PRoot 只在退出时改写 accept/getsockname/getpeername），不算差异。
-仍未完成：直接调用 loader 时首个目标仍由 loader 词法映射加载解释器（launch.py 经助手规避）；祖先目录的 stat 仍是宿主元数据；
+2026-10-30 解释器解析增量：loader 自行打开 PT_INTERP 时（首个目标，以及未经读取保护的 exec 链）此前按 bind/根
+词法拼接宿主路径，rootfs 内的绝对符号链接会被宿主内核跟随到宿主自己的路径。现逐分量经最长 bind 与根映射，
+并按 guest 语义跟随每个符号链接（绝对链接回到 guest 根，40 层上限），与 PRoot 一致；失败时退回词法映射。
+读取保护下的 exec 链仍使用 payload 已按策略解析的 `--exec-interp`。新增 interp_links 用例（三种配置）。
+仍未完成：祖先目录的 stat 仍是宿主元数据；
 新式 xattrat 入口和路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 

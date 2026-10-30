@@ -2051,10 +2051,111 @@ static void apply_root_overlay(payload_config_t *cfg, char *out, size_t out_sz)
 	join_paths(out, out_sz, cfg->root, z_strlen(cfg->root), original);
 }
 
+/* Host path of a canonical guest path: the longest bind, else the root. */
+static int map_guest_path(payload_config_t *cfg, const char *guest, char *out, size_t out_sz)
+{
+	size_t best = 0;
+	int found = -1;
+	for (int i = 0; i < cfg->bind_count && i < CONFIG_MAX_BINDS; i++) {
+		size_t len = z_strlen(cfg->binds[i].src);
+		if (len > best && has_prefix(guest, cfg->binds[i].src)) {
+			best = len;
+			found = i;
+		}
+	}
+	const char *host = found >= 0 ? cfg->binds[found].dst : cfg->root;
+	const char *rest = guest + best;
+	size_t host_len = z_strlen(host), rest_len = z_strlen(rest);
+	if (host_len + rest_len + 2 > out_sz)
+		return -1;
+	z_memcpy(out, host, host_len);
+	if (host_len && rest[0] == '/' && host[host_len - 1] == '/')
+		rest++, rest_len--;
+	z_memcpy(out + host_len, rest, rest_len + 1);
+	if (!out[0])
+		copy_cstr(out, out_sz, "/");
+	return 0;
+}
+
+/* PRoot semantics for a guest path the loader opens itself (PT_INTERP):
+ * resolve component by component through binds and root, following every
+ * symlink in guest terms, so an absolute link inside the rootfs cannot
+ * escape to the host. Lexical mapping is the fallback on failure. */
+static int resolve_guest_path(payload_config_t *cfg, const char *guest, char *out, size_t out_sz)
+{
+	char done[CONFIG_MAX_PATH], pending[CONFIG_MAX_PATH * 2];
+	char link[CONFIG_MAX_PATH], host[CONFIG_MAX_PATH];
+	size_t done_len = 0;
+	int links = 0;
+	if (guest[0] != '/' || z_strlen(guest) >= sizeof(pending))
+		return -1;
+	copy_cstr(pending, sizeof(pending), guest);
+	done[0] = '\0';
+	char *cursor = pending;
+	while (*cursor) {
+		while (*cursor == '/')
+			cursor++;
+		if (!*cursor)
+			break;
+		char *next = cursor;
+		while (*next && *next != '/')
+			next++;
+		size_t len = (size_t)(next - cursor);
+		if (len == 1 && cursor[0] == '.') {
+			cursor = next;
+			continue;
+		}
+		if (len == 2 && cursor[0] == '.' && cursor[1] == '.') {
+			while (done_len && done[done_len - 1] != '/')
+				done_len--;
+			if (done_len)
+				done_len--;
+			done[done_len] = '\0';
+			cursor = next;
+			continue;
+		}
+		size_t start = done_len;
+		if (done_len + len + 2 > sizeof(done))
+			return -1;
+		done[done_len++] = '/';
+		z_memcpy(done + done_len, cursor, len);
+		done_len += len;
+		done[done_len] = '\0';
+		cursor = next;
+		if (map_guest_path(cfg, done, host, sizeof(host)) < 0)
+			return -1;
+		ssize_t n = z_readlink(host, link, sizeof(link) - 1);
+		if (n < 0)
+			continue; /* Not a link (or missing: the open reports it). */
+		if (n == 0 || ++links > 40)
+			return -1;
+		link[n] = '\0';
+		/* Splice the link body in front of the unresolved remainder. */
+		size_t rest = z_strlen(cursor);
+		if ((size_t)n + rest + 2 > sizeof(pending))
+			return -1;
+		char remainder[CONFIG_MAX_PATH * 2];
+		copy_cstr(remainder, sizeof(remainder), cursor);
+		z_memcpy(pending, link, (size_t)n);
+		pending[n] = '/';
+		z_memcpy(pending + n + 1, remainder, rest + 1);
+		cursor = pending;
+		done_len = link[0] == '/' ? 0 : start;
+		done[done_len] = '\0';
+	}
+	if (!done_len)
+		copy_cstr(done, sizeof(done), "/");
+	return map_guest_path(cfg, done, out, out_sz);
+}
+
 static const char *rewrite_interp_path(payload_config_t *cfg, const char *in, char *out, size_t out_sz)
 {
 	if (!cfg || !in || !out || out_sz == 0)
 		return in;
+#ifdef PROOT_PATH
+	if ((cfg->root[0] || cfg->bind_count) && !resolve_guest_path(cfg, in, out, out_sz))
+		return out;
+#endif
 	copy_substr(out, out_sz, in, z_strlen(in));
 	if (!apply_bind_overlay(cfg, out, out_sz, in))
 		apply_root_overlay(cfg, out, out_sz);
