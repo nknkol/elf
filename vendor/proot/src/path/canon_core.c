@@ -124,14 +124,23 @@ int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
     if (!ctx || !ctx->ops || !ctx->ops->lookup || !ctx->ops->readlink ||
         !ctx->ops->detranslate || !ctx->ops->proc_link || !user_path || !guest_path)
         return -EINVAL;
-    char (*frame)[PATH_MAX] = recursion_level < ctx->frame_count ?
-        ctx->frames[recursion_level] : __builtin_alloca(2 * PATH_MAX);
-    char *scratch_path = frame[0];
-    char *host_path = frame[1];
-
     /* Avoid infinite loop on circular links.  */
-    if (recursion_level > MAXSYMLINKS)
+    if (recursion_level >= CANON_LEVELS)
 	return -ELOOP;
+
+    PathFrame *frame;
+    if (recursion_level < ctx->frame_count)
+        frame = &ctx->frames[recursion_level];
+    else if (ctx->deep) {
+        frame = ctx->deep(ctx->opaque);
+        if (!frame)
+            return -ENOMEM;
+        frame += recursion_level - ctx->frame_count;
+    } else
+        frame = __builtin_alloca(sizeof(*frame));
+    char *scratch_path = frame->scratch;
+    char *host_path = frame->host;
+    char *component = frame->component;
 
     /* Sanity checks.  */
     assert(user_path != NULL);
@@ -164,7 +173,6 @@ int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
     finality = NOT_FINAL;
     while (!IS_FINAL(finality)) {
 	Comparison comparison;
-	char component[NAME_MAX];
 
 	finality = next_component(component, &cursor);
 	status = (int) finality;

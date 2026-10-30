@@ -42,6 +42,7 @@ struct guest_msghdr {
 };
 _Static_assert(sizeof(struct guest_msghdr) == 56, "AArch64 msghdr ABI");
 
+#define BRIDGE_FRAMES 6
 typedef struct {
     BindingTable table;
     bool mutation;
@@ -88,13 +89,28 @@ typedef struct {
     char proc_candidate[PATH_MAX];
     /* Path walking scratch kept off the guest stack: a vfork child may run
      * on a small spawn stack (glibc posix_spawn gives about 36 KiB), and
-     * each followed symlink would otherwise cost 8 KiB of it. */
-    char path_frames[6][2][PATH_MAX];
+     * each followed symlink would otherwise cost 8 KiB of it. Deeper
+     * chains use deep_frames, mapped on first use and kept with the bridge. */
+    PathFrame path_frames[BRIDGE_FRAMES];
+    PathFrame *deep_frames;
     char resolve_scratch[2][PATH_MAX];
     char fd_host[PATH_MAX], mapped[PATH_MAX], final_host[PATH_MAX];
 } Bridge;
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
+
+#define DEEP_FRAMES_SIZE ((CANON_LEVELS - BRIDGE_FRAMES) * sizeof(PathFrame))
+static PathFrame *deep_frames(void *opaque)
+{
+    Bridge *b = opaque;
+    if (!b->deep_frames) {
+        long mem = raw_syscall(__NR_mmap, 0, DEEP_FRAMES_SIZE, 3, 0x22, -1, 0);
+        if ((unsigned long)mem >= (unsigned long)-4095)
+            return NULL;
+        b->deep_frames = (PathFrame *)mem;
+    }
+    return b->deep_frames;
+}
 
 static int host_map(void *opaque, const char *guest, char *host)
 {
@@ -924,8 +940,8 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
     ops.readlink = host_readlink;
     ops.detranslate = ordinary_link;
     ops.proc_link = proc_link;
-    PathResolver resolver = {{b, &ops, b->path_frames, 6}, b->cwd, host_fd, host_map,
-                             b->resolve_scratch};
+    PathResolver resolver = {{b, &ops, b->path_frames, BRIDGE_FRAMES, deep_frames}, b->cwd,
+                             host_fd, host_map, b->resolve_scratch};
     b->follow_final = follow;
     b->final_valid = false;
     int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
@@ -1588,6 +1604,8 @@ static void bridge_release(Bridge *b)
             __atomic_store_n(&bridge_used[i], 0, __ATOMIC_RELEASE);
             return;
         }
+    if (b->deep_frames)
+        raw_syscall(__NR_munmap, (long)b->deep_frames, DEEP_FRAMES_SIZE, 0, 0, 0, 0);
     proot_scratch_free(b, sizeof(Bridge));
 }
 

@@ -32,20 +32,32 @@
  * Callbacks must bypass guest syscall interception in an SVC implementation.
  */
 enum { FS_LINK_DEFAULT, FS_LINK_CANONICALIZE, FS_LINK_KEEP };
+#include <sys/param.h>
+#include <limits.h>
+
 typedef struct {
     int (*lookup)(void *, Finality, unsigned int, const char *, char *);
     int (*readlink)(void *, const char *, char *, size_t);
     int (*detranslate)(void *, char *, const char *);
     int (*proc_link)(void *, char *, const char *, const char *, Comparison);
 } PathOps;
+/* Per-recursion-level scratch: one per followed symlink. */
+typedef struct {
+    char scratch[PATH_MAX], host[PATH_MAX], component[NAME_MAX];
+} PathFrame;
+/* Levels 0..CANON_LEVELS-1; one more is ELOOP. */
+#define CANON_LEVELS (MAXSYMLINKS + 1)
 typedef struct {
     void *opaque;
     const PathOps *ops;
-    /* Optional per-recursion-level scratch (two PATH_MAX buffers each), so
-     * a caller on a small stack (a vfork child's spawn stack) does not pay
-     * 8 KiB of stack per followed symlink. Levels beyond it use the stack. */
-    char (*frames)[2][PATH_MAX];
+    /* Optional scratch off the stack, so a caller on a small stack (a vfork
+     * child's spawn stack) pays no stack per followed symlink: frames for
+     * the first levels, and deep(), when set, returns frames for levels
+     * frame_count..CANON_LEVELS-1 (NULL: -ENOMEM). Without either, frames
+     * come from the stack. */
+    PathFrame *frames;
     unsigned int frame_count;
+    PathFrame *(*deep)(void *opaque);
 } PathContext;
 
 int canonicalize_core(PathContext *, const char *, bool, char [PATH_MAX], unsigned int);
