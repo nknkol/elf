@@ -2517,6 +2517,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
 			  &shell_mode, &child_proto);
 	z_printf_enabled = bootstrap_cfg.log_level != LOG_LEVEL_NONE;
+#ifdef PROOT_PATH
+	hook_set_section_scan(bootstrap_cfg.seccomp_backstop);
+#endif
 	if (bootstrap_cfg.root[0])
 		normalize_host_path(bootstrap_cfg.root, CONFIG_MAX_PATH);
 	for (int i = 0; i < bootstrap_cfg.bind_count && i < CONFIG_MAX_BINDS; i++)

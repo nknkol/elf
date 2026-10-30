@@ -65,8 +65,10 @@ for suffix in ('', '-fd-experiment'):
     assert regions < 100, p.stdout
     print(f'PASS: all guest syscalls hooked from {regions} executable regions:', loader.name)
 
-# Literal data in an executable segment is not code: only SHF_EXECINSTR
-# sections are scanned when the file has section headers.
+# Section headers do not limit control flow: code outside SHF_EXECINSTR
+# sections but inside an executable mapping must still be intercepted
+# (scanned whole without the backstop, trapped with it). Only with the
+# backstop may scanning skip non-code sections, leaving literal data alone.
 alpine = build / 'alpine-test-root'
 if (alpine / 'bin/busybox').exists():
     release = (alpine / 'etc/alpine-release').read_text().strip()
@@ -77,9 +79,12 @@ if (alpine / 'bin/busybox').exists():
                         str(repo / 'test/fs_policy/code_only_probe.c'), '-o', str(probe)], check=True)
         for suffix in ('', '-fd-experiment'):
             loader = build / f'elfloader-proot{suffix}'
-            p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
-                                '-v', f'{tmp}:/work', '--', './bin/busybox', 'sh', '-c', 'exec /work/probe'],
-                               cwd=alpine, capture_output=True, text=True, timeout=60)
-            assert p.returncode == 0, (suffix, p.stdout, p.stderr[-800:])
-            assert p.stdout.split() == ['literal=intact', f'open={release}'], (suffix, p.stdout)
-            print('PASS: svc-like literal data in an executable segment is left alone:', loader.name)
+            for options, literal in (([], 'literal=patched'), (['--seccomp-backstop'], 'literal=intact')):
+                p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine), *options,
+                                    '-v', f'{tmp}:/work', '--', './bin/busybox', 'sh', '-c',
+                                    'exec /work/probe'],
+                                   cwd=alpine, capture_output=True, text=True, timeout=60)
+                assert p.returncode == 0, (suffix, options, p.stdout, p.stderr[-800:])
+                assert p.stdout.split() == [literal, f'open={release}'], (suffix, options, p.stdout)
+            print('PASS: svc outside code sections is intercepted; literals kept only with backstop:',
+                  loader.name)

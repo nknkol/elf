@@ -45,18 +45,23 @@ long island_pread(int fd, void *buf, size_t len, long offset)
 /* Memory the guest's own mm calls must not unmap, remap or reprotect: the
  * loader image and its islands (from the config), the payload, and the
  * islands made at run time. Appended lock-free; fork copies it. */
-#define PROTECTED_MAX 1024
+#define PROTECTED_MAX 4096
 static uintptr_t protected_lo[PROTECTED_MAX], protected_hi[PROTECTED_MAX];
 static unsigned protected_count;
 static int protected_loaded;
 extern char __ehdr_start[], _end[];
 
-static void protected_add(uintptr_t lo, uintptr_t hi)
+/* Nonzero when the table is full: callers must not rely on protection. */
+static int protected_add(uintptr_t lo, uintptr_t hi)
 {
-    unsigned slot = __atomic_fetch_add(&protected_count, 1, __ATOMIC_ACQ_REL);
-    if (slot >= PROTECTED_MAX) return; /* Saturated: later islands unprotected. */
-    protected_lo[slot] = lo;
-    __atomic_store_n(&protected_hi[slot], hi, __ATOMIC_RELEASE);
+    unsigned n = __atomic_load_n(&protected_count, __ATOMIC_ACQUIRE);
+    do {
+        if (n >= PROTECTED_MAX) return -1;
+    } while (!__atomic_compare_exchange_n(&protected_count, &n, n + 1, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    protected_lo[n] = lo;
+    __atomic_store_n(&protected_hi[n], hi, __ATOMIC_RELEASE);
+    return 0;
 }
 
 static void protected_load(void)
@@ -71,10 +76,10 @@ static void protected_load(void)
                       (uintptr_t)g_payload_config.protected_ranges[i][1]);
 }
 
-void island_note(uintptr_t base, size_t len)
+int island_note(uintptr_t base, size_t len)
 {
     protected_load();
-    protected_add(base, base + len);
+    return protected_add(base, base + len);
 }
 
 int hook_protected_overlap(uintptr_t addr, size_t len)
@@ -107,7 +112,10 @@ long install_hook_file(void *target_base, size_t target_size, void *payload_entr
     if (!target_base || !payload_entry || target_size < 4)
         return 0;
     struct island_code code[ISLAND_CODE_MAX];
-    int ranges = island_code_ranges(fd, file_off, target_size, code);
+    /* Section headers do not limit control flow: only with the seccomp
+     * backstop catching anything skipped may scanning trust them. */
+    int ranges = g_payload_config.seccomp_backstop ?
+        island_code_ranges(fd, file_off, target_size, code) : 0;
     /* Code that may already run stays executable while patched; fresh code
      * (final prot without exec) is patched through a plain writable view. */
     int writable = (prot & PROT_EXEC) ? PROT_READ | PROT_WRITE | PROT_EXEC : PROT_READ | PROT_WRITE;

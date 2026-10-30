@@ -32,8 +32,9 @@
 
 long island_mmap(uintptr_t addr, size_t len, int prot, int flags);
 long island_munmap(uintptr_t addr, size_t len);
-/* Called for every finished island, so the payload can protect it. */
-void island_note(uintptr_t base, size_t len);
+/* Called for every finished island, so the payload can protect it.
+ * Nonzero when it could not be registered: the installation then fails. */
+int island_note(uintptr_t base, size_t len);
 long island_pread(int fd, void *buf, size_t len, long offset);
 
 /* Byte ranges of real code inside a mapping, relative to its start. */
@@ -210,7 +211,12 @@ static inline long island_hook_code(uintptr_t base, size_t size, uintptr_t paylo
         island_flush(is->base, is->used);
         long p = island_mprotect(is->base, used, ISLAND_PROT_READ | ISLAND_PROT_EXEC);
         if (p < 0 && !rc) rc = p;
-        if (p >= 0) island_note(is->base, used);
+        /* An island that cannot be protected is not used at all. */
+        if (p >= 0 && island_note(is->base, used) && !rc) rc = -12;
+    }
+    for (int k = 0; rc && k < 2; k++) {
+        struct island *is = islands[k];
+        if (is->base) { island_munmap(is->base, is->size); is->base = 0; }
     }
     long hooked = 0;
     if (!rc) {
