@@ -16,11 +16,15 @@
 #include "fd_experiment.h"
 #endif
 
+/* Guest argv entries held inline; longer vectors get their own mapping. */
 #define EXEC_ARGS 128
+/* The kernel bounds argv by bytes (E2BIG at execve), not by count. */
+#define MAX_ARGS (1 << 20)
 /* Script levels the kernel follows (exec_binprm allows five rewrites
  * before ELOOP): the script plus four script interpreters. */
 #define SCRIPT_DEPTH 5
-#define CHAIN_ARGS (EXEC_ARGS + 40 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
+#define CHAIN_EXTRA (40 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
+#define CHAIN_ARGS (EXEC_ARGS + CHAIN_EXTRA)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
 #define S_IFLNK 0120000
@@ -31,7 +35,8 @@ typedef struct {
     char interpreter_guest[CONFIG_MAX_PATH], interpreter_host[CONFIG_MAX_PATH];
     char header[SCRIPT_DEPTH + 1][256];
     char volumes[CONFIG_MAX_BINDS][CONFIG_MAX_PATH * 2 + 2];
-    char *argv[CHAIN_ARGS];
+    char **argv;
+    char *inline_argv[CHAIN_ARGS];
     char fake_ids[8 * 11];
 #ifdef FD_EXPERIMENT
     char fd_state[24];
@@ -150,13 +155,26 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         return -ENOENT;
     size_t argc = 0;
     while (argv && argv[argc]) {
-        if (++argc >= EXEC_ARGS)
+        if (++argc >= MAX_ARGS)
             return -E2BIG;
     }
     long mem = proot_scratch_alloc(sizeof(ExecScratch));
     if ((unsigned long)mem >= (unsigned long)-4095)
         return mem;
     ExecScratch *s = (void *)mem;
+    /* A large vector is mapped separately (a vfork child's exec leaves it in
+     * the shared parent, like any memory a vfork child allocates). */
+    size_t argv_bytes = 0;
+    s->argv = s->inline_argv;
+    if (argc >= EXEC_ARGS) {
+        argv_bytes = (argc + CHAIN_EXTRA) * sizeof(char *);
+        long array = raw_syscall(__NR_mmap, 0, (long)argv_bytes, 3, 0x22, -1, 0);
+        if ((unsigned long)array >= (unsigned long)-4095) {
+            proot_scratch_free((void *)mem, sizeof(ExecScratch));
+            return array;
+        }
+        s->argv = (char **)array;
+    }
 #ifdef FD_EXPERIMENT
     long transport = -1;
 #endif
@@ -336,6 +354,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
 #ifdef FD_EXPERIMENT
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
 #endif
+    if (argv_bytes) raw_syscall(__NR_munmap, (long)s->argv, (long)argv_bytes, 0, 0, 0, 0);
     proot_scratch_free((void *)mem,sizeof(ExecScratch));
     return ret;
 }

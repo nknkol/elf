@@ -41,10 +41,12 @@ with tempfile.TemporaryDirectory(prefix='interp-links-', dir=build) as tmp:
         manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
         assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
         p = subprocess.run([str(loader), '--mode', 'container', '--root', str(root), *options, '--',
-                            './bin/busybox', 'sh', '-c', 'echo direct=ok; /bin/busybox echo exec=ok; /tool a'],
+                            './bin/busybox', 'sh', '-c', 'echo direct=ok; /bin/busybox echo exec=ok; /tool a; '
+                            # The kernel bounds argv by bytes, not count.
+                            'echo "many=$(/bin/busybox sh -c \'echo $#\' x $(/bin/busybox seq 1 5000))"'],
                            cwd=root, capture_output=True, text=True, timeout=60)
         assert p.returncode == 0, (suffix, options, p.stdout, p.stderr[-1500:])
         lines = [line for line in p.stdout.splitlines() if '=' in line]
-        assert lines == ['direct=ok', 'exec=ok', 'wrapped=/wrapper -x /tool a'], (suffix, lines)
+        assert lines == ['direct=ok', 'exec=ok', 'wrapped=/wrapper -x /tool a', 'many=5000'], (suffix, lines)
         print('PASS: PT_INTERP through an absolute rootfs link and nested scripts:', loader.name,
               'guarded' if options else 'plain')

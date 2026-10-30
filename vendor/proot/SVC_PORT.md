@@ -202,8 +202,8 @@ the caller.
 
 Limits: FD exec of pathless objects (memfd, deleted files), custom hook
 ranges and colon-bearing bind serialization explicitly return EOPNOTSUPP.
-Exec paths remain bounded by 256-byte config fields, with fewer than 128
-caller arguments. Script argv uses the canonical guest script pathname.
+Exec paths remain bounded by 256-byte config fields; argv size is bounded
+by the kernel's own E2BIG check. Script argv uses the canonical guest script pathname.
 ELF preflight checks the ELF64 AArch64 header, not every segment or program
 header; later loader failures are not guaranteed to return exec errno.
 Dynamic ELF, multithreaded exec, signal/FD lifecycle and complete auxv
