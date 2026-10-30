@@ -4,7 +4,8 @@
 The default build shares its reentry table across fork. Each child that
 exec'd from inside an intercepted call used to keep its lease forever, so
 after 32 such children every intercepted call in the tree failed with
-EAGAIN and callers spun (dpkg unpacking packages). Both builds."""
+EAGAIN and callers spun (dpkg unpacking packages). The table also spanned
+the whole tree, so processes blocked in pipe reads exhausted it. Both builds."""
 import hashlib
 import json
 import subprocess
@@ -18,7 +19,9 @@ if not (alpine / 'bin/busybox').exists():
 
 SCRIPT = ('i=0; while [ $i -lt 100 ]; do /bin/busybox true || exit 9; i=$((i+1)); done; '
           'echo "sequential=$(cat /etc/alpine-release | wc -l)"; '
-          'i=0; while [ $i -lt 40 ]; do /bin/busybox sleep 3 & i=$((i+1)); done; '
+          # 40 exec'd children alive, plus 40 blocked inside read on a pipe.
+          'i=0; while [ $i -lt 40 ]; do /bin/busybox sleep 3 & '
+          '/bin/busybox sleep 3 | /bin/busybox cat & i=$((i+1)); done; /bin/busybox sleep 1; '
           'echo "concurrent=$(cat /etc/alpine-release | wc -l)"; wait; '
           'echo "after=$(ls /etc/alpine-release)"')
 for suffix in ('', '-fd-experiment'):
@@ -32,4 +35,4 @@ for suffix in ('', '-fd-experiment'):
     values = dict(line.split('=', 1) for line in p.stdout.splitlines() if '=' in line)
     assert values == {'sequential': '1', 'concurrent': '1', 'after': '/etc/alpine-release'}, (
         suffix, values)
-    print('PASS: 100 sequential and 40 concurrent exec children keep leases available:', loader.name)
+    print('PASS: exec children and blocked pipe readers keep leases available:', loader.name)

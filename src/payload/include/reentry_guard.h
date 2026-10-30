@@ -16,10 +16,10 @@ void reentry_private_fork(long tid);
 void reentry_leave(struct reentry_slot *slot);
 /* Releases only while the slot still names owner (the entry path's TID). */
 void reentry_leave_owned(struct reentry_slot *slot, long owner);
-/* A successful exec leaves this VM while the slot is held; in the default
- * build the table is shared with the rest of the process tree, so the
- * calling thread gives its table slot up before execve and tries to take it
- * back if execve fails. Private and vfork slots are left alone. */
+/* A successful exec from a vfork child leaves the shared VM while its table
+ * slot is held, so the calling thread gives the slot up before execve and
+ * tries to take it back if execve fails. Private and vfork slots are left
+ * alone. */
 struct reentry_slot *reentry_exec_release(void);
 void reentry_exec_restore(struct reentry_slot *slot);
 #endif

@@ -12,10 +12,12 @@
 static _Thread_local long simulated_tid;
 static int fail_mapping, nested_init;
 static int live_mappings;
-static long dead_tid; /* The one simulated owner that tkill reports as gone. */
+static long dead_tid; /* The one simulated owner reported as gone. */
+static long foreign_low, foreign_high; /* Simulated TIDs of another process. */
 long raw_syscall(long n,long a,long b,long c,long d,long e,long f) {
     if(n == SYS_gettid)return simulated_tid ? simulated_tid : syscall(n);
-    if(n == SYS_tkill)return a==dead_tid ? -ESRCH : 0;
+    if(n == SYS_getpid)return syscall(n);
+    if(n == SYS_tgkill)return b==dead_tid || (b>=foreign_low && b<foreign_high) ? -ESRCH : 0;
     assert(n == SYS_mmap || n == SYS_munmap);
     if(n==SYS_mmap && fail_mapping){fail_mapping=0;return -ENOMEM;}
     if(n==SYS_mmap && nested_init) {
@@ -61,15 +63,16 @@ static int fork_ownership(void) {
     pid_t pid=fork();assert(pid>=0);
     if(!pid) {
         close(ready[0]);close(proceed[1]);
-        /* Parent owners must not be mistaken for recursion or erased. */
-        if((intptr_t)reentry_try_enter()!=-EAGAIN)_exit(10);
-        char byte='x';if(write(ready[1],&byte,1)!=1)_exit(11);
-        if(read(proceed[0],&byte,1)!=1)_exit(12);
-        /* After parent releases, a copied private table incorrectly stays full. */
+        /* The copied table names the parent's threads: never recursion, and
+         * a full copy reclaims them because they are not this process's. */
+        foreign_low=2000;foreign_high=2032;
         struct reentry_slot *s=reentry_try_enter();
         if((intptr_t)s<=0)_exit(13);
         if(reentry_try_enter()!=NULL)_exit(14);
-        reentry_leave(s);_exit(0);
+        reentry_leave(s);
+        char byte='x';if(write(ready[1],&byte,1)!=1)_exit(11);
+        if(read(proceed[0],&byte,1)!=1)_exit(12);
+        _exit(0);
     }
     close(ready[1]);close(proceed[0]);char byte;
     assert(read(ready[0],&byte,1)==1);

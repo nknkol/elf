@@ -26,16 +26,14 @@ static struct reentry_slot private_slot;
 static long private_tid;
 extern long raw_syscall(long, long, long, long, long, long, long);
 
-/* Default build: shared anonymous storage prevents fork from copying owners
- * that only the parent can release. FD experiment: per-process storage, which
- * a private-fork child clears for its single thread. CLONE_VM threads share
- * it either way. Initialization is publish-once CAS, with no lock that a
- * nested signal could wait on. */
-#ifdef FD_EXPERIMENT
+/* Per-process storage in both builds; CLONE_VM threads share it. A shared
+ * table spanned the whole process tree, so 32 processes blocked in pipe reads
+ * exhausted it for everyone. A fork child's copy may still name its parent's
+ * other threads: a full table reclaims owners that are not live threads of
+ * this process. The FD experiment's private-fork child also clears its copy.
+ * Initialization is publish-once CAS, with no lock that a nested signal
+ * could wait on. */
 #define GUARD_TABLE_MAP MAP_PRIVATE
-#else
-#define GUARD_TABLE_MAP MAP_SHARED
-#endif
 static struct guard_table *guard_table_get(void)
 {
     struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);
@@ -95,14 +93,14 @@ struct reentry_slot *reentry_try_enter(void)
                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
                 return &slots[i];
         }
-        /* Full: an owner that died (or was killed) inside a call never left.
-         * The default build shares the table across fork, so such leases
-         * accumulate over a process tree (dpkg spawns hundreds of children).
-         * Only ESRCH proves death; a reused TID merely delays reclamation. */
-        for (int i = 0; !pass && i < GUARD_SLOTS; i++) {
+        /* Full: an owner that died inside a call never left, and a fork
+         * child's copy names its parent's threads. Only ESRCH from this
+         * thread group proves either; a reused TID merely delays it. */
+        long pid = pass ? 0 : raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+        for (int i = 0; !pass && pid > 0 && i < GUARD_SLOTS; i++) {
             long owner = __atomic_load_n(&slots[i].tid, __ATOMIC_ACQUIRE);
             if (owner > 0 && owner != tid &&
-                raw_syscall(__NR_tkill, owner, 0, 0, 0, 0, 0) == -ESRCH)
+                raw_syscall(__NR_tgkill, pid, owner, 0, 0, 0, 0) == -ESRCH)
                 __atomic_compare_exchange_n(&slots[i].tid, &owner, 0, 0,
                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
         }
@@ -127,8 +125,9 @@ void reentry_leave_owned(struct reentry_slot *slot, long owner)
 struct reentry_slot *reentry_exec_release(void)
 {
 #ifdef FD_EXPERIMENT
-    return NULL; /* Per-process table: exec discards it with the VM. */
+    return NULL; /* The FD experiment's exec path manages its own leases. */
 #else
+    /* A vfork child shares this VM: its lease must not outlive its exec. */
     struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);
     long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
     for (int i = 0; table && tid > 0 && i < GUARD_SLOTS; i++) {

@@ -254,7 +254,8 @@ rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存�
 当前的保存 uid/gid（PRoot 同样如此）。附加组未建模。新增 fake_ids 用例（两种构建）。
 2026-10-30 硬链接回退增量：HarmonyOS 共享存储（及 Android FUSE）对任何硬链接返回 EPERM，dpkg 用 link() 备份
 状态数据库因而失败（PRoot 需 -l link2symlink）。现在内核以 EPERM 拒绝 linkat 时，普通文件以复制（内容、模式、
-时间相同，但不是同一 inode）、符号链接以同目标的新链接代替；其他类型、已存在的名称和跨挂载仍报原错误。
+时间相同，但不是同一 inode）、符号链接以同目标的新链接代替（HarmonyOS 应用私有存储以 EACCES 拒绝硬链接，同样回退；
+真正的目录权限错误会让复制同样失败而保留原错误）；其他类型、已存在的名称和跨挂载仍报原错误。
 允许硬链接的存储保持真实链接。真机 Ubuntu rootfs 中 apt-get update、apt-get install（jq/file/tree）、
 dpkg --configure 与 apt-get remove 均成功，降权与 chown 依赖上一项伪 root 凭据。新增 link_copy 用例，
 test_svc 的硬链接用例改为按宿主能力判定链接或复制。
@@ -264,7 +265,8 @@ test_svc 的硬链接用例改为按宿主能力判定链接或复制。
 2026-10-30 重入租约泄漏修复：默认构建的重入表跨 fork 共享（32 个槽）。从拦截调用内 exec 成功或在调用中死亡的
 进程从不归还租约，满 32 个后整棵进程树的拦截调用都得到 EAGAIN，调用者原地自旋（dpkg 解包时 dpkg-deb 失败、
 dpkg 占满 CPU）。现在 exec 前让出本线程的表槽、失败时尽力取回；入口改为只在槽仍属于自己时才释放；
-表满时回收 tkill 报告 ESRCH 的属主（复用的 TID 只会推迟回收，不会提前释放）。新增 process_tree 用例
+表满时回收不再是本进程存活线程的属主（tgkill(getpid, tid) 报告 ESRCH；复用的 TID 只会推迟回收）。重入表改为
+每进程私有（与 FD 实验一致），fork 子进程复制来的父进程其他线程租约在表满时同样被回收。新增 process_tree 用例
 （100 个顺序、40 个并发 exec 子进程，修复前第 33 个失败）和 guard_test 的回收/让出单元检查。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
