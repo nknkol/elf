@@ -99,11 +99,14 @@ static void announce_close(struct fd_runtime *s,int fd,uint64_t generation)
     uint64_t epoch=++s->close_epoch;
     s->closed[epoch%CLOSE_RING]=(struct closed_fd){fd,epoch};
 }
-static int in_transition(const struct fd_runtime *s,int fd)
+/* Whether the record with this generation at fd is being closed or
+ * replaced. An entry for an older generation is a finished object's close
+ * whose slot is not cleared yet; the number may already hold a new one. */
+static int in_transition(const struct fd_runtime *s,int fd,uint64_t generation)
 {
     if(s->untracked)return 1;
     for(size_t i=0;i<sizeof(s->closing)/sizeof(s->closing[0]);i++)
-        if(s->closing[i].generation && s->closing[i].fd==fd)return 1;
+        if(s->closing[i].generation==generation && s->closing[i].fd==fd)return 1;
     return 0;
 }
 /* A number announced closed after a creation began may now name another
@@ -722,7 +725,7 @@ static int record(struct fd_runtime *s,struct fd_table *t,long n,long a[6],long 
      * call: any close and reuse of the number changes its generation. */
     const struct fd_record *source=fd_table_get(t,(int)a[0]);
     if(!source || !source_generation || source->generation!=source_generation ||
-       in_transition(s,(int)a[0]) ||
+       in_transition(s,(int)a[0],source->generation) ||
        reused_since(s,(int)a[0],since) || reused_since(s,(int)result,since))
         return fd_table_import_unknown(t,(int)result,cloexec);
     return fd_table_dup(t,(int)a[0],(int)result,cloexec);
@@ -934,9 +937,10 @@ long fd_experiment_dispatch(long n,long a[6])
     /* The record the kernel's copy must match; 0 (none or mid-change)
      * makes the copy unknown. */
     uint64_t since=s->close_epoch,source_generation=0;
-    if(duplicate && !in_transition(s,(int)a[0])) {
+    if(duplicate) {
         const struct fd_record *source=fd_table_get(t,(int)a[0]);
-        if(source)source_generation=source->generation;
+        if(source && !in_transition(s,(int)a[0],source->generation))
+            source_generation=source->generation;
     }
     unlock(s);
     long result;
