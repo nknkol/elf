@@ -7,7 +7,7 @@
 #include <asm/unistd.h>
 #include <errno.h>
 
-#define PR_ELF_FD_QUERY 0x46445452
+#include "elf_abi.h"
 
 static long call(long n, long a, long b, long c, long d)
 {

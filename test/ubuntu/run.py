@@ -7,9 +7,12 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 
 REPO=Path(__file__).resolve().parents[2]
-BUILD=REPO/'vendor/proot/svc/build'
+BUILD=lib.BUILD
 spec=importlib.util.spec_from_file_location('rootfs_extract',REPO/'test/alpine/run.py')
 extract=importlib.util.module_from_spec(spec);spec.loader.exec_module(extract)
 
@@ -18,8 +21,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive',type=Path)
     args=parser.parse_args();archive=args.archive.resolve(strict=True)
-    loader=BUILD/'elfloader-proot'
-    manifest=json.loads((BUILD/'elf-build.json').read_text())
+    loader=BUILD/'elfloader'
+    manifest=json.loads((BUILD/'elfloader.json').read_text())
     assert hashlib.sha256(loader.read_bytes()).hexdigest()==manifest['sha256']
     report=dict(archive=archive.name,archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),loader_sha256=manifest['sha256'],hardlinks='materialized as regular copies; inode identity not tested',results=[])
     output=BUILD/'ubuntu-results.json'

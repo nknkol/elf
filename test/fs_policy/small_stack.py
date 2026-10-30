@@ -11,8 +11,11 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: rootfs unavailable:', alpine)
@@ -20,9 +23,7 @@ if not (alpine / 'bin/busybox').exists():
 with tempfile.TemporaryDirectory(prefix='small-stack-', dir=build) as tmp:
     work = Path(tmp)
     probe = work / 'probe'
-    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
-                    '-fno-stack-protector', '-Wl,-e,_start',
-                    str(repo / 'test/fs_policy/small_stack_probe.c'), '-o', str(probe)], check=True)
+    subprocess.run([*lib.PROBE, str(repo / 'test/fs_policy/small_stack_probe.c'), '-o', str(probe)], check=True)
     # Five links, the last named for the busybox applet it runs; then a
     # chain of 15: deeper than the frames kept in the bridge, within PRoot's
     # limit of 20 links (MAXSYMLINKS).
@@ -35,10 +36,8 @@ with tempfile.TemporaryDirectory(prefix='small-stack-', dir=build) as tmp:
             (work / f'd{count}' / name).symlink_to(previous)
             previous = f'/work/d{count}/{name}'
         chains.append(previous)
-    for suffix in ('', '-fd-experiment'):
-        loader = build / f'elfloader-proot{suffix}'
-        manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-        assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+    for suffix in ('', '-guarded'):
+        loader = lib.loader(suffix)
         for chain in chains:
             p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
                                 '-v', f'{work}:/work', '-v', '/proc:/proc', '--', './bin/busybox', 'sh',

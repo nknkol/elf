@@ -12,35 +12,17 @@
 #define CONFIG_MAGIC        0x484f4f4b /* "HOOK" */
 #define CONFIG_VERSION      1
 
+/* compat keeps the host environment and identity; container starts from a
+ * clean environment and fake root (PRoot -0). */
 #define CONFIG_MODE_COMPAT     0
 #define CONFIG_MODE_CONTAINER  1
 
-#define HOOK_LAYER_BASE       (1 << 0)
-#define HOOK_LAYER_COMPAT     (1 << 1)
-#define HOOK_LAYER_ISOLATION  (1 << 2)
-
 #define CONFIG_MAX_PATH     256
-#ifdef PROOT_PATH
-#define CONFIG_AUXV_PAIRS 64
-#endif
+#define CONFIG_AUXV_PAIRS   64
 #define CONFIG_MAX_BINDS    16
-#define CONFIG_MAX_ENVS     16
-#define CONFIG_MAX_OVERLAYS 8
-#define CONFIG_DEFAULT_LOADER_DST "/data/service/hnp/horpkg-base.org/horpkg-base_1.0/bin/elfloader"
-#ifndef CONFIG_DEFAULT_INIT_PATH
-#define CONFIG_DEFAULT_INIT_PATH "tiny-init" /* 名义路径，仅用于 argv/AT_EXECFN，占位相对路径 */
-#endif
-#ifndef CONFIG_DEFAULT_CONFIG_PATH
-#define CONFIG_DEFAULT_CONFIG_PATH "" /* 默认为空，不自动读取配置文件 */
-#endif
-#ifndef CONFIG_DEFAULT_PAYLOAD_PATH
-#define CONFIG_DEFAULT_PAYLOAD_PATH "./payload.bin"
-#endif
 #define CONFIG_CHILD_LOADER_ARG "--child-loader"
 #define CONFIG_CHILD_EXEC_TARGET "--exec-target"
 #define CONFIG_CHILD_EXEC_PATH "--exec-path"
-#define CONFIG_CHILD_EXEC_DIRFD "--exec-dirfd"
-#define CONFIG_CHILD_EXEC_FLAGS "--exec-flags"
 /* Payload-resolved host path of the target PT_INTERP (file access mode). */
 #define CONFIG_CHILD_EXEC_INTERP "--exec-interp"
 /* Guest path of the executed binary (/proc/self/exe). */
@@ -66,44 +48,25 @@ struct bind_entry {
     uint32_t fold;
 };
 
-struct overlay_entry {
-    char mount[CONFIG_MAX_PATH];
-    char lower[CONFIG_MAX_PATH];
-    char upper[CONFIG_MAX_PATH];
+/* Guarded build: what the mount access policy enforces (each level
+ * includes the previous ones). Not isolation. */
+enum guard_level {
+    GUARD_OBSERVE, /* --observe-mount-access: record origins only */
+    GUARD_PATHS,   /* --guard-path-mutations: path-based changes */
+    GUARD_FILES,   /* --guard-file-mutations: and FD-based changes */
+    GUARD_READS,   /* --guard-file-access: and reads, listings, exec */
 };
 
+/* Written by the loader into the payload before the guest runs; the same
+ * layout in both builds (PAYLOAD_ABI_VERSION). */
 typedef struct payload_config {
     int32_t log_level;       /* LOG_LEVEL_* */
     int32_t mode;            /* CONFIG_MODE_* */
-    int32_t mode_explicit;   /* 标记是否显式指定模式，避免被 ROOT 推导覆盖 */
-    int32_t hook_mask;       /* HOOK_LAYER_* 位图，BASE 必开 */
     int32_t bind_count;
-    int32_t overlay_count;
-    int32_t env_count;
-    int32_t use_init;
-    int32_t detach;
-    int32_t hook_range_set;
-    int32_t hook_range_interp_set;
-    int32_t hook_min;
-    int32_t hook_max;
-    int32_t hook_min_interp;
-    int32_t hook_max_interp;
     char root[CONFIG_MAX_PATH];
     struct bind_entry binds[CONFIG_MAX_BINDS];
-    struct overlay_entry overlays[CONFIG_MAX_OVERLAYS];
-    char workdir[CONFIG_MAX_PATH];
-    char log_path[CONFIG_MAX_PATH];
-    char config_path[CONFIG_MAX_PATH];
-    char payload_path[CONFIG_MAX_PATH];
-    char envs[CONFIG_MAX_ENVS][CONFIG_MAX_PATH];
-    int32_t loader_norecurse;
-    int32_t loader_fd;
-    uint64_t loader_dev;
-    uint64_t loader_ino;
+    /* Host path of the loader binary, re-executed for every guest exec. */
     char loader_path[CONFIG_MAX_PATH];
-    char vfs_lower[CONFIG_MAX_PATH];
-    char vfs_upper[CONFIG_MAX_PATH];
-#ifdef PROOT_PATH
     /* Guest path of the running executable (interpreter for scripts), for
      * /proc/<pid>/exe. The kernel link names the loader instead. */
     char exec_exe[CONFIG_MAX_PATH];
@@ -124,27 +87,20 @@ typedef struct payload_config {
     /* uname overrides (PRoot -k for the release); empty keeps the kernel's. */
     char kernel_release[65];
     char kernel_sysname[65];
-#ifdef FD_EXPERIMENT
+    /* Guarded build only (zero otherwise). */
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
     char mount_access_observe[CONFIG_MAX_BINDS + 2];
     int32_t revalidate_file_fds; /* Re-derive regular-file origins, never trust snapshot tags. */
     int32_t allow_pipe_output; /* Newly created pipe2 write ends only. */
     int32_t allow_stdio_output; /* Revalidate pipe/TTY stdout+stderr, write/writev only. */
-    int32_t guard_path_mutations; /* 0=observe, 1=path guard, 2=path+FD guard; not isolation. */
-    int32_t guard_file_reads; /* Requires guard 2: path/FD read checks and listing visibility. */
+    int32_t guard; /* enum guard_level; meaningful with mount_access_observe. */
     int32_t allow_stream_input; /* Inherited pipe/socket/verified TTY reads in read guard mode. */
     int32_t allow_local_output; /* Writes to locally created sockets/eventfd/memfd. */
-#endif
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
-#endif
 } payload_config_t;
 
 extern payload_config_t g_payload_config;
-int config_log_level(void);
-int config_log_enabled(void);
-int config_mode(void);
-int hook_layer_enabled(int layer_mask);
 
 #endif /* PAYLOAD_CONFIG_H */

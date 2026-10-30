@@ -38,7 +38,7 @@ the disposable root and host `/proc/self/auxv` was bound to that guest path.
 The auxv panic disappeared, but the command exited 1 with:
 
 ```
-coreutils: unknown program 'elfloader-proot'
+coreutils: unknown program 'elfloader'
 ```
 
 This isolates the missing auxv retrieval path as the immediate panic trigger.
@@ -91,7 +91,7 @@ The emulated saved vector ends at AT_NULL rather than reproducing the kernel's
 fixed-sized storage padding. /proc/self/auxv is still not virtualized; the
 working route is PR_GET_AUXV, used by this image's rustix implementation.
 
-`vendor/proot/port-tests/test_auxv.py` checks the snapshot word-for-word against
+`test/proot/test_auxv.py` checks the snapshot word-for-word against
 the startup stack, executable identity, static AT_BASE, zero/short buffers,
 invalid pointers and reserved flags. Both compat/container and exec chaining
 are covered. Ubuntu now passes all 18 cases, including Rust ls/cat; Alpine's

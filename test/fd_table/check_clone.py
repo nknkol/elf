@@ -6,15 +6,17 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--strict-linux', action='store_true', help='Fail on native clone sharing deviations too')
 args = parser.parse_args()
 
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
-loader = build / 'elfloader-proot'
-assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads((build / 'elf-build.json').read_text())['sha256']
+build = lib.BUILD
+loader = lib.loader()
 modes = ['copy VM / copy FDs', 'copy VM / share FDs', 'share VM / copy FDs',
          'share VM / share FDs', 'thread / share FDs', 'thread / copy FDs']
 results = []

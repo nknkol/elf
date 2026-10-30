@@ -8,9 +8,12 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 
 REPO=Path(__file__).resolve().parents[2]
-BUILD=REPO/'vendor/proot/svc/build'
+BUILD=lib.BUILD
 
 
 def extract_root(archive, root, *, materialize_hardlinks=False):
@@ -72,8 +75,8 @@ def main():
     parser.add_argument('archive',type=Path)
     args=parser.parse_args()
     archive=args.archive.resolve(strict=True)
-    loader=BUILD/'elfloader-proot'
-    manifest=json.loads((BUILD/'elf-build.json').read_text())
+    loader=BUILD/'elfloader'
+    manifest=json.loads((BUILD/'elfloader.json').read_text())
     assert hashlib.sha256(loader.read_bytes()).hexdigest()==manifest['sha256'],'Rebuild loader snapshot'
     report=dict(archive=archive.name,archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),loader_sha256=manifest['sha256'],results=[])
     output=BUILD/'alpine-results.json'

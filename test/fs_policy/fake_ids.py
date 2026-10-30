@@ -10,8 +10,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 
 GUEST = r'''
 import json, os, subprocess, sys
@@ -53,10 +55,8 @@ print("RESULT " + json.dumps(out))
 
 python = str(Path(sys.executable).resolve())
 with tempfile.TemporaryDirectory(prefix='fake-ids-', dir=build) as tmp:
-    for suffix in ('', '-fd-experiment'):
-        loader = build / f'elfloader-proot{suffix}'
-        manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-        assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+    for suffix in ('', '-guarded'):
+        loader = lib.loader(suffix)
         # The bind's host owner counts as the caller's (service-owned storage).
         p = subprocess.run([str(loader), '--mode', 'container', '--root', '/', '-v', f'{tmp}:/fake-ids',
                             '--kernel-release', '6.1.0-elf', '--kernel-sysname', 'Linux',

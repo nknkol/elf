@@ -2,6 +2,9 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('launch', ROOT/'tools/agent_sandbox/launch.py')

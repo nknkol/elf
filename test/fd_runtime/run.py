@@ -12,11 +12,12 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
-loader = build / 'elfloader-proot-fd-experiment'
-assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads(
-    (build / 'elf-build-fd-experiment.json').read_text())['sha256']
+build = lib.BUILD
+loader = lib.loader('-guarded')
 # Compare status flags against this host: it may inherit O_NONBLOCK on accept.
 libc = ctypes.CDLL(None, use_errno=True)
 libc.syscall.restype = ctypes.c_long
@@ -262,8 +263,8 @@ for directory, target, arguments, marker in [
     assert p.returncode == 0 and marker in p.stdout, (directory, p.returncode, p.stdout, p.stderr)
     print('PASS: experimental runtime rootfs cat', directory)
 
-subprocess.run(['python3', str(repo / 'vendor/proot/port-tests/test_inotify.py'),
-                '--fd-experiment'], check=True)
+subprocess.run(['python3', str(repo / 'test/proot/test_inotify.py'),
+                '--guarded'], check=True)
 
 for directory, shell, command, marker in [
         ('alpine-test-root', './bin/busybox', ['sh', '-c', 'exec /bin/busybox cat /etc/alpine-release'], '3.24.3'),

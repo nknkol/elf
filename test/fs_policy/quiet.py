@@ -8,18 +8,19 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: rootfs unavailable:', alpine)
     raise SystemExit(0)
 # ls holds the listed directory on fd 3; nothing else may be open.
 SCRIPT = 'echo $(ls /proc/self/fd); echo $(/bin/busybox ls /proc/self/fd)'
-for suffix in ('', '-fd-experiment'):
-    loader = build / f'elfloader-proot{suffix}'
-    manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-    assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+for suffix in ('', '-guarded'):
+    loader = lib.loader(suffix)
     p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
                         '-v', '/proc:/proc', '--', './bin/busybox', 'sh', '-c', SCRIPT],
                        cwd=alpine, capture_output=True, text=True, timeout=60,

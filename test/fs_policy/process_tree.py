@@ -10,8 +10,11 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: process tree rootfs unavailable:', alpine)
@@ -24,10 +27,8 @@ SCRIPT = ('i=0; while [ $i -lt 100 ]; do /bin/busybox true || exit 9; i=$((i+1))
           '/bin/busybox sleep 3 | /bin/busybox cat & i=$((i+1)); done; /bin/busybox sleep 1; '
           'echo "concurrent=$(cat /etc/alpine-release | wc -l)"; wait; '
           'echo "after=$(ls /etc/alpine-release)"')
-for suffix in ('', '-fd-experiment'):
-    loader = build / f'elfloader-proot{suffix}'
-    manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-    assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+for suffix in ('', '-guarded'):
+    loader = lib.loader(suffix)
     p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine), '--',
                         './bin/busybox', 'sh', '-c', SCRIPT],
                        cwd=alpine, capture_output=True, text=True, timeout=180)

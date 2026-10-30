@@ -7,13 +7,16 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 
 
 def loader(suffix):
-    path = build / f'elfloader-proot{suffix}'
-    manifest = build / f'elf-build{suffix}.json'
+    path = build / f'elfloader{suffix}'
+    manifest = build / f'elfloader{suffix}.json'
     if not path.exists() or not manifest.exists():
         return None
     if hashlib.sha256(path.read_bytes()).hexdigest() != json.loads(manifest.read_text())['sha256']:
@@ -34,7 +37,7 @@ def socket_capable():
     return None
 
 
-experiment = loader('-fd-experiment')
+experiment = loader('-guarded')
 assert experiment, 'build the FD experiment first'
 base = socket_capable()
 if base is None:

@@ -3,7 +3,7 @@
 
 long sys_write(int fd, const void *buf, unsigned long count)
 {
-    register long x8 asm("x8") = SYS_write;
+    register long x8 asm("x8") = __NR_write;
     register long x0 asm("x0") = fd;
     register long x1 asm("x1") = (long)buf;
     register long x2 asm("x2") = count;

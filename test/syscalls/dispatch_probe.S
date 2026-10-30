@@ -20,15 +20,15 @@ _start:
     adr x23, fail_guard
     mov x0, #1
     str x0, [x23]
-    mov x8, #SYS_openat
+    mov x8, #__NR_openat
     bl hook_entry
     cmn x0, #11
     b.ne fail
     str xzr, [x23]
-    mov x8, #SYS_getpid
+    mov x8, #__NR_getpid
     bl hook_entry
     mov x20, x0
-    mov x8, #SYS_getpid
+    mov x8, #__NR_getpid
     svc #0
     cmp x0, x20
     b.ne fail
@@ -38,11 +38,11 @@ _start:
     b.ne fail
     /* A slow-dispatched exit would return the sentinel instead of exiting. */
     mov x0, #0
-    mov x8, #SYS_exit_group
+    mov x8, #__NR_exit_group
     bl hook_entry
 fail:
     mov x0, #1
-    mov x8, #SYS_exit_group
+    mov x8, #__NR_exit_group
     svc #0
 .global syscall_dispatcher
 syscall_dispatcher:
@@ -64,6 +64,10 @@ reentry_leave:
 .global reentry_leave_owned
 reentry_leave_owned:
     ret
+/* The clone gate (clone_entry.S) is not exercised here. */
+.global clone_entry
+clone_entry:
+    brk #0
 .data
 .global g_payload_config
 g_payload_config:

@@ -5,8 +5,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: identity rootfs unavailable:', alpine)
@@ -16,10 +19,8 @@ SCRIPT = ('echo "ids=$(id -u):$(id -g)"; echo "etc=$(stat -c %u:%g /etc/hostname
           'echo "new=$(touch /work/made && stat -c %u:%g /work/made)"')
 # The rootfs is the caller's tree (on some backings owned by a service uid).
 assert os.stat(alpine / 'etc/hostname').st_uid == os.stat(alpine).st_uid
-for suffix in ('', '-fd-experiment'):
-    loader = build / f'elfloader-proot{suffix}'
-    manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-    assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+for suffix in ('', '-guarded'):
+    loader = lib.loader(suffix)
     work = build / f'ids-work{suffix}'
     work.mkdir(exist_ok=True)
     try:
@@ -33,4 +34,4 @@ for suffix in ('', '-fd-experiment'):
     assert p.returncode == 0, (suffix, p.stdout, p.stderr[-1500:])
     values = dict(line.split('=', 1) for line in p.stdout.splitlines() if '=' in line)
     assert values == {'ids': '0:0', 'etc': '0:0', 'self': '0:0', 'new': '0:0'}, (suffix, values)
-    print('PASS: fake root ids and caller-owned stat owners:', 'elfloader-proot' + suffix)
+    print('PASS: fake root ids and caller-owned stat owners:', 'elfloader' + suffix)

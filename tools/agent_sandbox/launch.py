@@ -18,10 +18,12 @@ import os
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'test'))
+import lib  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-BUILD = REPO / 'vendor/proot/svc/build'
+BUILD = lib.BUILD
 spec = importlib.util.spec_from_file_location('agent_plan', HERE / 'plan.py')
 plan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plan)
@@ -36,7 +38,7 @@ HELPER = '.elf-exec'
 
 def verified_backend(loader):
     """Use only a loader/helper pair recorded by the same build manifest."""
-    manifest = json.loads((loader.parent / 'elf-build-fd-experiment.json').read_text())
+    manifest = json.loads((loader.parent / 'elfloader-guarded.json').read_text())
     helper = loader.parent / 'elf-exec-helper'
     for path, key in ((loader, 'sha256'), (helper, 'exec_helper_sha256')):
         if hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get(key):
@@ -134,7 +136,7 @@ def main():
     parser.add_argument('--brew-prefix', required=True)
     parser.add_argument('--workspace', required=True)
     parser.add_argument('--state', required=True, help='Private backing directory, outside exposed trees')
-    parser.add_argument('--loader', type=Path, default=BUILD / 'elfloader-proot-fd-experiment')
+    parser.add_argument('--loader', type=Path, default=BUILD / 'elfloader-guarded')
     parser.add_argument('--cwd', help='Guest working directory (default: /workspace target)')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE')
     parser.add_argument('--print', action='store_true', help='Print the launch as JSON instead of running it')

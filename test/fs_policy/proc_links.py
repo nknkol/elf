@@ -7,8 +7,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: /proc link rootfs unavailable:', alpine)
@@ -16,8 +19,8 @@ if not (alpine / 'bin/busybox').exists():
 
 
 def loader(suffix):
-    path = build / f'elfloader-proot{suffix}'
-    manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
+    path = build / f'elfloader{suffix}'
+    manifest = json.loads((build / f'elfloader{suffix}.json').read_text())
     assert hashlib.sha256(path.read_bytes()).hexdigest() == manifest['sha256']
     return path
 
@@ -52,8 +55,8 @@ with tempfile.TemporaryDirectory(prefix='proc-links-', dir=build) as tmp:
     release = (alpine / 'etc/alpine-release').read_text().strip()
     for suffix, options, guarded in (
             ('', [], False),
-            ('-fd-experiment', [], False),
-            ('-fd-experiment', ['--guard-file-access', 'rrww', '--allow-stdio-output',
+            ('-guarded', [], False),
+            ('-guarded', ['--guard-file-access', 'rrww', '--allow-stdio-output',
                                 '--allow-pipe-output', '--allow-local-output',
                                 '--allow-stream-input', '--revalidate-file-fds'], True)):
         fd = os.open(outside, os.O_RDONLY)
@@ -81,6 +84,6 @@ with tempfile.TemporaryDirectory(prefix='proc-links-', dir=build) as tmp:
         assert values['cmd'] == 'cat /proc/self/cmdline ', values['cmd']
         assert 'loader' not in values['cmd'] and str(build) not in p.stdout.replace(str(outside), ''), p.stdout
         assert int(values['fds']) >= 3, values['fds']
-        print('PASS: /proc links in guest terms:', 'elfloader-proot' + suffix,
+        print('PASS: /proc links in guest terms:', 'elfloader' + suffix,
               'guarded' if guarded else 'plain')
     shutil.rmtree(hidden)

@@ -12,8 +12,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 
 GUEST = r'''
 import ctypes, struct
@@ -47,10 +49,8 @@ fixed = libc.mmap(ctypes.c_void_p(island), 4096, 3, 0x32, -1, 0)
 print("sealed", calls, errors, fixed == ctypes.c_void_p(-1).value, ctypes.get_errno(), open("/proc/self/comm").read().strip())
 '''
 python = str(Path(sys.executable).resolve())
-for suffix in ('', '-fd-experiment'):
-    loader = build / f'elfloader-proot{suffix}'
-    manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-    assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+for suffix in ('', '-guarded'):
+    loader = lib.loader(suffix)
     p = subprocess.run([str(loader), '--mode', 'container', '--root', '/', '--',
                         python.lstrip('/'), '-B', '-c', 'import ctypes, ssl, sqlite3\n' + GUEST],
                        cwd='/', capture_output=True, text=True, timeout=120)
@@ -74,11 +74,10 @@ if (alpine / 'bin/busybox').exists():
     release = (alpine / 'etc/alpine-release').read_text().strip()
     with tempfile.TemporaryDirectory(prefix='code-only-', dir=build) as tmp:
         probe = Path(tmp) / 'probe'
-        subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
-                        '-fno-stack-protector', '-Wl,-e,_start', '-Wl,--no-rosegment',
+        subprocess.run([*lib.PROBE, '-Wl,--no-rosegment',
                         str(repo / 'test/fs_policy/code_only_probe.c'), '-o', str(probe)], check=True)
-        for suffix in ('', '-fd-experiment'):
-            loader = build / f'elfloader-proot{suffix}'
+        for suffix in ('', '-guarded'):
+            loader = build / f'elfloader{suffix}'
             for options, literal in (([], 'literal=patched'), (['--seccomp-backstop'], 'literal=intact')):
                 p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine), *options,
                                     '-v', f'{tmp}:/work', '--', './bin/busybox', 'sh', '-c',

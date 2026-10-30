@@ -4,6 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('probe_storage', ROOT / 'tools/agent_sandbox/probe_storage.py')

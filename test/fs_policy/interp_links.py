@@ -10,8 +10,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 interp = 'ld-musl-aarch64.so.1'
 if not (alpine / 'bin/busybox').exists() or not (alpine / 'lib' / interp).exists():
@@ -34,12 +37,10 @@ with tempfile.TemporaryDirectory(prefix='interp-links-', dir=build) as tmp:
     (root / 'tool').write_text('#!/wrapper -x\n')
     (root / 'wrapper').chmod(0o755)
     (root / 'tool').chmod(0o755)
-    for suffix, options in (('', []), ('-fd-experiment', []),
-                            ('-fd-experiment', ['--guard-file-access', 'r', '--allow-stdio-output',
+    for suffix, options in (('', []), ('-guarded', []),
+                            ('-guarded', ['--guard-file-access', 'r', '--allow-stdio-output',
                                                 '--allow-pipe-output'])):
-        loader = build / f'elfloader-proot{suffix}'
-        manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-        assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+        loader = lib.loader(suffix)
         p = subprocess.run([str(loader), '--mode', 'container', '--root', str(root), *options, '--',
                             './bin/busybox', 'sh', '-c', 'echo direct=ok; /bin/busybox echo exec=ok; /tool a; '
                             # The kernel bounds argv by bytes, not count.

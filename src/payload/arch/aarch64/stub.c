@@ -1,10 +1,8 @@
 #include <stddef.h>
 #include "stub.h"
 
-#ifdef PROOT_PATH
 _Static_assert(PAYLOAD_CLONE_ENTRY_OFFSET == 16 && STUB_CLONE_RESUME_OFFSET == 100 &&
                STUB_DATA_OFFSET == 160, "update clone stub instruction encoding");
-#endif
 
 static uint32_t make_branch(uintptr_t src, uintptr_t dest)
 {
@@ -22,9 +20,9 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
 {
 	static const uint32_t tmpl[] = {
 		0xd503245f, /* bti c */
-		0x71022d1f, /* cmp w8, #0x8b (SYS_rt_sigreturn; the kernel's int) */
+		0x71022d1f, /* cmp w8, #0x8b (__NR_rt_sigreturn; the kernel's int) */
 		0x540001c0, /* b.eq sigreturn */
-		0x7103711f, /* cmp w8, #0xdc (SYS_clone) */
+		0x7103711f, /* cmp w8, #0xdc (__NR_clone) */
 		0x54000180, /* b.eq passthrough */
 		0xd10083ff, /* sub sp, sp, #0x20 */
 		0xa90047f0, /* stp x16, x17, [sp] */
@@ -67,7 +65,6 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
 	for (size_t i = 0; i < sizeof(tmpl) / sizeof(tmpl[0]); i++)
 		code[i] = tmpl[i];
 
-#ifdef PROOT_PATH
     /* Separate clone entry restores the original SP before SVC and returns
      * through a stack-independent continuation on either parent/child stack. */
     code[4] = 0x540001c0; /* b.eq clone path at word 18 */
@@ -81,7 +78,6 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
     code[25] = 0xd503249f; /* bti j */
     code[26] = 0xa8c147f0; /* ldp x16, x17, [sp], #16 */
     code[27] = make_branch((uintptr_t)slot + 27 * 4, return_addr);
-#endif
 
 	uint32_t branch = make_branch((uintptr_t)slot + 15 * 4, return_addr);
 	if (branch)

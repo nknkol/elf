@@ -11,8 +11,11 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: link rootfs unavailable:', alpine)
@@ -30,10 +33,8 @@ with tempfile.TemporaryDirectory(prefix='link-copy-', dir=build) as tmp:
         native = 'link'
     except PermissionError:  # EPERM or EACCES on storage that refuses links.
         native = 'copy'
-    for suffix in ('', '-fd-experiment'):
-        loader = build / f'elfloader-proot{suffix}'
-        manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-        assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+    for suffix in ('', '-guarded'):
+        loader = lib.loader(suffix)
         if native == 'copy':
             # Default: the host's refusal stands, nothing is created.
             work = Path(tmp) / f'plain{suffix}'

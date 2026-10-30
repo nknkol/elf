@@ -8,8 +8,10 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 
 GUEST = r'''
 import ctypes, errno
@@ -33,10 +35,8 @@ except ImportError:
     print('SKIP: ctypes unavailable')
     raise SystemExit(0)
 python = str(Path(sys.executable).resolve())
-for suffix in ('', '-fd-experiment'):
-    loader = build / f'elfloader-proot{suffix}'
-    manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-    assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+for suffix in ('', '-guarded'):
+    loader = lib.loader(suffix)
     p = subprocess.run([str(loader), '--mode', 'container', '--root', '/', '--',
                         python.lstrip('/'), '-B', '-c', GUEST],
                        cwd='/', capture_output=True, text=True, timeout=120)

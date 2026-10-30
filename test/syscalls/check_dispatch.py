@@ -16,7 +16,7 @@ def number(name):
 for key in values:
     if key.startswith('SYS_'):
         assert number(key) == number('__NR_'+key[4:]), key
-assert number('SYS_rt_sigaction') == 134
+assert number('__NR_rt_sigaction') == 134
 assert number('__NR_unshare') == 97
 assert number('__NR_kcmp') == 272
 inventory = subprocess.check_output(['clang', '-E', '-P', '-I'+str(arch), '-'],

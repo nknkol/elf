@@ -7,7 +7,7 @@
 #include "reentry_guard.h"
 
 /* Per process in the FD experiment, where a thread pool shares it. */
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
 #define GUARD_SLOTS 64
 #else
 #define GUARD_SLOTS 32
@@ -62,7 +62,7 @@ struct reentry_slot *reentry_try_enter(void)
                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
             ? &vfork_slot : NULL;
     }
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     /* Bind once at entry, before acquiring any lease. Binding later inside
      * dispatch would let a nested signal bypass the already-held old slot. */
     if (!__atomic_load_n(&private_tid, __ATOMIC_ACQUIRE)) {
@@ -124,7 +124,7 @@ void reentry_leave_owned(struct reentry_slot *slot, long owner)
 
 struct reentry_slot *reentry_exec_release(void)
 {
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     return NULL; /* The FD experiment's exec path manages its own leases. */
 #else
     /* A vfork child shares this VM: its lease must not outlive its exec. */
@@ -168,7 +168,7 @@ void reentry_private_fork(long tid)
 {
     __atomic_store_n(&private_slot.tid, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&private_tid, tid, __ATOMIC_RELEASE);
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     /* The copied table names the parent's other threads, which do not exist
      * here; a later reuse of such a TID must not look like recursion. */
     struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);

@@ -3,8 +3,8 @@
 import subprocess
 from pathlib import Path
 
-build = Path(__file__).resolve().parents[2] / 'vendor/proot/svc/build'
-loader = build / 'elfloader-proot-fd-experiment'
+build = Path(__file__).resolve().parents[2] / 'build'
+loader = build / 'elfloader-guarded'
 for directory, shell, prefix, cat in (
         ('alpine-test-root', './bin/busybox', ['sh'], '/bin/busybox cat'),
         ('ubuntu-root', './usr/bin/dash', [], '/usr/bin/cat')):

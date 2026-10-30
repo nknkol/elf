@@ -7,19 +7,21 @@ than exiting with a status. Both builds."""
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: rootfs unavailable:', alpine)
     raise SystemExit(0)
 with tempfile.TemporaryDirectory(prefix='segv-', dir=build) as tmp:
     probe = Path(tmp) / 'probe'
-    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
-                    '-fno-stack-protector', '-Wl,-e,_start', str(repo / 'test/fs_policy/segv_probe.c'),
+    subprocess.run([*lib.PROBE, str(repo / 'test/fs_policy/segv_probe.c'),
                     '-o', str(probe)], check=True)
-    for suffix in ('', '-fd-experiment'):
-        loader = build / f'elfloader-proot{suffix}'
+    for suffix in ('', '-guarded'):
+        loader = build / f'elfloader{suffix}'
         def run(mode):
             return subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
                                    '-v', f'{tmp}:/work', '--', './bin/busybox', 'sh', '-c',

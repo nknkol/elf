@@ -12,8 +12,11 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: rootfs unavailable:', alpine)
@@ -21,19 +24,14 @@ if not (alpine / 'bin/busybox').exists():
 release = (alpine / 'etc/alpine-release').read_text().strip()
 with tempfile.TemporaryDirectory(prefix='backstop-', dir=build) as tmp:
     work = Path(tmp)
-    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
-                    '-fno-stack-protector', '-Wl,-e,_start',
-                    str(repo / 'test/fs_policy/backstop_probe.c'), '-o', str(work / 'probe')],
+    subprocess.run([*lib.PROBE, str(repo / 'test/fs_policy/backstop_probe.c'), '-o', str(work / 'probe')],
                    check=True)
     # One RWX segment (--omagic): refused at load time under the backstop.
-    subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
-                    '-fno-stack-protector', '-Wl,-e,_start', '-Wl,--omagic',
+    subprocess.run([*lib.PROBE, '-Wl,--omagic',
                     str(repo / 'test/fs_policy/backstop_probe.c'), '-o', str(work / 'probe-wx')],
                    check=True)
-    for suffix in ('', '-fd-experiment'):
-        loader = build / f'elfloader-proot{suffix}'
-        manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-        assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+    for suffix in ('', '-guarded'):
+        loader = lib.loader(suffix)
         def run(options, mode):
             p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine), *options,
                                 '-v', '/proc:/proc', '-v', f'{work}:/work', '--', './bin/busybox',

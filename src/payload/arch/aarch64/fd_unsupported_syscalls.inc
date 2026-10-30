@@ -1,4 +1,4 @@
-/* Unsupported direct FD creators in FD_EXPERIMENT only. Keep dispatch and
+/* Unsupported direct FD creators in GUARDED only. Keep dispatch and
  * denial together: routing a call slowly does not itself track its result.
  * Not a complete allowlist (ioctl/ancillary/lifecycle gaps remain). */
 #ifdef __NR_fanotify_init

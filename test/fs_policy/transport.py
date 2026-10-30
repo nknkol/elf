@@ -2,15 +2,17 @@
 """Real loader/payload/exec observation transport; no permission enforcement."""
 import hashlib
 import json
+import re
 import struct
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
-loader = build / 'elfloader-proot-fd-experiment'
-assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads(
-    (build / 'elf-build-fd-experiment.json').read_text())['sha256']
+build = lib.BUILD
+loader = lib.loader('-guarded')
 with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
     root = Path(tmp)
     for name in ('ro', 'rw'):
@@ -41,6 +43,7 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
     print('PASS: reject empty, malformed, oversized, mismatched and duplicate policies')
     # Verify the actual experimental payload layout has its own ABI version,
     # and old custom payload headers are rejected before guest startup.
+    ABI = int(re.search(r'#define PAYLOAD_ABI_VERSION (\d+)', (repo / 'src/payload/include/elf_abi.h').read_text()).group(1))
     blob = (repo / 'src/payload/payload.bin').read_bytes()
     entry, phoff = struct.unpack_from('<QQ', blob, 24)
     phsize, phnum = struct.unpack_from('<HH', blob, 54)
@@ -50,15 +53,13 @@ with tempfile.TemporaryDirectory(prefix='policy-transport-', dir=build) as tmp:
         if kind == 1 and addr <= entry and entry+16 <= addr+size:
             offset = off+entry-addr
             break
-    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == 15
-    for version in (14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2):
+    assert offset is not None and struct.unpack_from('<I', blob, offset+12)[0] == ABI
+    for version in range(ABI - 1, 1, -1):
         old = bytearray(blob)
         struct.pack_into('<I', old, offset+12, version)
         payload = root / f'old-{version}.bin'
         payload.write_bytes(old)
-        config = root / 'payload.rc'
-        config.write_text(f'PAYLOAD {payload}\n')
-        p = subprocess.run([str(loader), '-c', str(config), '--mode', 'compat',
+        p = subprocess.run([str(loader), '--payload', str(payload), '--mode', 'compat',
                             '--', str(root / 'probe')], capture_output=True, text=True, timeout=20)
         assert p.returncode != 0 and 'payload ABI mismatch' in p.stdout+p.stderr, (p.stdout, p.stderr)
-    print('PASS: experimental ABI 15 rejects older payload layouts')
+    print(f'PASS: payload ABI {ABI} rejects older payload layouts')

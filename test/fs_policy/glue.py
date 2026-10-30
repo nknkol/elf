@@ -6,8 +6,11 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: glue rootfs unavailable:', alpine)
@@ -31,13 +34,11 @@ with tempfile.TemporaryDirectory(prefix='glue-', dir=build) as tmp:
     (Path(tmp) / 'f').write_text('bound\n')
     base = Path(tmp) / 'base'
     base.mkdir()
-    for suffix, options in (('', []), ('-fd-experiment', []),
-                            ('-fd-experiment', ['--guard-file-access', 'rrrr',
+    for suffix, options in (('', []), ('-guarded', []),
+                            ('-guarded', ['--guard-file-access', 'rrrr',
                                                 '--allow-stdio-output', '--allow-pipe-output',
                                                 '--revalidate-file-fds'])):
-        loader = build / f'elfloader-proot{suffix}'
-        manifest = json.loads((build / f'elf-build{suffix}.json').read_text())
-        assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
+        loader = lib.loader(suffix)
         p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
                             '-v', '/proc:/proc', '-v', f'{tmp}/f:/glue/deep/w2/file',
                             '-v', f'{tmp}:/glue/deep/w', *options, '--', './bin/busybox', 'sh',

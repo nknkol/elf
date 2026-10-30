@@ -7,13 +7,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 normal = '--normal' in sys.argv
-suffix = '' if normal else '-fd-experiment'
-loader = build / ('elfloader-proot' + suffix)
-assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads(
-    (build / ('elf-build' + suffix + '.json')).read_text())['sha256']
+suffix = '' if normal else '-guarded'
+loader = lib.loader(suffix)
 # Probe the actual backing in an isolated child; do not risk SIGSYS in the runner.
 with tempfile.TemporaryDirectory(prefix='xattr-', dir=build) as tmp:
     root = Path(tmp)

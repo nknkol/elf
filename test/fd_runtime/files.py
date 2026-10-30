@@ -7,8 +7,8 @@ import tarfile
 import os
 import errno
 
-build = Path(__file__).resolve().parents[2] / 'vendor/proot/svc/build'
-loader = build / 'elfloader-proot-fd-experiment'
+build = Path(__file__).resolve().parents[2] / 'build'
+loader = build / 'elfloader-guarded'
 for directory, shell, prefix in (
         ('alpine-test-root', './bin/busybox', ['sh']),
         ('ubuntu-root', './usr/bin/dash', [])):

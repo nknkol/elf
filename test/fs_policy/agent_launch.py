@@ -5,8 +5,11 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 launch = repo / 'tools/agent_sandbox/launch.py'
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():

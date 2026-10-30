@@ -10,15 +10,17 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 alpine = build / 'alpine-test-root'
 if not (alpine / 'bin/busybox').exists():
     print('SKIP: rootfs unavailable:', alpine)
     raise SystemExit(0)
 release = (alpine / 'etc/alpine-release').read_text().strip()
-CC = ['clang', '-O1', '-nostdlib', '-static', '-ffreestanding', '-fno-builtin',
-      '-fno-stack-protector', '-Wl,-e,_start', '-Wl,--no-rosegment',
+CC = [*lib.PROBE, '-Wl,--no-rosegment',
       str(repo / 'test/fs_policy/code_only_probe.c')]
 
 
@@ -44,8 +46,8 @@ with tempfile.TemporaryDirectory(prefix='elf-layout-', dir=build) as tmp:
     patch_load(good, work / 'offset', lambda d, o: struct.pack_into('<Q', d, o + 8, len(d) - 8))
     script = '; '.join(f'/work/{n} >/dev/null 2>&1; echo {n}=$?' for n in
                        ('over-loader', 'over-payload', 'filesz', 'offset'))
-    for suffix in ('', '-fd-experiment'):
-        loader = build / f'elfloader-proot{suffix}'
+    for suffix in ('', '-guarded'):
+        loader = build / f'elfloader{suffix}'
         p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
                             '-v', f'{work}:/work', '--', './bin/busybox', 'sh', '-c',
                             f'/work/good; {script}'],

@@ -1,139 +1,36 @@
-# make ARCH=i386 SMALL=1 DEBUG=1
-
-ARCH ?= aarch64
-ifeq ($(PROOT_PATH),1)
-CPPFLAGS += -DPROOT_PATH
-endif
-
-ifeq ($(FD_EXPERIMENT),1)
-CPPFLAGS += -DFD_EXPERIMENT
-endif
-
-ARCHS32 := i386
-ARCHS64 := amd64 aarch64
-ARCHS := $(ARCHS32) $(ARCHS64)
-
-ARCH_DIR       := arch/$(ARCH)
-PAYLOAD_ARCH_DIR := payload/arch/$(ARCH)
-
-CFLAGS += -pipe -Wall -O0 -g -Wextra -fPIC -fno-ident -fno-stack-protector -U _FORTIFY_SOURCE
-# Include paths for loader and payload headers; keep in CPPFLAGS to survive CFLAGS overrides
-CPPFLAGS += -I$(CURDIR) -I$(CURDIR)/include -I$(CURDIR)/payload/include
-CPPFLAGS += -I. -Iinclude -Ipayload/include
-PAYLOAD_CFLAGS :=
-LDFLAGS += -nostartfiles -nodefaultlibs -nostdlib 
-LDFLAGS += -pie -e z_start -Wl,-Bsymbolic,--no-undefined,--build-id=none
+# AArch64 loader with the embedded payload. Built by tools/build.py;
+# GUARDED=1 selects the guarded runtime.
 TARGET := elfloader
 
-PAYLOAD_DIR := payload
-PAYLOAD_BIN := $(PAYLOAD_DIR)/payload.bin
-PAYLOAD_EMBED_OBJ := $(PAYLOAD_DIR)/payload_embed.o
-
-SHELL_DIR := shell
-SHELL_BIN_SRC ?= ../../../build/bin/dash
-SHELL_EMBED_BIN := $(SHELL_DIR)/dash
-SHELL_EMBED_OBJ := $(SHELL_DIR)/dash.o
-
-TINY_INIT_DIR := tiny-init
-TINY_INIT_BIN := $(TINY_INIT_DIR)/tiny-init
-TINY_INIT_OBJ := $(TINY_INIT_DIR)/tiny-init.o
-
-ifeq ($(ARCH),aarch64)
-  TINY_INIT_OBJFMT := elf64-littleaarch64
-  TINY_INIT_ARCH := aarch64
-else ifeq ($(ARCH),amd64)
-  TINY_INIT_OBJFMT := elf64-x86-64
-  TINY_INIT_ARCH := i386:x86-64
-else ifeq ($(ARCH),i386)
-  TINY_INIT_OBJFMT := elf32-i386
-  TINY_INIT_ARCH := i386
+CPPFLAGS += -I$(CURDIR)/include -I$(CURDIR)/loader -I$(CURDIR)/payload/include \
+	-I$(CURDIR)/payload/arch/aarch64 -DELFCLASS=ELFCLASS64
+ifeq ($(GUARDED),1)
+CPPFLAGS += -DGUARDED
 endif
+CFLAGS += -pipe -Wall -Wextra -Os -fno-ident -fno-stack-protector -U_FORTIFY_SOURCE \
+	-fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables
+LDFLAGS += -nostartfiles -nodefaultlibs -nostdlib -s
 
-ifeq "$(filter $(ARCH),$(ARCHS))" ""
-  $(error ARCH='$(ARCH)' is not supported)
-endif
+PAYLOAD_BIN := payload/payload.bin
+PAYLOAD_OBJ := payload/payload_embed.o
 
-ifeq "$(filter $(ARCH),$(ARCHS32))" "$(ARCH)"
-  CFLAGS += -m32 -DELFCLASS=ELFCLASS32
-  ASFLAGS += -m32
-  LDFLAGS += -m32
-else
-  CFLAGS += -DELFCLASS=ELFCLASS64
-endif
+SRCS := $(wildcard loader/*.c) $(wildcard utils/*.c) arch/aarch64/arch.c \
+	payload/arch/aarch64/stub.c
+ASRCS := $(wildcard arch/aarch64/*.S)
+OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(PAYLOAD_OBJ)
 
-ifdef DEFAULT_CONFIG_PATH
-  CFLAGS += -DCONFIG_DEFAULT_CONFIG_PATH=\"$(DEFAULT_CONFIG_PATH)\"
-  PAYLOAD_CFLAGS += -DCONFIG_DEFAULT_CONFIG_PATH=\"$(DEFAULT_CONFIG_PATH)\"
-endif
-
-ifdef DEFAULT_PAYLOAD_PATH
-  CFLAGS += -DCONFIG_DEFAULT_PAYLOAD_PATH=\"$(DEFAULT_PAYLOAD_PATH)\"
-  PAYLOAD_CFLAGS += -DCONFIG_DEFAULT_PAYLOAD_PATH=\"$(DEFAULT_PAYLOAD_PATH)\"
-endif
-
-ifdef DEBUG
-  CFLAGS += -O0 -g
-  ASFLAGS += -g
-else
-  CFLAGS += -fvisibility=hidden
-  # Disable unwind info to make prog smaller.
-  CFLAGS += -Os -fno-asynchronous-unwind-tables -fno-unwind-tables
-  LDFLAGS += -s
-endif
-
-# Loader objects: core + utils + arch-specific helpers/stubs/hooks
-SRCS := $(wildcard *.c)
-SRCS += $(wildcard utils/*.c)
-SRCS += $(wildcard $(ARCH_DIR)/*.c)
-SRCS += $(wildcard $(PAYLOAD_ARCH_DIR)/hook.c) $(wildcard $(PAYLOAD_ARCH_DIR)/stub.c)
-
-ASRCS := $(wildcard $(ARCH_DIR)/*.S)
-
-OBJS := $(SRCS:.c=.o) $(ASRCS:.S=.o) $(TINY_INIT_OBJ) $(PAYLOAD_EMBED_OBJ) $(SHELL_EMBED_OBJ)
-
-ifdef SMALL
-  OBJS := $(filter-out %/z_printf.o,$(OBJS))
-  OBJS := $(filter-out %/z_err.o,$(OBJS))
-  CFLAGS += -DZ_SMALL
-endif
-
-.PHONY: clean all
-
-all: $(TARGET) $(PAYLOAD_BIN)
+.PHONY: all clean $(PAYLOAD_BIN)
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(PAYLOAD_BIN):
-	$(MAKE) -C $(PAYLOAD_DIR) ARCH=$(ARCH) CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)" EXTRA_CFLAGS="$(PAYLOAD_CFLAGS)"
+	$(MAKE) -C payload CC="$(CC)" LD="$(LD)" GUARDED=$(GUARDED)
 
-$(TINY_INIT_BIN):
-	$(MAKE) -C $(TINY_INIT_DIR) CC="$(CC)"
-
-$(TINY_INIT_OBJ): $(TINY_INIT_BIN)
-ifeq ($(strip $(TINY_INIT_OBJFMT)),)
-	$(error Unsupported ARCH $(ARCH) for tiny-init embedding)
-endif
-	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(TINY_INIT_BIN) $(TINY_INIT_OBJ)
-
-$(PAYLOAD_EMBED_OBJ): $(PAYLOAD_BIN)
-	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(PAYLOAD_BIN) $(PAYLOAD_EMBED_OBJ)
-
-$(SHELL_DIR):
-	mkdir -p $(SHELL_DIR)
-
-$(SHELL_EMBED_BIN): $(SHELL_BIN_SRC) | $(SHELL_DIR)
-	@if [ ! -f "$(SHELL_BIN_SRC)" ]; then \
-		echo "Embedded shell missing: $(SHELL_BIN_SRC)"; \
-		echo "Please build dash (make dash-build) before building elfloader."; \
-		exit 1; \
-	fi
-	cp $(SHELL_BIN_SRC) $(SHELL_EMBED_BIN)
-
-$(SHELL_EMBED_OBJ): $(SHELL_EMBED_BIN)
-	$(OBJCOPY) -I binary -O $(TINY_INIT_OBJFMT) -B $(TINY_INIT_ARCH) $(SHELL_EMBED_BIN) $(SHELL_EMBED_OBJ)
+$(PAYLOAD_OBJ): $(PAYLOAD_BIN)
+	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@
 
 clean:
-	rm -rf *.o $(TARGET) */*.o */*/*.o $(SHELL_DIR)
-	$(MAKE) -C $(PAYLOAD_DIR) clean
-	$(MAKE) -C $(TINY_INIT_DIR) clean
+	rm -f $(TARGET) $(OBJS)
+	$(MAKE) -C payload clean

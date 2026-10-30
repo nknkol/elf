@@ -11,8 +11,11 @@ import statistics
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--runs', type=int, default=5)
 parser.add_argument('--json', type=Path, help='Also write results here')
@@ -31,18 +34,18 @@ with tempfile.TemporaryDirectory(prefix='bench-', dir=build) as tmp:
                    check=True)
     configs = {
         'native': ([str(probe), str(work)], None),
-        'default': ([str(build / 'elfloader-proot'), '--mode', 'container', '--root', str(root),
+        'default': ([str(build / 'elfloader'), '--mode', 'container', '--root', str(root),
                      '-v', f'{work}:/work', '--', './bench', '/work'], root),
-        'experiment': ([str(build / 'elfloader-proot-fd-experiment'), '--mode', 'container',
+        'experiment': ([str(build / 'elfloader-guarded'), '--mode', 'container',
                         '--root', str(root), '-v', f'{work}:/work', '--', './bench', '/work'], root),
-        'mutation': ([str(build / 'elfloader-proot-fd-experiment'), '--mode', 'container',
+        'mutation': ([str(build / 'elfloader-guarded'), '--mode', 'container',
                       '--root', str(root), '-v', f'{work}:/work', '--guard-file-mutations', 'dw',
                       '--allow-stdio-output', '--', './bench', '/work'], root),
-        'guarded': ([str(build / 'elfloader-proot-fd-experiment'), '--mode', 'container',
+        'guarded': ([str(build / 'elfloader-guarded'), '--mode', 'container',
                      '--root', str(root), '-v', f'{work}:/work', '--guard-file-access', 'dw',
                      '--allow-stdio-output', '--', './bench', '/work'], root),
         # Default build with the opt-in seccomp backstop (filter on every call).
-        'backstop': ([str(build / 'elfloader-proot'), '--mode', 'container', '--root', str(root),
+        'backstop': ([str(build / 'elfloader'), '--mode', 'container', '--root', str(root),
                       '--seccomp-backstop', '-v', f'{work}:/work', '--', './bench', '/work'], root),
     }
     results = {}

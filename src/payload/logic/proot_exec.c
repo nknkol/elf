@@ -13,8 +13,8 @@
 #include "syscall_nums.h"
 #include "proot_bridge.h"
 #include "proot_scratch.h"
-#ifdef FD_EXPERIMENT
-#include "fd_experiment.h"
+#ifdef GUARDED
+#include "fd_runtime.h"
 #endif
 
 /* Guest argv entries held inline; longer vectors get their own mapping. */
@@ -41,7 +41,7 @@ typedef struct {
     char fake_ids[8 * 11];
     char fake_groups[32 * 11 + 2];
     char exec_fd[16];
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     char fd_state[24];
     /* PT_INTERP as stored in the target, then its policy-checked resolution. */
     char elf_interp[CONFIG_MAX_PATH];
@@ -68,7 +68,7 @@ static int read_executable(const char *path, int nofollow, char header[256])
 {
     struct stat st;
     /* Resolved host paths are final; /proc/self/fd/N (fexecve) is followed. */
-    long ret = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)path, (long)&st,
+    long ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st,
                           nofollow ? AT_SYMLINK_NOFOLLOW : 0, 0, 0);
     if (ret < 0)
         return (int)ret;
@@ -76,14 +76,14 @@ static int read_executable(const char *path, int nofollow, char header[256])
         return -ELOOP;
     if ((st.st_mode & S_IFMT) != S_IFREG || !(st.st_mode & 0111))
         return -EACCES;
-    ret = raw_syscall(SYS_faccessat, AT_FDCWD, (long)path, 1, 0, 0, 0);
+    ret = raw_syscall(__NR_faccessat, AT_FDCWD, (long)path, 1, 0, 0, 0);
     if (ret < 0)
         return (int)ret;
-    long fd = raw_syscall(SYS_openat, AT_FDCWD, (long)path, O_RDONLY, 0, 0, 0);
+    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY, 0, 0, 0);
     if (fd < 0)
         return (int)fd;
-    ret = raw_syscall(SYS_read, fd, (long)header, 255, 0, 0, 0);
-    raw_syscall(SYS_close, fd, 0, 0, 0, 0, 0);
+    ret = raw_syscall(__NR_read, fd, (long)header, 255, 0, 0, 0);
+    raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
     if (ret < 0)
         return (int)ret;
     header[ret] = 0;
@@ -107,12 +107,12 @@ static int elf_magic(const char *p, int n)
         h.e_phentsize == sizeof(Elf64_Phdr) && h.e_phnum > 0;
 }
 
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
 /* Read the target's PT_INTERP string. 0: static, 1: found, <0: refused.
  * Bounded like the loader: a non-empty pathname ending in NUL. */
 static int elf_interpreter(const char *path, ExecScratch *s)
 {
-    long fd = raw_syscall(SYS_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
     if (fd < 0) return (int)fd;
     Elf64_Ehdr h;
     long ret = raw_syscall(__NR_pread64, fd, (long)&h, sizeof(h), 0, 0, 0);
@@ -133,14 +133,14 @@ static int elf_interpreter(const char *path, ExecScratch *s)
             !s->elf_interp[0]) { ret = -ENOEXEC; break; }
         ret = 1;
     }
-    raw_syscall(SYS_close, fd, 0, 0, 0, 0, 0);
+    raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
     return (int)ret;
 }
 #endif
 
 long proot_execve_context(long number, long a[6], const struct proot_path_context *context)
 {
-    int at = number == SYS_execveat;
+    int at = number == __NR_execveat;
     int dirfd = at ? (int)a[0] : AT_FDCWD;
     int flags = at ? (int)a[4] : 0;
     const char *path = (const char *)a[at ? 1 : 0];
@@ -172,12 +172,12 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
             return -EACCES;
         fd_name(fd_host, "/proc/self/fd/", object);
         fd_name(fd_guest, "/dev/fd/", dirfd);
-        rc = raw_syscall(SYS_faccessat, AT_FDCWD, (long)fd_host, 1, 0, 0, 0);
+        rc = raw_syscall(__NR_faccessat, AT_FDCWD, (long)fd_host, 1, 0, 0, 0);
         if (rc < 0)
             return rc;
         /* /proc/self/exe: the guest name, else the kernel's own link text. */
         if (proot_fd_guest_path(object, named, sizeof(named)) < 0) {
-            rc = raw_syscall(SYS_readlinkat, AT_FDCWD, (long)fd_host, (long)named,
+            rc = raw_syscall(__NR_readlinkat, AT_FDCWD, (long)fd_host, (long)named,
                              sizeof(named) - 1, 0, 0);
             named[rc > 0 ? rc : 0] = 0;
             if (rc <= 0) strcpy(named, fd_guest);
@@ -185,9 +185,6 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         exec_fd = object;
         path = fd_guest;
     }
-    /* Preserve debugger policy explicitly rather than silently losing it. */
-    if (cfg->hook_range_set || cfg->hook_range_interp_set)
-        return -EOPNOTSUPP;
     if (!cfg->loader_path[0])
         return -ENOENT;
     size_t argc = 0;
@@ -212,7 +209,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         }
         s->argv = (char **)array;
     }
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     long transport = -1;
 #endif
     long ret;
@@ -282,9 +279,9 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         target = s->interpreter_host;
     }
     int script = depth > 0;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     int dynamic = 0;
-    if (cfg->guard_file_reads) {
+    if (cfg->guard == GUARD_READS) {
         /* The dynamic linker is loaded content too: resolve it with guest
          * symlinks and the read policy instead of lexical host mapping. */
         dynamic = elf_interpreter(target, s);
@@ -348,10 +345,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
      * runs with its reported owner as effective, saved and fs id, like
      * PRoot's fake_id0; only the new image gets them. */
     struct stat program;
-    if (!raw_syscall(SYS_newfstatat, AT_FDCWD, (long)target, (long)&program, 0, 0, 0)) {
+    if (!raw_syscall(__NR_newfstatat, AT_FDCWD, (long)target, (long)&program, 0, 0, 0)) {
         for (int group = 0; group < 2; group++) {
             if (!(program.st_mode & (group ? 02000 : 04000))) continue;
-            uint32_t owner = fake_reported_owner(group ? program.st_gid : program.st_uid, group);
+            uint32_t owner = fake_ids_reported_owner(group ? program.st_gid : program.st_uid, group);
             ids[group * 4 + 1] = ids[group * 4 + 2] = ids[group * 4 + 3] = owner;
             changed |= owner != 0;
         }
@@ -400,17 +397,18 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = CONFIG_CHILD_GLUE_DIR;
         s->argv[pos++] = (char *)cfg->glue_dir;
     }
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     if (dynamic) {
         s->argv[pos++] = CONFIG_CHILD_EXEC_INTERP;
         s->argv[pos++] = s->elf_interp_host;
     }
 #endif
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     if (cfg->mount_access_observe[0]) {
-        s->argv[pos++] = cfg->guard_file_reads ? "--guard-file-access" :
-            cfg->guard_path_mutations == 2 ? "--guard-file-mutations" :
-            cfg->guard_path_mutations ? "--guard-path-mutations" : "--observe-mount-access";
+        static const char *const option[] = {
+            [GUARD_OBSERVE] = "--observe-mount-access", [GUARD_PATHS] = "--guard-path-mutations",
+            [GUARD_FILES] = "--guard-file-mutations", [GUARD_READS] = "--guard-file-access"};
+        s->argv[pos++] = (char *)option[cfg->guard];
         s->argv[pos++] = cfg->mount_access_observe;
     }
     if (cfg->revalidate_file_fds)s->argv[pos++] = "--revalidate-file-fds";
@@ -418,7 +416,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     if (cfg->allow_local_output)s->argv[pos++] = "--allow-local-output";
     if (cfg->allow_stdio_output)s->argv[pos++] = "--allow-stdio-output";
     if (cfg->allow_stream_input)s->argv[pos++] = "--allow-stream-input";
-    transport = fd_experiment_export();
+    transport = fd_runtime_export();
     if (transport < 0) { ret = transport; goto done; }
     unsigned value = (unsigned)transport;
     char *digit = s->fd_state + sizeof(s->fd_state) - 1;
@@ -445,16 +443,16 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos] = NULL;
     /* The signed loader starts the same embedded backend. Do not fall back
      * to raw target exec, which would lose the guest filesystem view. */
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     ret = raw_syscall(__NR_fcntl, transport, F_SETFD, 0, 0, 0, 0);
     if (ret < 0) goto done;
 #endif
     struct reentry_slot *lease = reentry_exec_release();
-    ret = raw_syscall(SYS_execve, (long)cfg->loader_path, (long)s->argv,
+    ret = raw_syscall(__NR_execve, (long)cfg->loader_path, (long)s->argv,
                       (long)env, 0, 0, 0);
     reentry_exec_restore(lease);
  done:
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
 #endif
     if (fd_copy >= 0) raw_syscall(__NR_close, fd_copy, 0, 0, 0, 0, 0);

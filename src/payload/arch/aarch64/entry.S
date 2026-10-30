@@ -16,34 +16,32 @@ _start:
     /* Payload Header: used by loader to find config block */
     .word   0x484F4F4B          /* Magic: "HOOK" */
     .word   g_payload_config - _start /* Offset to config struct */
-    .word   PAYLOAD_ABI_VERSION /* PRoot v5 / FD v14: guest exe path in config. */
+    .word   PAYLOAD_ABI_VERSION /* elf_abi.h */
 
-#ifdef PROOT_PATH
     /* Fixed offset 16, used only by the dedicated clone stub. */
     b clone_entry
-#endif
 real_entry:
     /* The kernel takes the syscall number as the int in w8: decide on the
      * same 32 bits (high bits must not route a known call past the slow
      * path). The guest's x8 upper half is not preserved by this entry. */
     mov     w8, w8
     /* rt_sigreturn must see the original user stack; bypass */
-    cmp     x8, #SYS_rt_sigreturn
+    cmp     x8, #__NR_rt_sigreturn
     b.eq    fast_path_sigreturn
 
     /* Direct entry callers keep raw clone. PRoot generated stubs use the
      * separate notification gate; legacy stubs bypass before touching SP.
      * Never execute clone inside the ordinary dispatcher/guard C frames. */
-    cmp     x8, #SYS_clone
-#ifdef FD_EXPERIMENT
+    cmp     x8, #__NR_clone
+#ifdef GUARDED
     b.eq    slow_path
 #else
     b.eq    fast_passthrough
 #endif
 
 #define SLOW_SYSCALL(n) cmp x8, n; b.eq slow_path
-#ifdef FD_EXPERIMENT
-#include "fd_experiment_syscalls.inc"
+#ifdef GUARDED
+#include "fd_runtime_syscalls.inc"
 #endif
 #include "slow_syscalls.inc"
 #undef SLOW_SYSCALL
@@ -88,7 +86,7 @@ slow_path:
 
     /* Reentry guard: bail out if this thread is already inside the hook */
     bl      reentry_try_enter
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     cbnz    x0, 1f
     mov     x0, #-35 /* EDEADLK; never bypass nested metadata mutations */
     b       guard_error

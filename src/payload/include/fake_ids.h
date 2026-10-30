@@ -12,7 +12,10 @@ uint32_t fake_ids_owner(int group);
 /* Supplementary groups into out; returns their count. */
 int fake_ids_groups(uint32_t out[32]);
 /* Reported owner of a host uid/gid: the caller's own become the saved id. */
-uint32_t fake_reported_owner(uint32_t id, int group);
+uint32_t fake_ids_reported_owner(uint32_t id, int group);
+/* stat/fstat/newfstatat/statx result: the caller's own files (its real ids
+ * and the owners of the root and bind directories) show the fake owner. */
+void fake_ids_stat_owner(long number, const long *args);
 /* r/e/s/fs uid then gid; returns whether any differs from root. */
 int fake_ids_current(uint32_t out[8]);
 

@@ -1,13 +1,7 @@
 #ifndef STUB_H
 #define STUB_H
 
-#if defined(PROOT_PATH) && defined(FD_EXPERIMENT)
-#define PAYLOAD_ABI_VERSION 15
-#elif defined(PROOT_PATH)
-#define PAYLOAD_ABI_VERSION 5
-#else
-#define PAYLOAD_ABI_VERSION 2
-#endif
+#include "elf_abi.h"
 #define PAYLOAD_CLONE_ENTRY_OFFSET 16
 #define STUB_CLONE_RESUME_OFFSET 100
 #ifndef __ASSEMBLER__

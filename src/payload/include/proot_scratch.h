@@ -3,10 +3,10 @@
 #define PROOT_SCRATCH_H
 #include <stddef.h>
 #include <asm/unistd.h>
-#ifdef FD_EXPERIMENT
-#include "fd_experiment.h"
-#define proot_scratch_alloc fd_experiment_scratch_alloc
-#define proot_scratch_free fd_experiment_scratch_free
+#ifdef GUARDED
+#include "fd_runtime.h"
+#define proot_scratch_alloc fd_runtime_scratch_alloc
+#define proot_scratch_free fd_runtime_scratch_free
 #else
 extern long raw_syscall(long,long,long,long,long,long,long);
 static inline long proot_scratch_alloc(size_t size)

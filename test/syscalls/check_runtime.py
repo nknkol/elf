@@ -5,10 +5,12 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 root = Path(__file__).resolve().parents[2]
-build = root/'vendor/proot/svc/build'
-loader = build/'elfloader-proot'
-assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads((build/'elf-build.json').read_text())['sha256']
+build = lib.BUILD
+loader = lib.loader()
 results = []
 with tempfile.TemporaryDirectory(prefix='dispatch-runtime-', dir=build) as temp:
     probe = Path(temp)/'probe'

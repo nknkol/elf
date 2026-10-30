@@ -1,20 +1,20 @@
-# Run from this repository root; the experimental backend owns these targets.
+# Run from the repository root. Outputs: build/elfloader, build/elfloader-guarded.
 .DEFAULT_GOAL := build
 .NOTPARALLEL:
 PYTHON ?= python3
 ALPINE_ARCHIVE ?=
 UBUNTU_ARCHIVE ?=
-.PHONY: help build check check-alpine check-ubuntu check-fd-runtime bench
+.PHONY: help build check check-alpine check-ubuntu check-guarded bench
 help:
-	@echo 'make build        Build the AArch64 ELF/PRoot backend'
-	@echo 'make check        Build and run core/backend regressions'
-	@echo 'make check-fd-runtime Build and test single-task FD tracking experiment'
+	@echo 'make build          Build build/elfloader and build/elfloader-guarded'
+	@echo 'make check          Core regressions (both builds)'
+	@echo 'make check-guarded  Guarded runtime regressions'
 	@echo 'make check-alpine ALPINE_ARCHIVE=/path/to/rootfs.tar.gz'
 	@echo 'make check-ubuntu UBUNTU_ARCHIVE=/path/to/rootfs.tar.gz'
-	@echo 'make bench        Native vs loader micro benchmarks (both backends)'
-	@echo 'Output: vendor/proot/svc/build/elfloader-proot'
+	@echo 'make bench          Native vs loader micro benchmarks (both builds)'
 build:
-	$(PYTHON) vendor/proot/svc/build_elf.py
+	$(PYTHON) tools/build.py
+	$(PYTHON) tools/build.py --guarded
 check: build
 	$(PYTHON) test/fs_policy/run.py
 	$(PYTHON) test/fs_policy/vm_model.py
@@ -23,9 +23,9 @@ check: build
 	$(PYTHON) test/fd_table/check_notify.py
 	$(PYTHON) test/fd_table/check_fd_clone.py
 	$(PYTHON) test/fd_table/check_payload_abi.py
-	$(MAKE) -C vendor/proot/svc check
-	$(PYTHON) vendor/proot/port-tests/test_svc.py
-	$(PYTHON) vendor/proot/port-tests/test_modify.py
+	$(PYTHON) test/proot/test_paths.py
+	$(PYTHON) test/proot/test_svc.py
+	$(PYTHON) test/proot/test_modify.py
 	$(PYTHON) test/fs_policy/xattrs.py --normal
 	$(PYTHON) test/fs_policy/access.py --normal
 	$(PYTHON) test/fs_policy/ids.py
@@ -40,9 +40,9 @@ check: build
 	$(PYTHON) test/fs_policy/backstop.py
 	$(PYTHON) test/fs_policy/glue.py
 	$(PYTHON) test/fs_policy/interp_links.py
-	$(PYTHON) vendor/proot/port-tests/test_inotify.py
-	$(PYTHON) vendor/proot/port-tests/test_exec.py
-	$(PYTHON) vendor/proot/port-tests/test_auxv.py
+	$(PYTHON) test/proot/test_inotify.py
+	$(PYTHON) test/proot/test_exec.py
+	$(PYTHON) test/proot/test_auxv.py
 	$(PYTHON) test/syscalls/check_dispatch.py
 	$(PYTHON) test/syscalls/newer_paths.py
 	$(PYTHON) test/syscalls/check_guard.py
@@ -59,8 +59,7 @@ check-ubuntu:
 	$(MAKE) build
 	$(PYTHON) test/ubuntu/run.py "$(UBUNTU_ARCHIVE)"
 
-check-fd-runtime:
-	$(PYTHON) vendor/proot/svc/build_elf.py --fd-experiment
+check-guarded: build
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py
 	$(PYTHON) test/fs_policy/access.py
@@ -88,7 +87,5 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/proc_links.py
 	$(PYTHON) test/fd_runtime/run.py
 
-bench:
-	$(PYTHON) vendor/proot/svc/build_elf.py
-	$(PYTHON) vendor/proot/svc/build_elf.py --fd-experiment
+bench: build
 	$(PYTHON) test/bench/bench.py

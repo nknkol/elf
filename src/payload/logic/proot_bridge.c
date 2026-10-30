@@ -15,8 +15,8 @@
 #include "syscall_nums.h"
 #include "proot_bridge.h"
 #include "fake_ids.h"
-#ifdef FD_EXPERIMENT
-#include "fd_experiment.h"
+#ifdef GUARDED
+#include "fd_runtime.h"
 #include "fs_policy.h"
 #endif
 #include "proot_scratch.h"
@@ -65,7 +65,7 @@ typedef struct {
      * component swapped for a symlink after resolution cannot redirect it. */
     bool secure;
     int walk_fd[4], walk_count;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     bool reads; /* Immutable read policy snapshot below is active. */
     enum fs_access access[CONFIG_MAX_BINDS + 1];
     struct fs_policy policy;
@@ -140,7 +140,7 @@ static int host_map(void *opaque, const char *guest, char *host)
     return binding_table_map(&b->table, GUEST, guest, host);
 }
 
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
 /* Lexical decision for a canonical guest path, before any host lookup. */
 static int path_visibility(Bridge *b, const char *guest)
 {
@@ -258,7 +258,7 @@ static void glue_scan(Bridge *b)
             struct stat st;
             if (binding_table_mount_id(&b->table, b->proc_guest, &mount) < 0 || mount) continue;
             if (host_map(b, b->proc_guest, b->proc_host) < 0) break;
-            long ret = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->proc_host, (long)&st, 0, 0, 0);
+            long ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->proc_host, (long)&st, 0, 0, 0);
             if (ret == -ENOENT) missing = (unsigned short)j;
         }
         glue_missing[i] = missing;
@@ -295,7 +295,7 @@ static int glue_walk(Bridge *b, const char *base, int op)
         memcpy(path + base_length, dst, length + 1);
         /* The leaf mirrors the bind source's type. */
         struct stat st;
-        bool directory = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->table.entries[i].host,
+        bool directory = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->table.entries[i].host,
                                      (long)&st, 0, 0, 0) < 0 || (st.st_mode & S_IFMT) == S_IFDIR;
         size_t end = base_length + length;
         for (size_t j = op == 3 ? end : base_length + 1; op == 3 ? j > base_length : j <= end;
@@ -307,18 +307,18 @@ static int glue_walk(Bridge *b, const char *base, int op)
             long ret = 0;
             if (op == 0) {
                 if (leaf && !directory) {
-                    ret = raw_syscall(SYS_openat, AT_FDCWD, (long)path,
+                    ret = raw_syscall(__NR_openat, AT_FDCWD, (long)path,
                                       O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0444, 0, 0);
                     if (ret >= 0) ret = raw_syscall(__NR_close, ret, 0, 0, 0, 0, 0);
                 } else {
-                    ret = raw_syscall(SYS_mkdirat, AT_FDCWD, (long)path, 0755, 0, 0, 0);
+                    ret = raw_syscall(__NR_mkdirat, AT_FDCWD, (long)path, 0755, 0, 0, 0);
                 }
                 if (ret == -EEXIST) ret = 0;
             } else if (op == 3) {
-                raw_syscall(SYS_unlinkat, AT_FDCWD, (long)path,
+                raw_syscall(__NR_unlinkat, AT_FDCWD, (long)path,
                             leaf && !directory ? 0 : AT_REMOVEDIR, 0, 0, 0);
             } else if (!leaf || directory) {
-                ret = raw_syscall(SYS_fchmodat, AT_FDCWD, (long)path, op == 1 ? 0555 : 0700, 0, 0, 0);
+                ret = raw_syscall(__NR_fchmodat, AT_FDCWD, (long)path, op == 1 ? 0555 : 0700, 0, 0, 0);
             }
             path[j] = saved;
             if (ret < 0) return (int)ret;
@@ -333,7 +333,7 @@ static int glue_walk(Bridge *b, const char *base, int op)
 static bool glue_valid(const char *path, long owner)
 {
     struct stat st;
-    return !raw_syscall(SYS_newfstatat, AT_FDCWD, (long)path, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) &&
+    return !raw_syscall(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) &&
            (st.st_mode & S_IFMT) == S_IFDIR && !(st.st_mode & 022) && (long)st.st_uid == owner;
 }
 
@@ -361,31 +361,31 @@ static int glue_ready(Bridge *b)
         temp[length++] = pass ? 0 : '.';
     }
     state = -1;
-    if (raw_syscall(SYS_mkdirat, AT_FDCWD, (long)temp, 0700, 0, 0, 0) < 0) {
+    if (raw_syscall(__NR_mkdirat, AT_FDCWD, (long)temp, 0700, 0, 0, 0) < 0) {
         __atomic_store_n(&glue_state, state, __ATOMIC_RELEASE);
         return state;
     }
     struct stat st;
-    long owner = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)temp, (long)&st,
+    long owner = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)temp, (long)&st,
                              AT_SYMLINK_NOFOLLOW, 0, 0) ? -1 : (long)st.st_uid;
     if (glue_valid(name, owner)) {
-        raw_syscall(SYS_unlinkat, AT_FDCWD, (long)temp, AT_REMOVEDIR, 0, 0, 0);
+        raw_syscall(__NR_unlinkat, AT_FDCWD, (long)temp, AT_REMOVEDIR, 0, 0, 0);
         __atomic_store_n(&glue_state, 1, __ATOMIC_RELEASE);
         return 1;
     }
     if (!glue_walk(b, temp, 0) && !glue_walk(b, temp, 1) &&
-        !raw_syscall(SYS_fchmodat, AT_FDCWD, (long)temp, 0555, 0, 0, 0)) {
-        if (!raw_syscall(SYS_renameat2, AT_FDCWD, (long)temp, AT_FDCWD, (long)name, 0, 0))
+        !raw_syscall(__NR_fchmodat, AT_FDCWD, (long)temp, 0555, 0, 0, 0)) {
+        if (!raw_syscall(__NR_renameat2, AT_FDCWD, (long)temp, AT_FDCWD, (long)name, 0, 0))
             state = 1;
         else if (glue_valid(name, owner))
             state = 1;
     }
     if (glue_valid(temp, owner) || state < 0) {
         /* Unpublished: undo the private copy. */
-        raw_syscall(SYS_fchmodat, AT_FDCWD, (long)temp, 0700, 0, 0, 0);
+        raw_syscall(__NR_fchmodat, AT_FDCWD, (long)temp, 0700, 0, 0, 0);
         glue_walk(b, temp, 2);
         glue_walk(b, temp, 3);
-        raw_syscall(SYS_unlinkat, AT_FDCWD, (long)temp, AT_REMOVEDIR, 0, 0, 0);
+        raw_syscall(__NR_unlinkat, AT_FDCWD, (long)temp, AT_REMOVEDIR, 0, 0, 0);
     }
     __atomic_store_n(&glue_state, state, __ATOMIC_RELEASE);
     return state;
@@ -433,7 +433,7 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
                        const char *guest, char *host)
 {
     (void)depth;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     /* Every component, base and symlink referee is checked before the host
      * sees it: a hidden name yields EACCES whether or not it exists. */
     int visibility = path_visibility(opaque, guest);
@@ -457,7 +457,7 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
         if (!strcmp(guest, b->table.entries[i].guest))
             return 0;
     struct stat st;
-    long ret = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)host, (long)&st,
+    long ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)host, (long)&st,
                           AT_SYMLINK_NOFOLLOW, 0, 0);
     /* A missing directory on the way to a bind is glue, not ENOENT. */
     if (ret == -ENOENT && glue_ancestor(b, guest))
@@ -478,13 +478,13 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
 static int host_readlink(void *opaque, const char *path, char *out, size_t size)
 {
     (void)opaque;
-    return (int)raw_syscall(SYS_readlinkat, AT_FDCWD, (long)path, (long)out,
+    return (int)raw_syscall(__NR_readlinkat, AT_FDCWD, (long)path, (long)out,
                            size, 0, 0);
 }
 
 static int visible_guest_path(Bridge *b, const char *host, char *guest);
 static int preferred_guest_path(Bridge *b, const char *host, char *guest);
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
 static int path_visibility(Bridge *b, const char *guest);
 #endif
 
@@ -496,12 +496,12 @@ static int guest_link_target(Bridge *b, char *target)
 {
     if (target[0] != '/') return 0;
     int guarded = 0;
-#ifdef FD_EXPERIMENT
-    guarded = g_payload_config.guard_file_reads;
+#ifdef GUARDED
+    guarded = g_payload_config.guard == GUARD_READS;
 #endif
     int rc = preferred_guest_path(b, target, b->proc_guest);
     if (rc < 0) return guarded ? -EACCES : 0;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     rc = path_visibility(b, b->proc_guest);
     if (rc < 0) return rc;
     if (rc == FS_HIDDEN) return -EACCES;
@@ -555,11 +555,11 @@ static long loader_argv(Bridge *b, long pid, size_t *start, const char **exe)
     char path[48];
     format_proc(path, pid, 0);
     strcat(path, "/cmdline");
-    long fd = raw_syscall(SYS_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
     if (fd < 0) return 0;
     long total = 0, n;
     while (total < (long)sizeof(b->proc_data) &&
-           (n = raw_syscall(SYS_read, fd, (long)b->proc_data + total,
+           (n = raw_syscall(__NR_read, fd, (long)b->proc_data + total,
                             sizeof(b->proc_data) - total, 0, 0, 0)) > 0)
         total += n;
     raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
@@ -639,8 +639,8 @@ static int proc_link(void *opaque, char *out, const char *path,
     strcpy(b->proc_guest, path);
     strcat(b->proc_guest, "/");
     strcat(b->proc_guest, component);
-#ifdef FD_EXPERIMENT
-    int keep = fd && !g_payload_config.guard_file_reads;
+#ifdef GUARDED
+    int keep = fd && g_payload_config.guard != GUARD_READS;
 #else
     int keep = fd;
 #endif
@@ -718,7 +718,7 @@ static int preferred_guest_path(Bridge *b, const char *host, char *guest)
         if (found && length <= best) continue;
         b->anchor = (struct proot_open_origin){id, true};
         if (observed_guest_path(b, host, b->proc_candidate)) continue;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
         if (path_visibility(b, b->proc_candidate) == FS_HIDDEN) continue;
 #endif
         strcpy(guest, b->proc_candidate);
@@ -775,7 +775,7 @@ static int host_fd(void *opaque, int fd, char *guest)
 static long guest_cwd(Bridge *b)
 {
     select_anchor(b, AT_FDCWD);
-    long ret = raw_syscall(SYS_getcwd, (long)b->host, sizeof(b->host), 0, 0, 0, 0);
+    long ret = raw_syscall(__NR_getcwd, (long)b->host, sizeof(b->host), 0, 0, 0, 0);
     if (ret < 0)
         return ret;
     if (b->anchor.known && b->anchor_fd == AT_FDCWD)
@@ -785,7 +785,7 @@ static long guest_cwd(Bridge *b)
 
 static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow);
 
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
 #define RACED 1 /* secure_host: a component changed into a non-directory. */
 /* Replaces b->host by "/proc/self/fd/N/<last>" where N is the parent
  * directory, opened from the mount's configured host root one component at
@@ -811,7 +811,7 @@ static long mount_root(Bridge *b, size_t mount, const char *prefix, size_t plen)
         return fd;
     memcpy(b->mapped, plen ? prefix : "/", plen ? plen : 1);
     b->mapped[plen ? plen : 1] = 0;
-    long opened = raw_syscall(SYS_openat, AT_FDCWD, (long)b->mapped,
+    long opened = raw_syscall(__NR_openat, AT_FDCWD, (long)b->mapped,
                               O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
     if (opened < 0) return opened;
     long high = raw_syscall(__NR_fcntl, opened, F_DUPFD_CLOEXEC, 512, 0, 0, 0);
@@ -855,7 +855,7 @@ static int secure_host(Bridge *b)
         if (next == at) break;
         memcpy(b->mapped, rest + at, next - at);
         b->mapped[next - at] = 0;
-        long child = raw_syscall(SYS_openat, dir, (long)b->mapped,
+        long child = raw_syscall(__NR_openat, dir, (long)b->mapped,
                                  O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0);
         if (dir != root) raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0);
         if (child < 0) return child == -ELOOP || child == -ENOTDIR ? RACED : (int)child;
@@ -876,7 +876,7 @@ static int secure_host(Bridge *b)
     if (whole) {
         memcpy(b->mapped, rest + base, end - base);
         b->mapped[end - base] = 0;
-        long node = raw_syscall(SYS_openat, dir, (long)b->mapped, O_PATH | O_NOFOLLOW | O_CLOEXEC,
+        long node = raw_syscall(__NR_openat, dir, (long)b->mapped, O_PATH | O_NOFOLLOW | O_CLOEXEC,
                                 0, 0, 0);
         raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0);
         if (node < 0) return (int)node;
@@ -932,7 +932,7 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
         rc = resolve_once(b, dirfd, path, follow);
     }
     b->final_match = rc >= 0 && b->final_valid && !strcmp(b->final_host, b->host);
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     /* A race seen by the secure walk is resolved once more, then refused. */
     for (int attempt = 0; rc >= 0 && attempt < 2; attempt++) {
         int s = secure_host(b);
@@ -976,12 +976,12 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
         if (glue && b->mutation) {
             struct stat st;
             if (b->attributes) return -EPERM;
-            if (!b->creates || raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->host, (long)&st,
+            if (!b->creates || raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&st,
                                            AT_SYMLINK_NOFOLLOW, 0, 0) < 0)
                 return -EACCES;
         }
     }
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     if (rc >= 0 && b->reads) {
         /* ".." skips lookup, so the final name is classified again. */
         int visibility = path_visibility(b, b->guest);
@@ -989,17 +989,17 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
         if (visibility == FS_HIDDEN || (visibility == FS_TRAVERSE && !b->traverse))
             return -EACCES;
     }
-    if (rc >= 0 && b->mutation && g_payload_config.guard_path_mutations) {
+    if (rc >= 0 && b->mutation && g_payload_config.guard >= GUARD_PATHS) {
         size_t mount;
         rc = binding_table_mount_id(&b->table, b->guest, &mount);
         if (rc < 0) return rc;
         /* Do not turn inferred reverse mappings of imported FDs/cwd into grants. */
-        rc = fd_experiment_check_path_mutation(mount, path[0] == '/' || b->anchor.known);
+        rc = fd_runtime_check_path_mutation(mount, path[0] == '/' || b->anchor.known);
         /* The kernel looks the name up before checking a read-only mount:
          * creating an existing name is EEXIST (mkdir -p walks from "/"). */
         struct stat st;
         if (rc == -EROFS && b->creates &&
-            !raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->host, (long)&st,
+            !raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&st,
                          AT_SYMLINK_NOFOLLOW, 0, 0))
             rc = -EEXIST;
     }
@@ -1016,31 +1016,31 @@ int proot_handles_syscall(long number)
     case __NR_removexattr: case __NR_lremovexattr:
     case __NR_inotify_add_watch:
     case __NR_bind: case __NR_connect: case __NR_sendto: case __NR_sendmsg:
-    case SYS_fchmodat:
-    case SYS_fchownat:
-    case SYS_utimensat:
-    case SYS_fchmod:
-    case SYS_fchown:
-    case SYS_statfs:
-    case SYS_fstatfs:
-    case SYS_mknodat:
+    case __NR_fchmodat:
+    case __NR_fchownat:
+    case __NR_utimensat:
+    case __NR_fchmod:
+    case __NR_fchown:
+    case __NR_statfs:
+    case __NR_fstatfs:
+    case __NR_mknodat:
     case __NR_truncate:
     case __NR_ftruncate:
-    case SYS_mkdirat:
-    case SYS_unlinkat:
-    case SYS_symlinkat:
-    case SYS_linkat:
-    case SYS_renameat:
-    case SYS_renameat2:
-    case SYS_openat:
-    case SYS_newfstatat:
-    case SYS_statx:
-    case SYS_readlinkat:
-    case SYS_chdir:
-    case SYS_fchdir:
-    case SYS_getcwd:
-    case SYS_faccessat:
-    case SYS_faccessat2:
+    case __NR_mkdirat:
+    case __NR_unlinkat:
+    case __NR_symlinkat:
+    case __NR_linkat:
+    case __NR_renameat:
+    case __NR_renameat2:
+    case __NR_openat:
+    case __NR_newfstatat:
+    case __NR_statx:
+    case __NR_readlinkat:
+    case __NR_chdir:
+    case __NR_fchdir:
+    case __NR_getcwd:
+    case __NR_faccessat:
+    case __NR_faccessat2:
         return 1;
     default:
         return 0;
@@ -1079,28 +1079,28 @@ static long fake_chown(long ret)
 static long copy_link(Bridge *b, long error)
 {
     struct stat st;
-    if (raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->first_host, (long)&st,
+    if (raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->first_host, (long)&st,
                     AT_SYMLINK_NOFOLLOW, 0, 0) < 0)
         return error;
     if ((st.st_mode & S_IFMT) == S_IFLNK) {
-        long n = raw_syscall(SYS_readlinkat, AT_FDCWD, (long)b->first_host,
+        long n = raw_syscall(__NR_readlinkat, AT_FDCWD, (long)b->first_host,
                              (long)b->proc_data, sizeof(b->proc_data) - 1, 0, 0);
         if (n < 0 || n >= (long)sizeof(b->proc_data) - 1) return error;
         b->proc_data[n] = 0;
-        return raw_syscall(SYS_symlinkat, (long)b->proc_data, AT_FDCWD, (long)b->host, 0, 0, 0) < 0 ?
+        return raw_syscall(__NR_symlinkat, (long)b->proc_data, AT_FDCWD, (long)b->host, 0, 0, 0) < 0 ?
             error : 0;
     }
     if ((st.st_mode & S_IFMT) != S_IFREG) return error;
-    long in = raw_syscall(SYS_openat, AT_FDCWD, (long)b->first_host, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    long in = raw_syscall(__NR_openat, AT_FDCWD, (long)b->first_host, O_RDONLY | O_CLOEXEC, 0, 0, 0);
     if (in < 0) return error;
-    long out = raw_syscall(SYS_openat, AT_FDCWD, (long)b->host,
+    long out = raw_syscall(__NR_openat, AT_FDCWD, (long)b->host,
                            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, st.st_mode & 07777, 0, 0);
     long ret = out < 0 ? out : 0;
     while (!ret) {
-        long n = raw_syscall(SYS_read, in, (long)b->proc_data, sizeof(b->proc_data), 0, 0, 0);
+        long n = raw_syscall(__NR_read, in, (long)b->proc_data, sizeof(b->proc_data), 0, 0, 0);
         if (n <= 0) { ret = n < 0 ? n : 1; break; }
         for (long done = 0; done < n && !ret;) {
-            long w = raw_syscall(SYS_write, out, (long)b->proc_data + done, n - done, 0, 0, 0);
+            long w = raw_syscall(__NR_write, out, (long)b->proc_data + done, n - done, 0, 0, 0);
             if (w <= 0) ret = w < 0 ? w : -EIO;
             else done += w;
         }
@@ -1108,12 +1108,12 @@ static long copy_link(Bridge *b, long error)
     if (ret == 1) {
         struct { long sec, nsec; } times[2] = {{st.st_atime, st.st_atime_nsec},
                                                {st.st_mtime, st.st_mtime_nsec}};
-        ret = raw_syscall(SYS_fchmod, out, st.st_mode & 07777, 0, 0, 0, 0);
-        if (!ret) ret = raw_syscall(SYS_utimensat, out, 0, (long)times, 0, 0, 0);
+        ret = raw_syscall(__NR_fchmod, out, st.st_mode & 07777, 0, 0, 0, 0);
+        if (!ret) ret = raw_syscall(__NR_utimensat, out, 0, (long)times, 0, 0, 0);
     }
     raw_syscall(__NR_close, in, 0, 0, 0, 0, 0);
     if (out >= 0) raw_syscall(__NR_close, out, 0, 0, 0, 0, 0);
-    if (ret < 0 && out >= 0) raw_syscall(SYS_unlinkat, AT_FDCWD, (long)b->host, 0, 0, 0, 0);
+    if (ret < 0 && out >= 0) raw_syscall(__NR_unlinkat, AT_FDCWD, (long)b->host, 0, 0, 0, 0);
     /* A name that already exists stays the kernel's answer. */
     return ret < 0 ? (out == -EEXIST ? -EEXIST : error) : 0;
 }
@@ -1121,7 +1121,7 @@ static long copy_link(Bridge *b, long error)
 static long mutate(Bridge *b, long number, long a[6])
 {
     long ret;
-    if (number == SYS_symlinkat) {
+    if (number == __NR_symlinkat) {
         if (!a[0])
             return -EFAULT;
         /* The target is opaque link data, NOT a path to resolve or rewrite. */
@@ -1130,16 +1130,16 @@ static long mutate(Bridge *b, long number, long a[6])
             return ret;
         return raw_syscall(number, a[0], AT_FDCWD, (long)b->host, 0, 0, 0);
     }
-    if (number == SYS_mkdirat || number == SYS_unlinkat) {
+    if (number == __NR_mkdirat || number == __NR_unlinkat) {
         ret = resolve(b, (int)a[0], (const char *)a[1], false);
         if (ret < 0)
             return ret;
-        if (number == SYS_unlinkat && contains_mount(b, b->guest))
+        if (number == __NR_unlinkat && contains_mount(b, b->guest))
             return -EBUSY;
         return raw_syscall(number, AT_FDCWD, (long)b->host, a[2], 0, 0, 0);
     }
 
-    bool hardlink = number == SYS_linkat;
+    bool hardlink = number == __NR_linkat;
     if (hardlink) {
         if (a[4] & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH))
             return -EINVAL;
@@ -1176,18 +1176,18 @@ static long mutate(Bridge *b, long number, long a[6])
 static bool path_mutation(long number, long a[6])
 {
     switch (number) {
-    case SYS_faccessat: case SYS_faccessat2:
+    case __NR_faccessat: case __NR_faccessat2:
         return !!((unsigned int)a[2] & 2); /* W_OK queries mutation permission. */
-    case SYS_openat:
+    case __NR_openat:
         /* O_PATH ignores ordinary access/create/truncate flags. */
         if (a[2] & O_PATH) return false;
         return (a[2] & (O_ACCMODE | O_CREAT | O_TRUNC)) ||
                ((a[2] & O_TMPFILE) == O_TMPFILE);
     case __NR_setxattr: case __NR_lsetxattr:
     case __NR_removexattr: case __NR_lremovexattr:
-    case SYS_mknodat: case SYS_mkdirat: case SYS_unlinkat: case SYS_symlinkat:
-    case SYS_linkat: case SYS_renameat: case SYS_renameat2:
-    case SYS_fchmodat: case SYS_fchownat: case SYS_utimensat: case __NR_truncate:
+    case __NR_mknodat: case __NR_mkdirat: case __NR_unlinkat: case __NR_symlinkat:
+    case __NR_linkat: case __NR_renameat: case __NR_renameat2:
+    case __NR_fchmodat: case __NR_fchownat: case __NR_utimensat: case __NR_truncate:
     case __NR_bind: /* Creates the socket inode at the resolved path. */
         return true;
     default: return false;
@@ -1214,7 +1214,7 @@ static long proc_cmdline(Bridge *b, int flags)
                           (flags & O_CLOEXEC) ? 1 /* MFD_CLOEXEC */ : 0, 0, 0, 0, 0);
     if (fd < 0) return fd;
     long done = 0, n = 0;
-    while (done < length && (n = raw_syscall(SYS_write, fd, (long)b->proc_data + start + done,
+    while (done < length && (n = raw_syscall(__NR_write, fd, (long)b->proc_data + start + done,
                                              length - done, 0, 0, 0)) > 0)
         done += n;
     if (n < 0 || raw_syscall(__NR_lseek, fd, 0, 0, 0, 0, 0) < 0) {
@@ -1260,11 +1260,11 @@ static long proc_readlink(Bridge *b, long a[6])
 static bool path_traversal(long number, long a[6])
 {
     switch (number) {
-    case SYS_newfstatat: case SYS_statx: case SYS_statfs: case SYS_chdir:
+    case __NR_newfstatat: case __NR_statx: case __NR_statfs: case __NR_chdir:
         return true;
-    case SYS_faccessat: case SYS_faccessat2:
+    case __NR_faccessat: case __NR_faccessat2:
         return !((unsigned int)a[2] & 2);
-    case SYS_openat:
+    case __NR_openat:
         if (a[2] & O_PATH) return true;
         /* O_DIRECTORY makes the kernel refuse a non-directory host object. */
         return (a[2] & O_DIRECTORY) && (a[2] & O_TMPFILE) != O_TMPFILE &&
@@ -1318,7 +1318,7 @@ static long socket_address(Bridge *b, long number, long a[6])
         if (!slash) return -ENAMETOOLONG;
         char *base = b->host + slash;
         b->host[slash - 1] = 0;
-        directory = raw_syscall(SYS_openat, AT_FDCWD, (long)(slash == 1 ? "/" : b->host),
+        directory = raw_syscall(__NR_openat, AT_FDCWD, (long)(slash == 1 ? "/" : b->host),
                                 O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
         if (directory < 0) return directory;
         char *out = b->address.sun_path, *end = out + sizeof(b->address.sun_path) - 1;
@@ -1353,31 +1353,31 @@ static long socket_address(Bridge *b, long number, long a[6])
 
 static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
-    if(number==SYS_faccessat || number==SYS_faccessat2) {
+    if(number==__NR_faccessat || number==__NR_faccessat2) {
         /* Match the kernel's int ABI before classifying W_OK. */
         a[2]=(int)a[2];
         if((unsigned int)a[2]&~7u)return -EINVAL;
-        if(number==SYS_faccessat2) {
+        if(number==__NR_faccessat2) {
             a[3]=(int)a[3];
             if((unsigned int)a[3]&~(AT_EACCESS|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH))
                 return -EINVAL;
         }
     }
     b->mutation = path_mutation(number, a);
-    b->attributes = number == SYS_fchmodat || number == SYS_fchownat ||
-        number == SYS_utimensat || number == __NR_truncate || number == __NR_setxattr ||
+    b->attributes = number == __NR_fchmodat || number == __NR_fchownat ||
+        number == __NR_utimensat || number == __NR_truncate || number == __NR_setxattr ||
         number == __NR_lsetxattr || number == __NR_removexattr || number == __NR_lremovexattr;
-    b->creates = number == SYS_mkdirat || number == SYS_mknodat || number == SYS_symlinkat ||
+    b->creates = number == __NR_mkdirat || number == __NR_mknodat || number == __NR_symlinkat ||
         number == __NR_bind;
     b->traverse = path_traversal(number, a);
     if (number == __NR_bind || number == __NR_connect ||
         number == __NR_sendto || number == __NR_sendmsg)
         return socket_address(b, number, a);
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     /* Socket names keep their spelling (bind records it); exec resolves
      * through proot_resolve_exec_path. Everything dispatched here is safe
      * to issue through the walked parent directory. */
-    b->secure = g_payload_config.guard_path_mutations || g_payload_config.guard_file_reads;
+    b->secure = g_payload_config.guard >= GUARD_PATHS;
 #endif
     long ret;
     switch (number) {
@@ -1398,46 +1398,46 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         if (!a[1]) return -EFAULT;
         ret = resolve(b, AT_FDCWD, (const char *)a[1], !(a[2] & IN_DONT_FOLLOW));
         if (ret < 0) return ret;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
         ret = watch_hides_child(b, b->guest);
         if (ret < 0) return ret;
 #endif
         return raw_syscall(number, a[0], (long)b->host, a[2], 0, 0, 0);
     }
     /* Descriptor operations retain kernel identity; FD policy is a later layer. */
-    if (number == SYS_fchown)
+    if (number == __NR_fchown)
         return fake_chown(raw_syscall(number, a[0], a[1], a[2], 0, 0, 0));
-    if (number == SYS_fchmod || number == SYS_fstatfs || number == __NR_ftruncate)
+    if (number == __NR_fchmod || number == __NR_fstatfs || number == __NR_ftruncate)
         return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
-    if (number == SYS_statfs || number == __NR_truncate) {
+    if (number == __NR_statfs || number == __NR_truncate) {
         if (!a[0]) return -EFAULT;
         ret = resolve(b, AT_FDCWD, (const char *)a[0], true);
         if (ret < 0) return ret;
         return raw_syscall(number, (long)b->host, a[1], a[2], a[3], a[4], a[5]);
     }
-    if (number == SYS_fchownat || number == SYS_utimensat) {
-        long flags = a[number == SYS_fchownat ? 4 : 3];
+    if (number == __NR_fchownat || number == __NR_utimensat) {
+        long flags = a[number == __NR_fchownat ? 4 : 3];
         long allowed = AT_SYMLINK_NOFOLLOW;
-        if (number == SYS_fchownat) allowed |= AT_EMPTY_PATH;
+        if (number == __NR_fchownat) allowed |= AT_EMPTY_PATH;
         if (flags & ~allowed) return -EINVAL;
         /* Linux utimensat(fd, NULL, ...) is an FD operation. */
-        if (number == SYS_utimensat && !a[1])
+        if (number == __NR_utimensat && !a[1])
             return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
         if (!a[1]) return -EFAULT;
         const char *path = (const char *)a[1];
-        if (!*path && number == SYS_fchownat && (flags & AT_EMPTY_PATH))
+        if (!*path && number == __NR_fchownat && (flags & AT_EMPTY_PATH))
             ret = raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
         else {
             ret = resolve(b, (int)a[0], path, !(flags & AT_SYMLINK_NOFOLLOW));
             if (ret < 0) return ret;
             ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], a[3], a[4], a[5]);
         }
-        return number == SYS_fchownat ? fake_chown(ret) : ret;
+        return number == __NR_fchownat ? fake_chown(ret) : ret;
     }
-    if (number == SYS_mkdirat || number == SYS_unlinkat || number == SYS_symlinkat ||
-        number == SYS_linkat || number == SYS_renameat || number == SYS_renameat2)
+    if (number == __NR_mkdirat || number == __NR_unlinkat || number == __NR_symlinkat ||
+        number == __NR_linkat || number == __NR_renameat || number == __NR_renameat2)
         return mutate(b, number, a);
-    if (number == SYS_getcwd) {
+    if (number == __NR_getcwd) {
         ret = guest_cwd(b);
         if (ret < 0)
             return ret;
@@ -1450,20 +1450,20 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         /* Raw Linux getcwd returns bytes INCLUDING the NUL terminator. */
         return (long)size;
     }
-    if (number == SYS_fchdir) {
+    if (number == __NR_fchdir) {
         ret = host_fd(b, (int)a[0], b->guest);
         if (ret < 0)
             return ret;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
         ret = path_visibility(b, b->guest);
         if (ret < 0) return ret;
         if (ret == FS_HIDDEN) return -EACCES;
 #endif
-        ret = raw_syscall(SYS_fchdir, a[0], 0, 0, 0, 0, 0);
+        ret = raw_syscall(__NR_fchdir, a[0], 0, 0, 0, 0, 0);
         if (ret >= 0 && origin) *origin = b->anchor;
         return ret;
     }
-    if (number == SYS_chdir) {
+    if (number == __NR_chdir) {
         ret = resolve(b, AT_FDCWD, (const char *)a[0], true);
         if (ret < 0)
             return ret;
@@ -1473,7 +1473,7 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
             ret = binding_table_mount_id(&b->table, b->guest, &id);
             if (ret < 0) return ret;
         }
-        ret = raw_syscall(SYS_chdir, (long)b->host, 0, 0, 0, 0, 0);
+        ret = raw_syscall(__NR_chdir, (long)b->host, 0, 0, 0, 0, 0);
         if (ret >= 0 && known) *origin = (struct proot_open_origin){id, true};
         return ret;
     }
@@ -1482,22 +1482,22 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (!path)
         return -EFAULT;
     bool follow = true;
-    if (number == SYS_mknodat) {
+    if (number == __NR_mknodat) {
         follow = false;
-    } else if (number == SYS_openat) {
+    } else if (number == __NR_openat) {
         int flags = (int)a[2];
         follow = !(flags & O_NOFOLLOW) && !((flags & O_CREAT) && (flags & O_EXCL));
-    } else if (number == SYS_readlinkat) {
+    } else if (number == __NR_readlinkat) {
         follow = false;
         if (a[3] <= 0)
             return -EINVAL;
-    } else if (number == SYS_newfstatat || number == SYS_faccessat2 || number == SYS_statx) {
-        long flags = number == SYS_statx ? a[2] : a[3];
+    } else if (number == __NR_newfstatat || number == __NR_faccessat2 || number == __NR_statx) {
+        long flags = number == __NR_statx ? a[2] : a[3];
         follow = !(flags & AT_SYMLINK_NOFOLLOW);
         /* No pathname traversal for AT_EMPTY_PATH; preserve the FD operation
          * and let the kernel validate flags/FD/output, including AT_FDCWD. */
         if (!path[0] && (flags & AT_EMPTY_PATH)) {
-            if (number == SYS_newfstatat) {
+            if (number == __NR_newfstatat) {
                 if (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT))
                     return -EINVAL;
                 /* This host's fstatat(empty, symlink-FD) can report the parent
@@ -1508,7 +1508,7 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
                 return raw_syscall(number, AT_FDCWD, (long)".", a[2],
                                    flags & ~AT_EMPTY_PATH, 0, 0);
             }
-            if (number == SYS_statx) {
+            if (number == __NR_statx) {
                 /* Empty-path statx likewise refers to the FD itself. */
                 return raw_syscall(number, a[0], a[1], flags | AT_SYMLINK_NOFOLLOW,
                                    a[3], a[4], a[5]);
@@ -1517,23 +1517,23 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         }
     }
     /* readlinkat supports an empty pathname on an O_PATH symlink FD. */
-    if (number == SYS_readlinkat && !path[0])
+    if (number == __NR_readlinkat && !path[0])
         return raw_syscall(number, a[0], a[1], a[2], a[3], 0, 0);
 
-    bool observed_open = number == SYS_openat && origin &&
+    bool observed_open = number == __NR_openat && origin &&
         (path[0] == '/' || b->anchor.known);
     /* A followed open (not O_PATH, which would open the link itself) skips
      * the final lstat and opens with O_NOFOLLOW; only ELOOP, a final
      * symlink, needs the full resolution again. Saves one host walk. */
     size_t length = strnlen(path, PATH_MAX);
-    b->defer_final = number == SYS_openat && follow && !(a[2] & O_PATH) &&
+    b->defer_final = number == __NR_openat && follow && !(a[2] & O_PATH) &&
         length && length < PATH_MAX && path[length - 1] != '/';
     bool deferred = b->defer_final;
     ret = resolve(b, (int)a[0], path, follow);
     b->defer_final = false;
     if (ret < 0)
         return ret;
-    if (number == SYS_readlinkat) {
+    if (number == __NR_readlinkat) {
         Comparison c = compare_paths("/proc", b->guest);
         if (c == PATH1_IS_PREFIX)
             return proc_readlink(b, a);
@@ -1547,17 +1547,17 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     }
     /* Without a glue tree (no writable glue base), metadata of a glue
      * directory is still a directory's: the root's. */
-    if ((number == SYS_newfstatat || number == SYS_statx || number == SYS_faccessat ||
-         number == SYS_faccessat2) && glue_ancestor(b, b->guest)) {
+    if ((number == __NR_newfstatat || number == __NR_statx || number == __NR_faccessat ||
+         number == __NR_faccessat2) && glue_ancestor(b, b->guest)) {
         struct stat probe;
-        if (raw_syscall(SYS_newfstatat, AT_FDCWD, (long)b->host, (long)&probe,
+        if (raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&probe,
                         AT_SYMLINK_NOFOLLOW, 0, 0) == -ENOENT)
             strcpy(b->host, b->table.root);
     }
-    if (number == SYS_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT)))
+    if (number == __NR_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT)))
         ret = proc_cmdline(b, (int)a[2]);
     else ret = -ENOENT;
-    if (ret == -ENOENT && number == SYS_newfstatat && follow && b->final_match) {
+    if (ret == -ENOENT && number == __NR_newfstatat && follow && b->final_match) {
         /* Copied by the kernel so a bad buffer is still EFAULT. */
         struct { const void *base; size_t length; } local = {&b->final_stat, sizeof(b->final_stat)},
             remote = {(void *)a[2], sizeof(b->final_stat)};
@@ -1595,8 +1595,8 @@ static Bridge *bridge_pool[BRIDGE_POOL];
 static int bridge_used[BRIDGE_POOL];
 static long bridge_acquire(void)
 {
-#ifdef FD_EXPERIMENT
-    if (!fd_experiment_shared_scratch()) return proot_scratch_alloc(sizeof(Bridge));
+#ifdef GUARDED
+    if (!fd_runtime_shared_scratch()) return proot_scratch_alloc(sizeof(Bridge));
 #endif
     for (int i = 0; i < BRIDGE_POOL; i++) {
         int free_slot = 0;
@@ -1635,8 +1635,6 @@ static void bridge_release(Bridge *b)
 static long bridge_create(Bridge **out)
 {
     payload_config_t *cfg = &g_payload_config;
-    if (cfg->overlay_count || cfg->vfs_lower[0] || cfg->vfs_upper[0])
-        return -EOPNOTSUPP;
     if (cfg->bind_count < 0 || cfg->bind_count > CONFIG_MAX_BINDS)
         return -EINVAL;
     long mem = bridge_acquire();
@@ -1661,11 +1659,11 @@ static long bridge_create(Bridge **out)
     for (int i = 0; i < cfg->bind_count; i++)
         b->bindings[i] = (PathBinding){cfg->binds[i].src, cfg->binds[i].dst};
     long ret = binding_table_validate(&b->table);
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
     b->reads = false;
-    if (ret >= 0 && cfg->guard_file_reads) {
+    if (ret >= 0 && cfg->guard == GUARD_READS) {
         size_t count;
-        ret = fd_experiment_mount_access(b->access, &count);
+        ret = fd_runtime_mount_access(b->access, &count);
         b->policy = (struct fs_policy){b->access, count};
         b->exposed_count = 0;
         for (size_t i = 0; ret >= 0 && i < b->table.count; i++) {
@@ -1694,7 +1692,7 @@ static int unique_mount(Bridge *b, const char *host, size_t *selected)
     size_t matches=0;
     /* The glue tree belongs to the root mount alone. */
     if(glue_guest(host,b->guest)) {
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
         int visibility=path_visibility(b,b->guest);
         if(visibility<0)return visibility;
         if(visibility==FS_HIDDEN)return -EXDEV;
@@ -1704,7 +1702,7 @@ static int unique_mount(Bridge *b, const char *host, size_t *selected)
     for(size_t id=0;id<=b->table.count;id++) {
         b->anchor=(struct proot_open_origin){id,true};
         if(observed_guest_path(b,host,b->guest))continue;
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
         int visibility=path_visibility(b,b->guest);
         if(visibility<0)return visibility;
         if(visibility==FS_HIDDEN)continue;
@@ -1774,8 +1772,8 @@ void proot_socket_name(long number, long fd, void *address, unsigned *length,
         memcpy(b->proc_host, b->address.sun_path, size);
         b->proc_host[size] = 0;
         int rc = preferred_guest_path(b, b->proc_host, b->proc_guest);
-#ifdef FD_EXPERIMENT
-        if (rc < 0 && g_payload_config.guard_file_reads) {
+#ifdef GUARDED
+        if (rc < 0 && g_payload_config.guard == GUARD_READS) {
             *length = (unsigned)sizeof(b->address.sun_family);
             bridge_release(b);
             return;
@@ -1799,7 +1797,7 @@ int proot_revalidate_cwd(struct proot_open_origin *origin)
     *origin=(struct proot_open_origin){0,false};
     Bridge *b;
     long ret=bridge_create(&b);if(ret<0)return ret;
-    ret=raw_syscall(SYS_getcwd,(long)b->first_host,sizeof(b->first_host),0,0,0,0);
+    ret=raw_syscall(__NR_getcwd,(long)b->first_host,sizeof(b->first_host),0,0,0,0);
     if(ret>=0) {
         size_t selected;
         /* Unreachable or ambiguous (aliased) directories stay unknown. */
@@ -1850,7 +1848,7 @@ int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
     bridge_release(b);return ret;
 }
 
-#ifdef FD_EXPERIMENT
+#ifdef GUARDED
 /* Kernel getdents64 record: ino, next offset, reclen, type, NUL-terminated name. */
 #define DIRENT_OFFSET 8
 #define DIRENT_RECLEN 16
@@ -1943,7 +1941,7 @@ static long bridge_syscall(long number, long args[6], const struct proot_open_or
         return ret;
     if (anchor) {
         b->anchor = *anchor;
-        b->anchor_fd = (number == SYS_chdir || number == SYS_getcwd) ? AT_FDCWD : (int)args[0];
+        b->anchor_fd = (number == __NR_chdir || number == __NR_getcwd) ? AT_FDCWD : (int)args[0];
     }
     ret = dispatch(b, number, args, origin);
     bridge_release(b);
@@ -1960,13 +1958,13 @@ long proot_openat(long args[6], const struct proot_open_origin *anchor,
 {
     if (!origin) return -EINVAL;
     *origin = (struct proot_open_origin){0, false};
-    return bridge_syscall(SYS_openat, args, anchor, origin);
+    return bridge_syscall(__NR_openat, args, anchor, origin);
 }
 
 long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor,
                struct proot_open_origin *origin)
 {
-    if (!origin || (number != SYS_chdir && number != SYS_fchdir && number != SYS_getcwd))
+    if (!origin || (number != __NR_chdir && number != __NR_fchdir && number != __NR_getcwd))
         return -EINVAL;
     *origin = (struct proot_open_origin){0, false};
     return bridge_syscall(number, args, anchor, origin);
@@ -2039,7 +2037,7 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
     if (ret < 0) return ret;
     long anchor = dirfd;
     if (dirfd == AT_FDCWD) {
-        anchor = raw_syscall(SYS_openat, AT_FDCWD, (long)".",
+        anchor = raw_syscall(__NR_openat, AT_FDCWD, (long)".",
                              O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
         if (anchor < 0) { ret = anchor; goto out; }
     }
@@ -2055,7 +2053,7 @@ long proot_open_beneath(int dirfd, const char *path, unsigned long flags,
     ret = binding_table_mount_id(&b->table, b->guest, &target_mount);
     if (ret < 0) goto close_anchor;
     if (base_mount != target_mount) { ret = -EOPNOTSUPP; goto close_anchor; }
-    ret = raw_syscall(SYS_openat, anchor, (long)name, flags, 0, 0, 0);
+    ret = raw_syscall(__NR_openat, anchor, (long)name, flags, 0, 0, 0);
     if (trailing && ret == -ENOTDIR) ret = -EOPNOTSUPP;
     if (ret >= 0 && b->anchor.known)
         *origin = (struct proot_open_origin){target_mount, true};

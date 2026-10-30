@@ -6,11 +6,12 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
-loader = build / 'elfloader-proot-fd-experiment'
-assert hashlib.sha256(loader.read_bytes()).hexdigest() == json.loads(
-    (build / 'elf-build-fd-experiment.json').read_text())['sha256']
+build = lib.BUILD
+loader = lib.loader('-guarded')
 
 
 def tree(root):

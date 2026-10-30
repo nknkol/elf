@@ -8,11 +8,11 @@
 #include "syscall_nums.h"
 
 /*
- * 运行期补钩：在动态装载新段并设置可执行权限后，再扫描其中的 SVC 指令，
- * 替换成跳转到 payload 的桩，避免后续加载的共享库逃逸。桩的放置见
- * stub_island.h：两侧桩岛覆盖至 256 MiB 的段，无法覆盖时整段失败。
- *
- * 依赖 minimal syscalls/raw_syscall，不依赖宿主 libc。
+ * Run-time hooking: code that becomes executable (shared libraries, JIT
+ * output) is scanned for svc instructions, which are replaced by branches
+ * to stubs calling the payload. Stub placement (stub_island.h): islands on
+ * either side cover segments up to 256 MiB; otherwise the whole range
+ * fails. Raw syscalls only, no host libc.
  */
 
 
@@ -27,7 +27,7 @@ extern long raw_syscall(long sys_no, long a1, long a2, long a3, long a4, long a5
 
 long island_mmap(uintptr_t addr, size_t len, int prot, int flags)
 {
-    return raw_syscall(SYS_mmap, (long)addr, (long)len, prot, flags, -1, 0);
+    return raw_syscall(__NR_mmap, (long)addr, (long)len, prot, flags, -1, 0);
 }
 long island_munmap(uintptr_t addr, size_t len)
 {
@@ -35,7 +35,7 @@ long island_munmap(uintptr_t addr, size_t len)
 }
 long island_mprotect(uintptr_t addr, size_t len, int prot)
 {
-    return raw_syscall(SYS_mprotect, (long)addr, (long)len, prot, 0, 0, 0);
+    return raw_syscall(__NR_mprotect, (long)addr, (long)len, prot, 0, 0, 0);
 }
 long island_pread(int fd, void *buf, size_t len, long offset)
 {

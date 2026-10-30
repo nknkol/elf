@@ -8,7 +8,7 @@ with tempfile.TemporaryDirectory() as temp:
     subprocess.run([str(exe),"--nested-init"],check=True,timeout=30)
     subprocess.run([str(exe)],check=True,timeout=30)
     private=Path(temp)/'guard-private'
-    subprocess.run(['clang','-O2','-DFD_EXPERIMENT','-I'+str(root/'src/payload/include'),
+    subprocess.run(['clang','-O2','-DGUARDED','-I'+str(root/'src/payload/include'),
                     str(root/'test/syscalls/guard_private_test.c'),
                     str(root/'src/payload/arch/aarch64/reentry_guard.c'),'-o',str(private)],check=True)
     subprocess.run([str(private)],check=True,timeout=30)

@@ -4,8 +4,11 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lib  # noqa: E402
 repo = Path(__file__).resolve().parents[2]
-build = repo / 'vendor/proot/svc/build'
+build = lib.BUILD
 brew = Path(os.environ.get('HARMONYBREW_PREFIX', Path.home() / '.harmonybrew'))
 python = brew / 'bin/python3'
 if not Path('/system/lib/ld-musl-aarch64.so.1').exists() or not python.exists() \
@@ -15,6 +18,7 @@ if not Path('/system/lib/ld-musl-aarch64.so.1').exists() or not python.exists() 
 
 SCRIPT = r'''
 import json, os, subprocess, sys
+import sys
 git = sys.argv[1]
 result = {"cwd": os.getcwd(), "root": sorted(os.listdir("/")), "dev": sorted(os.listdir("/dev")),
           "home": os.environ["HOME"], "note": open("note").read().strip()}
