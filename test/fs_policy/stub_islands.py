@@ -24,7 +24,7 @@ for line in open("/proc/self/maps").read().splitlines():
     lo, hi = (int(x, 16) for x in p[0].split("-")); regions += 1
     w = struct.unpack("<%dI" % ((hi - lo) // 4), ctypes.string_at(lo, hi - lo))
     if 0x484F4F4B in w: continue                     # The payload ("HOOK" magic).
-    if w[0] == 0xd503245f and w[1] == 0xf1022d1f:     # A stub island (bti c; cmp x8):
+    if w[0] == 0xd503245f and w[1] == 0x71022d1f:     # A stub island (bti c; cmp w8):
         continue                                      # its svc is the rt_sigreturn path.
     left += sum(1 for x in w if x == 0xd4000001)
 print("regions", regions, "unpatched", left)
@@ -39,7 +39,7 @@ for line in open("/proc/self/maps").read().splitlines():
     lo, hi = (int(x, 16) for x in p[0].split("-"))
     w = struct.unpack("<%dI" % ((hi - lo) // 4), ctypes.string_at(lo, hi - lo))
     if 0x484F4F4B in w: payload = lo
-    elif w[0] == 0xd503245f and w[1] == 0xf1022d1f: island = lo
+    elif w[0] == 0xd503245f and w[1] == 0x71022d1f: island = lo
 calls = [libc.munmap(ctypes.c_void_p(island), 4096), libc.mprotect(ctypes.c_void_p(island), 4096, 3),
          libc.madvise(ctypes.c_void_p(island), 4096, 4), libc.munmap(ctypes.c_void_p(payload), 4096)]
 errors = [ctypes.get_errno()]

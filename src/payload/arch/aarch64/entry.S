@@ -23,6 +23,10 @@ _start:
     b clone_entry
 #endif
 real_entry:
+    /* The kernel takes the syscall number as the int in w8: decide on the
+     * same 32 bits (high bits must not route a known call past the slow
+     * path). The guest's x8 upper half is not preserved by this entry. */
+    mov     w8, w8
     /* rt_sigreturn must see the original user stack; bypass */
     cmp     x8, #SYS_rt_sigreturn
     b.eq    fast_path_sigreturn

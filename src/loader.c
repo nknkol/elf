@@ -553,7 +553,8 @@ static long backstop_call(unsigned long entry, const unsigned long *r)
 	register long x0 __asm__("x0") = (long)r[0];
 	register long x1 __asm__("x1") = (long)r[1], x2 __asm__("x2") = (long)r[2];
 	register long x3 __asm__("x3") = (long)r[3], x4 __asm__("x4") = (long)r[4];
-	register long x5 __asm__("x5") = (long)r[5], x8 __asm__("x8") = (long)r[8];
+	register long x5 __asm__("x5") = (long)r[5];
+	register long x8 __asm__("x8") = (long)(unsigned)r[8]; /* The kernel's int. */
 	register unsigned long x17 __asm__("x17") = entry;
 	/* The payload entry restores every register except x0 (and the x16,
 	 * x17 and x30 a stub saves itself). */

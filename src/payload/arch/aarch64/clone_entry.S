@@ -100,6 +100,7 @@
 .global clone_entry
 .type clone_entry,%function
 clone_entry:
+    mov w8, w8 /* The kernel's int syscall number, as in entry.S. */
     save_clone_context
     /* Save continuation, then repair the two registers used by the stub. */
     sub x1, x16, #(STUB_DATA_OFFSET - STUB_CLONE_RESUME_OFFSET)

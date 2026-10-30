@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* --seccomp-backstop probe. Mode m: write a raw `svc` into code that is
  * already executable (through /proc/self/mem, so no hook ever sees it) and
- * open /etc/alpine-release with it. Mode x: ask for an RWX mapping. */
+ * open /etc/alpine-release with it. Mode x: ask for an RWX mapping. Mode w:
+ * a hooked svc whose x8 has high bits set above openat. */
 #include <asm/unistd.h>
 static long sc(long n,long a,long b,long c,long d,long e,long f)
 {
@@ -19,6 +20,15 @@ void run(long *sp)
     if(mode=='x') {
         long r=sc(__NR_mmap,0,4096,7,0x22,-1,0);
         out("rwx=",-1);num(r<0 && r>-4096?r:0);
+        sc(__NR_exit_group,0,0,0,0,0,0);
+    }
+    if(mode=='w') {
+        /* The kernel uses the low 32 bits of x8 as the number: high bits
+         * must not route a known call past the payload. */
+        long fd=sc(0x100000000l|__NR_openat,-100,(long)"/etc/alpine-release",0,0,0,0);
+        char buf[64];long n=fd>=0?sc(__NR_read,fd,(long)buf,sizeof(buf),0,0,0):0;
+        out("open=",-1);
+        if(fd<0)num(fd);else out(buf,n);
         sc(__NR_exit_group,0,0,0,0,0,0);
     }
     unsigned *page=(unsigned *)sc(__NR_mmap,0,4096,3,0x22,-1,0);

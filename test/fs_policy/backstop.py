@@ -40,6 +40,8 @@ with tempfile.TemporaryDirectory(prefix='backstop-', dir=build) as tmp:
         plain = run([], 'm')
         assert plain[0] != f'open={release}' and plain[1] == 'after=0', (suffix, plain)
         assert run([], 'x') == ['rwx=0', 'after=0'], suffix
+        # x8 high bits: the kernel performs openat, so the payload must too.
+        assert run([], 'w') == [f'open={release}', 'after=0'], suffix
         # With it the call is trapped and translated; exec children keep it.
         assert run(['--seccomp-backstop'], 'm') == [f'open={release}', 'after=0'], suffix
         assert run(['--seccomp-backstop'], 'x') == ['rwx=-13', 'after=0'], suffix

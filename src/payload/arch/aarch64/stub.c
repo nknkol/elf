@@ -22,9 +22,9 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
 {
 	static const uint32_t tmpl[] = {
 		0xd503245f, /* bti c */
-		0xf1022d1f, /* cmp x8, #0x8b (SYS_rt_sigreturn) */
+		0x71022d1f, /* cmp w8, #0x8b (SYS_rt_sigreturn; the kernel's int) */
 		0x540001c0, /* b.eq sigreturn */
-		0xf103711f, /* cmp x8, #0xdc (SYS_clone) */
+		0x7103711f, /* cmp w8, #0xdc (SYS_clone) */
 		0x54000180, /* b.eq passthrough */
 		0xd10083ff, /* sub sp, sp, #0x20 */
 		0xa90047f0, /* stp x16, x17, [sp] */
