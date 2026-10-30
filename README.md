@@ -64,6 +64,7 @@ guarded 构建另有 `--guard-path-mutations`、`--guard-file-mutations`、`--gu
 
 - [当前进度与验收](docs/STATUS.md)
 - [架构说明](docs/ARCHITECTURE.md)
+- [隔离模式设计](docs/ISOLATION.md)
 - [PRoot 移植记录](docs/SVC_PORT.md)
 - [性能数据](docs/BENCHMARKS.md)
 - [FD 身份与只读策略](docs/FD_POLICY_PLAN.md)
