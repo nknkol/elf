@@ -1366,6 +1366,7 @@ typedef struct child_loader_proto {
 	const char *exec_interp;
 	const char *exec_exe;
 	const char *exec_name;
+	int exec_fd;
 } child_loader_proto_t;
 
 static const char *find_config_path_arg(int argc, char **argv)
@@ -1413,7 +1414,9 @@ static const char *find_config_path_arg(int argc, char **argv)
 		    z_strncmp(arg, CONFIG_CHILD_GLUE_DIR,
 			      z_strlen(CONFIG_CHILD_GLUE_DIR) + 1) == 0 ||
 		    z_strncmp(arg, CONFIG_CHILD_FAKE_IDS,
-			      z_strlen(CONFIG_CHILD_FAKE_IDS) + 1) == 0) {
+			      z_strlen(CONFIG_CHILD_FAKE_IDS) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_EXEC_FD,
+			      z_strlen(CONFIG_CHILD_EXEC_FD) + 1) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			i++;
@@ -1443,6 +1446,7 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 		child_proto->exec_interp = NULL;
 		child_proto->exec_exe = NULL;
 		child_proto->exec_name = NULL;
+		child_proto->exec_fd = -1;
 	}
 
 	for (int i = 1; i < argc; i++) {
@@ -1563,6 +1567,16 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 				z_errx(1, "missing value for %s", arg);
 			if (child_proto)
 				child_proto->exec_dirfd = z_atoi(argv[i + 1]);
+			i++;
+			continue;
+		}
+
+		if (z_strncmp(arg, CONFIG_CHILD_EXEC_FD,
+			      z_strlen(CONFIG_CHILD_EXEC_FD) + 1) == 0) {
+			if (i + 1 >= argc || argv[i + 1][0] < '0' || argv[i + 1][0] > '9')
+				z_errx(1, "invalid value for %s", arg);
+			if (child_proto)
+				child_proto->exec_fd = z_atoi(argv[i + 1]);
 			i++;
 			continue;
 		}
@@ -2657,6 +2671,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		if (!load_interp_next)
 			break;
 	}
+
+	/* fexecve: the program is loaded; its descriptor copy is not the guest's. */
+	if (child_loader && child_proto.exec_fd > 2)
+		z_close(child_proto.exec_fd);
 
 	const char *execfn = bootstrap_cfg.use_init ? file : target_argv[0];
 	if (child_loader && child_exec_path)

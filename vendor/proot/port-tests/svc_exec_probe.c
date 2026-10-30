@@ -19,8 +19,12 @@ void run(long *sp)
    char *vars[]={"PATH=/guest/bin","HOME=/guest",0};
    long ret;
    if(av[1][1]=='c')sc(49,(long)"/mnt",0,0,0,0,0);
-   if(av[1][1]=='f') {
-     long fd=sc(56,-100,(long)av[2],0,0,0,0);
+   char m=av[1][1];
+   if(m=='f'||m=='g'||m=='s'||m=='d'||m=='x') {
+     /* s: O_PATH|O_NOFOLLOW symlink FD; x: O_CLOEXEC (script case). */
+     long fd=sc(56,-100,(long)av[2],m=='s'?0x208000:m=='x'?0x80000:0,0,0,0);
+     if(m=='g')sc(38,-100,(long)"/mnt/decoy",-100,(long)av[2],0,0); /* Swap the name. */
+     if(m=='d')sc(35,-100,(long)av[2],0,0,0,0);                    /* Delete it. */
      ret=sc(281,fd,(long)"",(long)args,(long)vars,4096,0);
    } else if(av[1][1]=='a'||av[1][1]=='n'||av[1][1]=='e') {
      long fd=sc(56,-100,(long)"/mnt",0,0,0,0);

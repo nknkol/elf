@@ -51,6 +51,9 @@
 #define CONFIG_CHILD_GLUE_DIR "--glue-dir"
 /* Guest credentials r:e:s:fs uid then gid (PRoot fake_id0), when not root. */
 #define CONFIG_CHILD_FAKE_IDS "--fake-ids"
+/* fexecve: a descriptor of the program itself; the loader opens it through
+ * /proc/self/fd and closes it. */
+#define CONFIG_CHILD_EXEC_FD "--exec-fd"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];

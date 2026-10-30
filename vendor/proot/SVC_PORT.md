@@ -193,15 +193,15 @@ Empty-path hardlinks remain unsupported without FD mount identity tracking.
 re-executed with root/binds and caller argv/env preserved, including an empty
 environment and explicit environment in container mode. Child cwd survives.
 Path-based execveat resolves directory FDs and honors final nofollow. FD
-exec (AT_EMPTY_PATH) executes the FD's guest name. Shebang interpreters are
+exec (AT_EMPTY_PATH) executes the object the FD names (the child loader
+gets a copy via --exec-fd), not its current name. Shebang interpreters are
 resolved through the same guest filesystem and may themselves be scripts,
 up to the kernel's depth (the script plus four interpreter scripts, then
 ELOOP); each optional argument remains a single string. Missing,
 nonexecutable, invalid-format and truncated-header files return errors to
 the caller.
 
-Limits: FD exec of pathless objects (memfd, deleted files), custom hook
-ranges and colon-bearing bind serialization explicitly return EOPNOTSUPP.
+Limits: custom hook ranges and colon-bearing bind serialization explicitly return EOPNOTSUPP.
 Exec paths remain bounded by 256-byte config fields; argv size is bounded
 by the kernel's own E2BIG check. Script argv uses the canonical guest script pathname.
 ELF preflight checks the ELF64 AArch64 header, not every segment or program

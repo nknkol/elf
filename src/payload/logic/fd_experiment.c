@@ -889,6 +889,15 @@ long fd_experiment_dispatch(long n,long a[6])
             const struct fd_record *r=fd_table_get(t,context.fd[0]);
             if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
                 context.directory[0]=(struct proot_open_origin){r->origin.mount_id,true};
+            /* fexecve loads the FD's object without any path check: under
+             * the read guard it needs a known file origin the policy can
+             * read (stream allowances do not cover program content). */
+            if(g_payload_config.guard_file_reads && a[1] && !((const char *)a[1])[0] &&
+               (a[4]&AT_EMPTY_PATH)) {
+                int denied=!r || r->origin.access==FD_ACCESS_UNKNOWN ||
+                    mount_decision(r->origin.mount_id,true,FS_OBSERVE)<0;
+                if(denied) { unlock(s);return -EACCES; }
+            }
         }
         unlock(s);
         return proot_execve_context(n,a,&context);
@@ -945,6 +954,8 @@ long fd_experiment_dispatch(long n,long a[6])
     else result=syscall_handle_common(n,a);
     lock(s);
     s->reserved-=(size_t)reserved;
+    if(replacing>=0)s->closing[replacing]=(struct closing_fd){0,0};
+    if(replacing_untracked)s->untracked--;
     rc=result<0?0:record(s,t,n,a,result,since,create,pair,setfd,ioctl_setfd,
                          openat2_flags,opened,source_generation);
     unlock(s);
@@ -952,5 +963,3 @@ long fd_experiment_dispatch(long n,long a[6])
     if(rc)return rc;
     return result;
 }
-    if(replacing>=0)s->closing[replacing]=(struct closing_fd){0,0};
-    if(replacing_untracked)s->untracked--;

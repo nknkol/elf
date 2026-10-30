@@ -75,6 +75,7 @@ check-fd-runtime:
 	$(PYTHON) test/fs_policy/agent_brew.py
 	$(PYTHON) test/fs_policy/threads.py
 	$(PYTHON) test/fs_policy/dup_race.py
+	$(PYTHON) test/fs_policy/fexecve_guard.py
 	$(PYTHON) test/fs_policy/proc_links.py
 	$(PYTHON) test/fd_runtime/run.py
 

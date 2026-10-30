@@ -39,6 +39,7 @@ typedef struct {
     char **argv;
     char *inline_argv[CHAIN_ARGS];
     char fake_ids[8 * 11];
+    char exec_fd[16];
 #ifdef FD_EXPERIMENT
     char fd_state[24];
     /* PT_INTERP as stored in the target, then its policy-checked resolution. */
@@ -50,11 +51,24 @@ typedef struct {
 
 size_t proot_exec_scratch_size(void) { return sizeof(ExecScratch); }
 
+static void fd_name(char *out, const char *prefix, int fd)
+{
+    char digits[12];
+    int count = 0;
+    unsigned value = (unsigned)fd;
+    strcpy(out, prefix);
+    out += strlen(out);
+    do { digits[count++] = '0' + value % 10; value /= 10; } while (value);
+    while (count) *out++ = digits[--count];
+    *out = 0;
+}
+
 static int read_executable(const char *path, int nofollow, char header[256])
 {
     struct stat st;
+    /* Resolved host paths are final; /proc/self/fd/N (fexecve) is followed. */
     long ret = raw_syscall(SYS_newfstatat, AT_FDCWD, (long)path, (long)&st,
-                          AT_SYMLINK_NOFOLLOW, 0, 0);
+                          nofollow ? AT_SYMLINK_NOFOLLOW : 0, 0, 0);
     if (ret < 0)
         return (int)ret;
     if (nofollow && (st.st_mode & S_IFMT) == S_IFLNK)
@@ -136,18 +150,37 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         return -EINVAL;
     if (!path)
         return -EFAULT;
-    char named[CONFIG_MAX_PATH];
+    /* fexecve runs the object the FD names, never whatever its name
+     * resolves to now: the child loader opens it through /proc/self/fd. Like
+     * the kernel, only a regular executable qualifies (a directory or an
+     * O_PATH symlink FD is EACCES), AT_EXECFN and a script's file argument
+     * are /dev/fd/N, and a script behind an O_CLOEXEC FD is ENOENT. */
+    char fd_host[32] = "", fd_guest[32] = "";
+    char named[CONFIG_MAX_PATH] = "";
+    int exec_fd = -1;
     if (!*path) {
         if (!(flags & AT_EMPTY_PATH))
             return -ENOENT;
-        /* fexecve: the FD names the program. Execute it by its guest name,
-         * so resolution, interpreter and policy match a pathname exec. */
-        int rc = proot_fd_guest_path(dirfd, named, sizeof(named));
+        struct stat st;
+        long rc = raw_syscall(__NR_fstat, dirfd, (long)&st, 0, 0, 0, 0);
         if (rc < 0)
             return rc;
-        path = named;
-        dirfd = AT_FDCWD;
-        flags &= ~AT_EMPTY_PATH;
+        if ((st.st_mode & S_IFMT) != S_IFREG)
+            return -EACCES;
+        fd_name(fd_host, "/proc/self/fd/", dirfd);
+        fd_name(fd_guest, "/dev/fd/", dirfd);
+        rc = raw_syscall(SYS_faccessat, AT_FDCWD, (long)fd_host, 1, 0, 0, 0);
+        if (rc < 0)
+            return rc;
+        /* /proc/self/exe: the guest name, else the kernel's own link text. */
+        if (proot_fd_guest_path(dirfd, named, sizeof(named)) < 0) {
+            rc = raw_syscall(SYS_readlinkat, AT_FDCWD, (long)fd_host, (long)named,
+                             sizeof(named) - 1, 0, 0);
+            named[rc > 0 ? rc : 0] = 0;
+            if (rc <= 0) strcpy(named, fd_guest);
+        }
+        exec_fd = dirfd;
+        path = fd_guest;
     }
     /* Preserve debugger policy explicitly rather than silently losing it. */
     if (cfg->hook_range_set || cfg->hook_range_interp_set)
@@ -179,10 +212,21 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
 #ifdef FD_EXPERIMENT
     long transport = -1;
 #endif
-    long ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
-                                       s->guest, s->host, sizeof(s->host), context);
-    if (ret < 0)
-        goto done;
+    long ret;
+    long fd_copy = -1;
+    if (exec_fd >= 0) {
+        /* The guest's FD may be close-on-exec: the chain gets its own copy,
+         * which the child loader closes once it has opened the program. */
+        fd_copy = raw_syscall(__NR_fcntl, exec_fd, F_DUPFD, 3, 0, 0, 0);
+        if (fd_copy < 0) { ret = fd_copy; goto done; }
+        fd_name(s->host, "/proc/self/fd/", (int)fd_copy);
+        strcpy(s->guest, named);
+    } else {
+        ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
+                                      s->guest, s->host, sizeof(s->host), context);
+        if (ret < 0)
+            goto done;
+    }
     if (!strcmp(s->host, cfg->loader_path)) {
         ret = -EPERM;
         goto done;
@@ -216,6 +260,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
             if (*arg) optional_arg = arg;
         }
         if (!*interpreter) { ret = -ENOEXEC; goto done; }
+        if (!depth && exec_fd >= 0) {
+            long fd_flags = raw_syscall(__NR_fcntl, exec_fd, F_GETFD, 0, 0, 0, 0);
+            if (fd_flags < 0 || (fd_flags & FD_CLOEXEC)) { ret = -ENOENT; goto done; }
+        }
         names[depth] = interpreter;
         options[depth++] = optional_arg;
         ret = proot_resolve_exec_path(AT_FDCWD, interpreter, true,
@@ -270,7 +318,12 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = "--exec-target";
     s->argv[pos++] = target;
     s->argv[pos++] = "--exec-path";
-    s->argv[pos++] = s->guest;
+    s->argv[pos++] = exec_fd >= 0 ? fd_guest : s->guest;
+    if (exec_fd >= 0) {
+        fd_name(s->exec_fd, "", (int)fd_copy);
+        s->argv[pos++] = CONFIG_CHILD_EXEC_FD;
+        s->argv[pos++] = s->exec_fd;
+    }
     /* The kernel's exe for a script is its interpreter. */
     s->argv[pos++] = CONFIG_CHILD_EXEC_EXE;
     s->argv[pos++] = script ? s->interpreter_guest : s->guest;
@@ -335,7 +388,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
             s->argv[pos++] = names[level];
             if (options[level]) s->argv[pos++] = options[level];
         }
-        s->argv[pos++] = s->guest;
+        s->argv[pos++] = exec_fd >= 0 ? fd_guest : s->guest;
         for (size_t i = 1; i < argc; i++) s->argv[pos++] = argv[i];
     } else if (argc) {
         for (size_t i = 0; i < argc; i++) s->argv[pos++] = argv[i];
@@ -357,6 +410,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
 #ifdef FD_EXPERIMENT
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
 #endif
+    if (fd_copy >= 0) raw_syscall(__NR_close, fd_copy, 0, 0, 0, 0, 0);
     if (argv_bytes) raw_syscall(__NR_munmap, (long)s->argv, (long)argv_bytes, 0, 0, 0, 0);
     proot_scratch_free((void *)mem,sizeof(ExecScratch));
     return ret;
