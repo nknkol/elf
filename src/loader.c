@@ -502,7 +502,11 @@ static void loader_sigsegv_handler(int sig, siginfo_t *si, void *ucontext)
 	}
 #endif
 
-	z_exit(128 + SIGSEGV);
+	/* Die of the signal itself, as the program would natively. */
+	k_sigaction_t dfl;
+	z_memset(&dfl, 0, sizeof(dfl));
+	dbg_rt_sigaction(sig, &dfl, NULL);
+	z_syscall(__NR_tgkill, z_syscall(__NR_getpid), z_syscall(__NR_gettid), sig);
 }
 
 static int install_guest_debugger(void)
@@ -3145,7 +3149,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		*sp = new_argc;
 	}
 
-	if (install_guest_debugger() < 0)
+	/* Diagnostics only: the guest sees no handler or alternate stack of
+	 * ours unless logging was asked for (its own handlers replace it). */
+	if (bootstrap_cfg.log_level != LOG_LEVEL_NONE && install_guest_debugger() < 0)
 		z_printf("[Debugger] SIGSEGV debugger setup failed, continuing without it\n");
 #if defined(PROOT_PATH) && defined(__aarch64__)
 	if (bootstrap_cfg.seccomp_backstop) {
