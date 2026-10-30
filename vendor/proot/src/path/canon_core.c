@@ -117,8 +117,6 @@ static inline Finality next_component(char component[NAME_MAX],
 int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
 		 char guest_path[PATH_MAX], unsigned int recursion_level)
 {
-    char scratch_path[PATH_MAX];
-    char host_path[PATH_MAX];
     Finality finality;
     const char *cursor;
     int status;
@@ -126,6 +124,10 @@ int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
     if (!ctx || !ctx->ops || !ctx->ops->lookup || !ctx->ops->readlink ||
         !ctx->ops->detranslate || !ctx->ops->proc_link || !user_path || !guest_path)
         return -EINVAL;
+    char (*frame)[PATH_MAX] = recursion_level < ctx->frame_count ?
+        ctx->frames[recursion_level] : __builtin_alloca(2 * PATH_MAX);
+    char *scratch_path = frame[0];
+    char *host_path = frame[1];
 
     /* Avoid infinite loop on circular links.  */
     if (recursion_level > MAXSYMLINKS)
@@ -248,10 +250,10 @@ int canonicalize_core(PathContext *ctx, const char *user_path, bool deref_final,
 	    break;
 	}
 
-	status = ctx->ops->readlink(ctx->opaque, host_path, scratch_path, sizeof(scratch_path));
+	status = ctx->ops->readlink(ctx->opaque, host_path, scratch_path, PATH_MAX);
 	if (status < 0)
 	    return status;
-	else if (status == sizeof(scratch_path))
+	else if (status == PATH_MAX)
 	    return -ENAMETOOLONG;
 	scratch_path[status] = '\0';
 

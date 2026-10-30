@@ -268,6 +268,15 @@ dpkg 占满 CPU）。现在 exec 前让出本线程的表槽、失败时尽力�
 表满时回收不再是本进程存活线程的属主（tgkill(getpid, tid) 报告 ESRCH；复用的 TID 只会推迟回收）。重入表改为
 每进程私有（与 FD 实验一致），fork 子进程复制来的父进程其他线程租约在表满时同样被回收。新增 process_tree 用例
 （100 个顺序、40 个并发 exec 子进程，修复前第 33 个失败）和 guard_test 的回收/让出单元检查。
+2026-10-30 小栈子进程修复：真机上 pip 构建依赖时 CPython 的 vfork 子进程随机（按地址布局）以 SIGSEGV 退出，
+信号在子进程中被屏蔽，没有转储。经临时在派发入口解除 SIGSEGV 屏蔽取得寄存器：默认构建的旧 overlay
+getdents64 在函数入口即预留 132 KiB 的 whiteout 表，CPython 子进程 exec 前用 getdents64 扫描 /proc/self/fd 时
+越过栈底。现在无 overlay 时直接透传，合并逻辑移入独立函数。同时把路径遍历的大缓冲移出 guest 栈：
+canonicalize_core 每跟随一层符号链接要 8 KiB，glibc posix_spawn 的子进程栈约 36 KiB，venv 的 python 符号链接链
+即可耗尽；现由 Bridge 提供 6 层帧与 resolve 暂存（更深的层级仍用栈），host_fd 与反向映射的缓冲也移入 Bridge。
+真机 Ubuntu rootfs（放在大小写敏感的应用私有存储上）中 gcc 编译运行动态/静态/多线程程序、git clone、
+python3 -m venv、pip install（含构建隔离与 gcc 调用）均通过；共享存储大小写不敏感，linux-libc-dev
+（xt_CONNMARK.h 与 xt_connmark.h）无法在其上解包，这是存储限制，PRoot 同样无法解决。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

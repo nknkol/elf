@@ -12,6 +12,8 @@ typedef struct {
     const char *cwd;
     int (*dirfd_guest)(void *, int, char [PATH_MAX]);
     int (*guest_to_host)(void *, const char *, char [PATH_MAX]);
+    /* Optional base and joined-path scratch (two PATH_MAX buffers). */
+    char (*scratch)[PATH_MAX];
 } PathResolver;
 int resolve_path_core(PathResolver *, int, const char *, bool,
                       char [PATH_MAX], char [PATH_MAX]);

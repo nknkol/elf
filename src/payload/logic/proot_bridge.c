@@ -71,6 +71,12 @@ typedef struct {
     char proc_guest[PATH_MAX], proc_host[PATH_MAX], proc_link_host[PATH_MAX];
     char proc_data[8192]; /* A loader-run process's kernel cmdline. */
     char proc_candidate[PATH_MAX];
+    /* Path walking scratch kept off the guest stack: a vfork child may run
+     * on a small spawn stack (glibc posix_spawn gives about 36 KiB), and
+     * each followed symlink would otherwise cost 8 KiB of it. */
+    char path_frames[6][2][PATH_MAX];
+    char resolve_scratch[2][PATH_MAX];
+    char fd_host[PATH_MAX], mapped[PATH_MAX];
 } Bridge;
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
@@ -605,7 +611,7 @@ static int proc_link(void *opaque, char *out, const char *path,
  * modeled yet: reject such names rather than traverse a different object. */
 static int visible_guest_path(Bridge *b, const char *host, char *guest)
 {
-    char mapped[PATH_MAX];
+    char *mapped = b->mapped;
     if (glue_guest(host, guest)) return 0;
     int rc = binding_table_map(&b->table, HOST, host, guest);
     if (rc < 0) return rc;
@@ -634,7 +640,7 @@ static int observed_guest_path(Bridge *b, const char *host, char *guest)
     rc = binding_table_mount_id(&b->table, guest, &mapped_id);
     if (rc < 0) return rc;
     if (mapped_id != id) return -EXDEV;
-    char mapped[PATH_MAX];
+    char *mapped = b->mapped;
     rc = binding_table_map(&b->table, GUEST, guest, mapped);
     if (rc < 0) return rc;
     return strcmp(host, mapped) ? -EXDEV : 0;
@@ -686,7 +692,7 @@ static int host_fd(void *opaque, int fd, char *guest)
     if ((st.st_mode & S_IFMT) != S_IFDIR)
         return -ENOTDIR;
 
-    char link[64] = "/proc/self/fd/", digits[16], host[PATH_MAX];
+    char link[64] = "/proc/self/fd/", digits[16], *host = b->fd_host;
     unsigned int value = (unsigned int)fd;
     size_t count = 0, pos = strlen(link);
     do {
@@ -697,7 +703,7 @@ static int host_fd(void *opaque, int fd, char *guest)
         link[pos++] = digits[--count];
     link[pos] = 0;
 
-    int rc = host_readlink(opaque, link, host, sizeof(host));
+    int rc = host_readlink(opaque, link, host, PATH_MAX);
     if (rc < 0)
         return rc;
     if (rc >= PATH_MAX)
@@ -736,7 +742,8 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
     ops.readlink = host_readlink;
     ops.detranslate = ordinary_link;
     ops.proc_link = proc_link;
-    PathResolver resolver = {{b, &ops}, b->cwd, host_fd, host_map};
+    PathResolver resolver = {{b, &ops, b->path_frames, 6}, b->cwd, host_fd, host_map,
+                             b->resolve_scratch};
     b->follow_final = follow;
     int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
     if (rc >= 0) {

@@ -830,9 +830,23 @@ static long vfs_emit_dirents(struct vfs_dir_cache *cache, void *dirp,
     return (long)written;
 }
 
+/* The overlay merge below needs a 128 KiB whiteout table on the stack. Keep
+ * it out of the common path: a vfork child (CPython scans /proc/self/fd with
+ * getdents64 before exec) may run on a small stack, and the prologue would
+ * reserve the whole frame even when no overlay applies. */
+static long vfs_getdents64_merge(int fd, void *dirp, unsigned int count)
+    __attribute__((noinline));
+
 long vfs_getdents64(int fd, void *dirp, unsigned int count)
 {
     vfs_ensure_init();
+    if (!g_vfs_state.overlay_count)
+        return raw_syscall(SYS_getdents64, fd, (long)dirp, count, 0, 0, 0);
+    return vfs_getdents64_merge(fd, dirp, count);
+}
+
+static long vfs_getdents64_merge(int fd, void *dirp, unsigned int count)
+{
     char fd_buf[32];
     int fd_buf_valid = 0;
     if (log_debug_enabled()) {

@@ -41,6 +41,11 @@ typedef struct {
 typedef struct {
     void *opaque;
     const PathOps *ops;
+    /* Optional per-recursion-level scratch (two PATH_MAX buffers each), so
+     * a caller on a small stack (a vfork child's spawn stack) does not pay
+     * 8 KiB of stack per followed symlink. Levels beyond it use the stack. */
+    char (*frames)[2][PATH_MAX];
+    unsigned int frame_count;
 } PathContext;
 
 int canonicalize_core(PathContext *, const char *, bool, char [PATH_MAX], unsigned int);

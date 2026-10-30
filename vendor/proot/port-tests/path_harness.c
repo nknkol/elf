@@ -65,7 +65,7 @@ int main(int argc, char **argv)
     Fixture fixture = {{argv[1], bindings, 1}};
     if (binding_table_validate(&fixture.table) < 0) return 2;
     const PathOps ops = {lookup, read_link, reverse, proc_link};
-    PathResolver resolver = {{&fixture, &ops}, argv[3], fd_guest, map};
+    PathResolver resolver = {{&fixture, &ops, NULL, 0}, argv[3], fd_guest, map, NULL};
     int fd = AT_FDCWD;
     if (strcmp(argv[6], "-") != 0) {
         fd = open(argv[6], O_RDONLY | O_CLOEXEC);

@@ -6,11 +6,12 @@
 int resolve_path_core(PathResolver *ctx, int dirfd, const char *path,
                       bool follow, char guest[PATH_MAX], char host[PATH_MAX])
 {
-    char base[PATH_MAX], joined[PATH_MAX];
     int rc;
     if (!ctx || !path || !guest || !host || guest == host ||
         !ctx->guest_to_host)
         return -EINVAL;
+    char (*scratch)[PATH_MAX] = ctx->scratch ? ctx->scratch : __builtin_alloca(2 * PATH_MAX);
+    char *base = scratch[0], *joined = scratch[1];
     /* AT_EMPTY_PATH belongs to syscall/FD handling, not pathname walking. */
     if (!*path)
         return -ENOENT;

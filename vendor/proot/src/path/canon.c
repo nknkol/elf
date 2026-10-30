@@ -124,6 +124,6 @@ int canonicalize(Tracee *tracee, const char *path, bool deref_final,
     static const PathOps ops = {
         tracee_lookup, tracee_readlink, tracee_detranslate, tracee_proc_link
     };
-    PathContext ctx = { tracee, &ops };
+    PathContext ctx = { tracee, &ops, NULL, 0 };
     return canonicalize_core(&ctx, path, deref_final, guest, level);
 }
