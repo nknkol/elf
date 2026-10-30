@@ -55,7 +55,15 @@ typedef struct {
     /* The final lstat of a followed resolution found no symlink: that is
      * the stat result for the same host path (saves one host walk). */
     bool final_valid;
+    /* final_stat describes the object b->host names (checked before the
+     * guarded walk rewrites b->host; the walk pins that same inode). */
+    bool final_match;
     struct stat final_stat;
+    /* Guarded modes: the final call goes through a directory descriptor
+     * walked component by component without following symlinks, so a
+     * component swapped for a symlink after resolution cannot redirect it. */
+    bool secure;
+    int walk_fd[4], walk_count;
 #ifdef FD_EXPERIMENT
     bool reads; /* Immutable read policy snapshot below is active. */
     enum fs_access access[CONFIG_MAX_BINDS + 1];
@@ -738,6 +746,143 @@ static long guest_cwd(Bridge *b)
 }
 
 static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow);
+
+#ifdef FD_EXPERIMENT
+#define RACED 1 /* secure_host: a component changed into a non-directory. */
+/* Replaces b->host by "/proc/self/fd/N/<last>" where N is the parent
+ * directory, opened from the mount's configured host root one component at
+ * a time with O_NOFOLLOW: no intermediate component is looked up by name
+ * again, so swapping one for a symlink after resolution cannot send the call
+ * outside the view (PRoot itself has this race). Only the final component
+ * is looked up by the kernel, with the call's own follow semantics. */
+/* One O_PATH descriptor per mount root, opened once per process (a full
+ * host path walk is the expensive part on this storage), kept at a high
+ * number and close-on-exec. The guest may close or reuse that number, so
+ * each use checks it still names the same directory, else reopens it. */
+static long mount_root_fd[CONFIG_MAX_BINDS + 1];
+static unsigned long mount_root_dev[CONFIG_MAX_BINDS + 1], mount_root_ino[CONFIG_MAX_BINDS + 1];
+
+static long mount_root(Bridge *b, size_t mount, const char *prefix, size_t plen)
+{
+    long fd = __atomic_load_n(&mount_root_fd[mount], __ATOMIC_ACQUIRE) - 1;
+    struct stat st;
+    if (fd >= 0 && !raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) &&
+        st.st_dev == __atomic_load_n(&mount_root_dev[mount], __ATOMIC_ACQUIRE) &&
+        st.st_ino == __atomic_load_n(&mount_root_ino[mount], __ATOMIC_ACQUIRE) &&
+        (st.st_mode & S_IFMT) == S_IFDIR)
+        return fd;
+    memcpy(b->mapped, plen ? prefix : "/", plen ? plen : 1);
+    b->mapped[plen ? plen : 1] = 0;
+    long opened = raw_syscall(SYS_openat, AT_FDCWD, (long)b->mapped,
+                              O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
+    if (opened < 0) return opened;
+    long high = raw_syscall(__NR_fcntl, opened, F_DUPFD_CLOEXEC, 512, 0, 0, 0);
+    if (high >= 0) { raw_syscall(__NR_close, opened, 0, 0, 0, 0, 0); opened = high; }
+    if (raw_syscall(__NR_fstat, opened, (long)&st, 0, 0, 0, 0) < 0) return opened;
+    /* Publish; a concurrent opener's copy is simply kept by whoever won. */
+    __atomic_store_n(&mount_root_dev[mount], st.st_dev, __ATOMIC_RELEASE);
+    __atomic_store_n(&mount_root_ino[mount], st.st_ino, __ATOMIC_RELEASE);
+    __atomic_store_n(&mount_root_fd[mount], opened + 1, __ATOMIC_RELEASE);
+    return opened;
+}
+
+static int secure_host(Bridge *b)
+{
+    if (!b->secure) return 0;
+    if (b->walk_count >= 4) return -ENFILE; /* Never fall back to an unwalked path. */
+    size_t mount;
+    if (binding_table_mount_id(&b->table, b->guest, &mount) < 0) return 0;
+    const char *prefix = mount ? b->table.entries[mount - 1].host : b->table.root;
+    size_t plen = strlen(prefix);
+    while (plen > 1 && prefix[plen - 1] == '/') plen--;
+    /* Kernel magic links (/proc/self, fd links) are meant to be followed. */
+    if (!strncmp(prefix, "/proc", 5) && (plen == 5 || prefix[5] == '/')) return 0;
+    if (plen == 1) plen = 0; /* Root "/": every component is walked. */
+    if (strncmp(b->host, prefix, plen) || (b->host[plen] && b->host[plen] != '/'))
+        return 0; /* Not under its mount's host root (the glue tree). */
+    const char *rest = b->host + plen;
+    size_t end = strlen(rest);
+    while (end && rest[end - 1] == '/') end--;
+    if (!end) return 0; /* The mount root itself. */
+    size_t base = end;
+    while (base && rest[base - 1] != '/') base--;
+    if (plen >= PATH_MAX) return -ENAMETOOLONG;
+    long root = mount_root(b, mount, prefix, plen);
+    if (root < 0) return (int)root;
+    long dir = root; /* Cached: never closed here. */
+    for (size_t at = 0; at < base;) {
+        while (at < base && rest[at] == '/') at++;
+        size_t next = at;
+        while (next < base && rest[next] != '/') next++;
+        if (next == at) break;
+        memcpy(b->mapped, rest + at, next - at);
+        b->mapped[next - at] = 0;
+        long child = raw_syscall(SYS_openat, dir, (long)b->mapped,
+                                 O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0);
+        if (dir != root) raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0);
+        if (child < 0) return child == -ELOOP || child == -ENOTDIR ? RACED : (int)child;
+        dir = child;
+        at = next;
+    }
+    if (dir == root) {
+        /* The parent is the mount root: hold a private copy for the call. */
+        dir = raw_syscall(__NR_fcntl, root, F_DUPFD_CLOEXEC, 256, 0, 0, 0);
+        if (dir < 0) return (int)dir;
+    }
+    /* A followed final name is held by inode, so a symlink swapped in now
+     * is never followed; the call then names that inode through its magic
+     * link. If resolution looked at it, it must be the same file (dev/ino),
+     * else it is resolved again; a symlink is always a race; missing stays
+     * ENOENT. Deferred opens keep the name and use O_NOFOLLOW instead. */
+    bool whole = b->follow_final && !b->defer_final;
+    if (whole) {
+        memcpy(b->mapped, rest + base, end - base);
+        b->mapped[end - base] = 0;
+        long node = raw_syscall(SYS_openat, dir, (long)b->mapped, O_PATH | O_NOFOLLOW | O_CLOEXEC,
+                                0, 0, 0);
+        raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0);
+        if (node < 0) return (int)node;
+        /* "." and trailing slashes name the directory itself. */
+        struct stat now;
+        if (raw_syscall(__NR_fstat, node, (long)&now, 0, 0, 0, 0) < 0 ||
+            (now.st_mode & S_IFMT) == S_IFLNK ||
+            (b->final_valid && (now.st_dev != b->final_stat.st_dev ||
+                                now.st_ino != b->final_stat.st_ino))) {
+            raw_syscall(__NR_close, node, 0, 0, 0, 0, 0);
+            return RACED;
+        }
+        dir = node;
+    }
+    /* Held across the guest's call: keep it off the low numbers, which the
+     * call itself may need (open after close(1) must get 1). */
+    long high = raw_syscall(__NR_fcntl, dir, F_DUPFD_CLOEXEC, 256, 0, 0, 0);
+    if (high >= 0) {
+        raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0);
+        dir = high;
+    }
+    char name[40] = "/proc/self/fd/";
+    size_t n = strlen(name);
+    char digits[12];
+    int count = 0;
+    unsigned long v = (unsigned long)dir;
+    do { digits[count++] = '0' + v % 10; v /= 10; } while (v);
+    while (count) name[n++] = digits[--count];
+    if (whole) {
+        name[n] = 0;
+        strcpy(b->host, name);
+        b->walk_fd[b->walk_count++] = (int)dir;
+        return 0;
+    }
+    name[n++] = '/';
+    size_t tail = strlen(rest + base);
+    if (n + tail >= PATH_MAX) { raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0); return -ENAMETOOLONG; }
+    memmove(b->host + n, rest + base, tail + 1);
+    memcpy(b->host, name, n);
+    b->walk_fd[b->walk_count++] = (int)dir;
+    return 0;
+}
+#endif
+
 /* A deferred final lookup does not know where a final symlink points, and
  * policy decisions may depend on its target: any failure is resolved again
  * with the full lookup before it is reported. */
@@ -748,6 +893,17 @@ static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
         b->defer_final = false;
         rc = resolve_once(b, dirfd, path, follow);
     }
+    b->final_match = rc >= 0 && b->final_valid && !strcmp(b->final_host, b->host);
+#ifdef FD_EXPERIMENT
+    /* A race seen by the secure walk is resolved once more, then refused. */
+    for (int attempt = 0; rc >= 0 && attempt < 2; attempt++) {
+        int s = secure_host(b);
+        if (s != RACED) return s < 0 ? s : rc;
+        if (attempt) return -ELOOP;
+        rc = resolve_once(b, dirfd, path, follow);
+        b->final_match = rc >= 0 && b->final_valid && !strcmp(b->final_host, b->host);
+    }
+#endif
     return rc;
 }
 
@@ -1178,6 +1334,12 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (number == __NR_bind || number == __NR_connect ||
         number == __NR_sendto || number == __NR_sendmsg)
         return socket_address(b, number, a);
+#ifdef FD_EXPERIMENT
+    /* Socket names keep their spelling (bind records it); exec resolves
+     * through proot_resolve_exec_path. Everything dispatched here is safe
+     * to issue through the walked parent directory. */
+    b->secure = g_payload_config.guard_path_mutations || g_payload_config.guard_file_reads;
+#endif
     long ret;
     switch (number) {
     case __NR_setxattr: case __NR_getxattr:
@@ -1356,8 +1518,7 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (number == SYS_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT)))
         ret = proc_cmdline(b, (int)a[2]);
     else ret = -ENOENT;
-    if (ret == -ENOENT && number == SYS_newfstatat && follow && b->final_valid &&
-        !strcmp(b->final_host, b->host)) {
+    if (ret == -ENOENT && number == SYS_newfstatat && follow && b->final_match) {
         /* Copied by the kernel so a bad buffer is still EFAULT. */
         struct { const void *base; size_t length; } local = {&b->final_stat, sizeof(b->final_stat)},
             remote = {(void *)a[2], sizeof(b->final_stat)};
@@ -1419,6 +1580,9 @@ static long bridge_acquire(void)
 }
 static void bridge_release(Bridge *b)
 {
+    for (int i = 0; i < b->walk_count; i++)
+        raw_syscall(__NR_close, b->walk_fd[i], 0, 0, 0, 0, 0);
+    b->walk_count = 0;
     for (int i = 0; i < BRIDGE_POOL; i++)
         if (__atomic_load_n(&bridge_pool[i], __ATOMIC_ACQUIRE) == b) {
             __atomic_store_n(&bridge_used[i], 0, __ATOMIC_RELEASE);
@@ -1443,6 +1607,9 @@ static long bridge_create(Bridge **out)
     b->mutation = false;
     b->attributes = false;
     b->creates = false;
+    b->final_match = false;
+    b->secure = false;
+    b->walk_count = 0;
     b->defer_final = false;
     b->final_valid = false;
     b->traverse = false;
