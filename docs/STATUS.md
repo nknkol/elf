@@ -258,6 +258,14 @@ rootfs 本身仍不创建任何目录。同时修正：读取保护下对已存�
 允许硬链接的存储保持真实链接。真机 Ubuntu rootfs 中 apt-get update、apt-get install（jq/file/tree）、
 dpkg --configure 与 apt-get remove 均成功，降权与 chown 依赖上一项伪 root 凭据。新增 link_copy 用例，
 test_svc 的硬链接用例改为按宿主能力判定链接或复制。
+2026-10-30 exec 参数数量增量：exec 链此前把 guest argv 限制为 127 项并返回 E2BIG，python3 postinst 用数百个
+文件名调用 py_compile 时失败。现在参数数量不再固定（上限 2^20 项），超过内联容量时另行映射指针数组，
+字节总量仍由内核在 execve 时按 E2BIG 裁决，与原生一致。vfork 子进程 exec 成功时这块映射留在共享的父进程中。
+2026-10-30 重入租约泄漏修复：默认构建的重入表跨 fork 共享（32 个槽）。从拦截调用内 exec 成功或在调用中死亡的
+进程从不归还租约，满 32 个后整棵进程树的拦截调用都得到 EAGAIN，调用者原地自旋（dpkg 解包时 dpkg-deb 失败、
+dpkg 占满 CPU）。现在 exec 前让出本线程的表槽、失败时尽力取回；入口改为只在槽仍属于自己时才释放；
+表满时回收 tkill 报告 ESRCH 的属主（复用的 TID 只会推迟回收，不会提前释放）。新增 process_tree 用例
+（100 个顺序、40 个并发 exec 子进程，修复前第 33 个失败）和 guard_test 的回收/让出单元检查。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

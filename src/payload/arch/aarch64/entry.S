@@ -94,6 +94,7 @@ slow_path:
 #endif
     tbnz    x0, #63, guard_error
     mov     x19, x0
+    ldr     x21, [x19] /* Owner TID: leave releases only its own lease. */
 
     /* Restore syscall number after C call clobbered caller-saved x8 */
     ldr     x8, [sp, #64]
@@ -106,7 +107,8 @@ slow_path:
     /* Write back return value into saved context */
     mov     x20, x0
     mov     x0, x19
-    bl      reentry_leave
+    mov     x1, x21
+    bl      reentry_leave_owned
     mov     x0, x20
 guard_error:
     /* Errors return to the guest without executing its syscall. */

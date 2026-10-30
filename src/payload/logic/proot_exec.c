@@ -9,6 +9,7 @@
 #include <string.h>
 #include "config.h"
 #include "fake_ids.h"
+#include "reentry_guard.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
 #include "proot_scratch.h"
@@ -348,8 +349,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     ret = raw_syscall(__NR_fcntl, transport, F_SETFD, 0, 0, 0, 0);
     if (ret < 0) goto done;
 #endif
+    struct reentry_slot *lease = reentry_exec_release();
     ret = raw_syscall(SYS_execve, (long)cfg->loader_path, (long)s->argv,
                       (long)env, 0, 0, 0);
+    reentry_exec_restore(lease);
  done:
 #ifdef FD_EXPERIMENT
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);

@@ -88,11 +88,24 @@ struct reentry_slot *reentry_try_enter(void)
     for (int i = 0; i < GUARD_SLOTS; i++)
         if (__atomic_load_n(&slots[i].tid, __ATOMIC_ACQUIRE) == tid)
             return NULL;
-    for (int i = 0; i < GUARD_SLOTS; i++) {
-        long empty = 0;
-        if (__atomic_compare_exchange_n(&slots[i].tid, &empty, tid, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            return &slots[i];
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < GUARD_SLOTS; i++) {
+            long empty = 0;
+            if (__atomic_compare_exchange_n(&slots[i].tid, &empty, tid, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                return &slots[i];
+        }
+        /* Full: an owner that died (or was killed) inside a call never left.
+         * The default build shares the table across fork, so such leases
+         * accumulate over a process tree (dpkg spawns hundreds of children).
+         * Only ESRCH proves death; a reused TID merely delays reclamation. */
+        for (int i = 0; !pass && i < GUARD_SLOTS; i++) {
+            long owner = __atomic_load_n(&slots[i].tid, __ATOMIC_ACQUIRE);
+            if (owner > 0 && owner != tid &&
+                raw_syscall(__NR_tkill, owner, 0, 0, 0, 0, 0) == -ESRCH)
+                __atomic_compare_exchange_n(&slots[i].tid, &owner, 0, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
     }
     /* Capacity is not recursion. Never silently bypass policy on exhaustion. */
     return (struct reentry_slot *)(intptr_t)-EAGAIN;
@@ -102,6 +115,40 @@ void reentry_leave(struct reentry_slot *slot)
 {
     if (slot)
         __atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
+}
+
+void reentry_leave_owned(struct reentry_slot *slot, long owner)
+{
+    if (slot)
+        __atomic_compare_exchange_n(&slot->tid, &owner, 0, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+struct reentry_slot *reentry_exec_release(void)
+{
+#ifdef FD_EXPERIMENT
+    return NULL; /* Per-process table: exec discards it with the VM. */
+#else
+    struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);
+    long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; table && tid > 0 && i < GUARD_SLOTS; i++) {
+        long owner = tid;
+        if (__atomic_compare_exchange_n(&table->slots[i].tid, &owner, 0, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return &table->slots[i];
+    }
+    return NULL;
+#endif
+}
+
+void reentry_exec_restore(struct reentry_slot *slot)
+{
+    /* Best effort: if another task took the slot meanwhile, the entry path's
+     * owner-checked leave will not release it on this thread's behalf. */
+    long empty = 0, tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
+    if (slot && tid > 0)
+        __atomic_compare_exchange_n(&slot->tid, &empty, tid, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
 void reentry_vfork_begin(long tid)

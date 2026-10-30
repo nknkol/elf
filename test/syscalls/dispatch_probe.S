@@ -56,10 +56,13 @@ reentry_try_enter:
     mov x0, #-11
     ret
 3:
-    mov x0, #1
+    adr x0, dummy_slot
     ret
 .global reentry_leave
 reentry_leave:
+    ret
+.global reentry_leave_owned
+reentry_leave_owned:
     ret
 .data
 .global g_payload_config
@@ -67,6 +70,8 @@ g_payload_config:
     .quad 0
 fail_guard:
     .quad 0
+dummy_slot:
+    .quad 1
 selected:
 #define SLOW_SYSCALL(n) .word n
 #include "slow_syscalls.inc"

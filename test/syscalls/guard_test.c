@@ -12,8 +12,10 @@
 static _Thread_local long simulated_tid;
 static int fail_mapping, nested_init;
 static int live_mappings;
+static long dead_tid; /* The one simulated owner that tkill reports as gone. */
 long raw_syscall(long n,long a,long b,long c,long d,long e,long f) {
     if(n == SYS_gettid)return simulated_tid ? simulated_tid : syscall(n);
+    if(n == SYS_tkill)return a==dead_tid ? -ESRCH : 0;
     assert(n == SYS_mmap || n == SYS_munmap);
     if(n==SYS_mmap && fail_mapping){fail_mapping=0;return -ENOMEM;}
     if(n==SYS_mmap && nested_init) {
@@ -149,7 +151,24 @@ int main(int argc,char **argv) {
     assert(!pthread_create(&thread,NULL,sender,&main_thread));
     worker(NULL);
     assert(!pthread_join(thread,NULL));assert(signals_seen>0);
+    /* A full table reclaims a dead owner's lease; that owner's late,
+     * owner-checked leave must not release the new holder. */
+    for(int i=0;i<32;i++) {simulated_tid=300+i;held[i]=reentry_try_enter();assert((intptr_t)held[i]>0);}
+    dead_tid=305;simulated_tid=998;
+    struct reentry_slot *taken=reentry_try_enter();assert(taken==held[5]);
+    reentry_leave_owned(held[5],305);
+    assert(reentry_try_enter()==NULL);
+    reentry_leave_owned(taken,998);dead_tid=0;
+    for(int i=0;i<32;i++)if(i!=5)reentry_leave(held[i]);
+    /* exec gives the table lease up and takes it back on failure. */
+    simulated_tid=997;struct reentry_slot *execing=reentry_try_enter();assert((intptr_t)execing>0);
+    assert(reentry_exec_release()==execing);
+    simulated_tid=996;struct reentry_slot *other=reentry_try_enter();assert(other==execing);
+    simulated_tid=997;reentry_exec_restore(execing); /* Taken meanwhile: no steal. */
+    reentry_leave_owned(execing,997);
+    simulated_tid=996;assert(reentry_try_enter()==NULL);reentry_leave_owned(other,996);
+    simulated_tid=0;
     if(fork_ownership())return 1;
     private_fork_ownership();
-    puts("PASS: fork ownership, guard reuse, recursion, capacity, 8 threads and asynchronous signals");
+    puts("PASS: fork ownership, guard reuse, recursion, capacity, dead-owner reclaim, exec release, 8 threads and asynchronous signals");
 }
