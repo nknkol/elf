@@ -298,6 +298,9 @@ python3 -m venv、pip install（含构建隔离与 gcc 调用）均通过；共�
 身份变为文件的报告属主（PRoot fake_id0 语义）；附加组由 setgroups/getgroups 模拟（初始 {0}，需伪特权，经
 `--fake-groups` 跨 exec）。新增 `--kernel-release`（PRoot -k）与 `--kernel-sysname`：鸿蒙内核的 uname
 sysname 不是 Linux，按 uname -s 识别系统的脚本（config.guess 等）需要后者。uname 进入共享慢路径（共 147 项）。
+2026-10-30 真实负载（真机 Ubuntu rootfs，应用私有存储，`--link-copy`）：apt 安装/卸载、gcc（动态/静态/多线程）、
+make -j8、git clone、python3 venv + pip（含从源码编译 C 扩展）、node 与 npm install、cargo 安装并编译运行
+hello 均通过。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
