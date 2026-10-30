@@ -858,7 +858,7 @@ err:
 	return -1;
 }
 
-static int create_loader_memfd(void)
+static __attribute__((unused)) int create_loader_memfd(void)
 {
 	int src = z_openat(AT_FDCWD, "/proc/self/exe", O_RDONLY);
 	if (src < 0) {
@@ -2234,6 +2234,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 	(void)fini;
 
+	/* Quiet until the configuration says otherwise. */
+	z_printf_enabled = 0;
 	argc = (int)*(sp);
 	argv = (char **)(sp + 1);
 	env = p = (char **)&argv[argc + 1];
@@ -2267,6 +2269,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	int target_index = 0;
 	parse_cli_options(argc, argv, &bootstrap_cfg, &child_loader, &target_index,
 			  &shell_mode, &child_proto);
+	z_printf_enabled = bootstrap_cfg.log_level != LOG_LEVEL_NONE;
 #ifdef FD_EXPERIMENT
     if (bootstrap_cfg.mount_access_observe[0] &&
         z_strlen(bootstrap_cfg.mount_access_observe) != (size_t)bootstrap_cfg.bind_count + 1)
@@ -2304,7 +2307,13 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		}
 	}
 
+#ifdef PROOT_PATH
+	/* The PRoot backends re-exec loader_path; only the legacy exec handler
+	 * uses this copy, which would also stay open in every guest. */
+	loader_memfd = -1;
+#else
 	loader_memfd = create_loader_memfd();
+#endif
 	bootstrap_cfg.loader_fd = loader_memfd;
 	bootstrap_cfg.loader_norecurse = 1;
 	if (loader_path) {

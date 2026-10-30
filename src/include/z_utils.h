@@ -17,6 +17,7 @@ size_t	z_strlen(const char *s);
 
 void	z_vprintf(const char *fmt, va_list ap);
 void	z_vfdprintf(int fd, const char *fmt, va_list ap);
+extern int z_printf_enabled;
 void	z_printf(const char *fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
 void	z_fdprintf(int fd, const char *fmt, ...)

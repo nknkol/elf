@@ -42,11 +42,17 @@ z_flushbuf()
 	}
 }
 
+/* Diagnostics go to the guest's stderr: silent unless logging was asked for
+ * (z_errx and crash dumps still print). */
+int z_printf_enabled = 1;
+
 void
 z_printf(const char *fmt, ...)
 {
 	va_list ap;
 
+	if (!z_printf_enabled)
+		return;
 	va_start(ap, fmt);
 	kdoprnt(2, fmt, ap);
 	va_end(ap);
@@ -55,6 +61,8 @@ z_printf(const char *fmt, ...)
 void
 z_vprintf(const char *fmt, va_list ap)
 {
+	if (!z_printf_enabled)
+		return;
 	kdoprnt(2, fmt, ap);
 }
 

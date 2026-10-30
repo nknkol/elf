@@ -32,6 +32,7 @@ check: build
 	$(PYTHON) test/fs_policy/fake_ids.py
 	$(PYTHON) test/fs_policy/link_copy.py
 	$(PYTHON) test/fs_policy/process_tree.py
+	$(PYTHON) test/fs_policy/quiet.py
 	$(PYTHON) test/fs_policy/glue.py
 	$(PYTHON) test/fs_policy/interp_links.py
 	$(PYTHON) vendor/proot/port-tests/test_inotify.py
