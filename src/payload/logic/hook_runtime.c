@@ -43,12 +43,13 @@ long island_pread(int fd, void *buf, size_t len, long offset)
 }
 
 /* Memory the guest's own mm calls must not unmap, remap or reprotect: the
- * loader image and its islands (from the config), the payload, and the
- * islands made at run time. Appended lock-free; fork copies it. */
+ * payload image and the loader image with its islands (fixed before the
+ * guest runs: the config the loader wrote), and the islands made at run
+ * time (appended lock-free; fork copies them). Nothing is lazily copied,
+ * so no check can see a half-filled table. */
 #define PROTECTED_MAX 4096
 static uintptr_t protected_lo[PROTECTED_MAX], protected_hi[PROTECTED_MAX];
 static unsigned protected_count;
-static int protected_loaded;
 extern char __ehdr_start[], _end[];
 
 /* Nonzero when the table is full: callers must not rely on protection. */
@@ -64,29 +65,21 @@ static int protected_add(uintptr_t lo, uintptr_t hi)
     return 0;
 }
 
-static void protected_load(void)
-{
-    int expected = 0;
-    if (!__atomic_compare_exchange_n(&protected_loaded, &expected, 1, 0,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        return;
-    protected_add((uintptr_t)__ehdr_start, ((uintptr_t)_end + 4095) & ~(uintptr_t)4095);
-    for (uint32_t i = 0; i < g_payload_config.protected_count && i < 64; i++)
-        protected_add((uintptr_t)g_payload_config.protected_ranges[i][0],
-                      (uintptr_t)g_payload_config.protected_ranges[i][1]);
-}
-
 int island_note(uintptr_t base, size_t len)
 {
-    protected_load();
     return protected_add(base, base + len);
 }
 
 int hook_protected_overlap(uintptr_t addr, size_t len)
 {
-    protected_load();
     if (!len) return 0;
     uintptr_t end = addr + len < addr ? (uintptr_t)-1 : addr + len;
+    if (addr < (((uintptr_t)_end + 4095) & ~(uintptr_t)4095) && end > (uintptr_t)__ehdr_start)
+        return 1;
+    for (uint32_t i = 0; i < g_payload_config.protected_count && i < 64; i++)
+        if (addr < g_payload_config.protected_ranges[i][1] &&
+            end > g_payload_config.protected_ranges[i][0])
+            return 1;
     unsigned n = __atomic_load_n(&protected_count, __ATOMIC_ACQUIRE);
     if (n > PROTECTED_MAX) n = PROTECTED_MAX;
     for (unsigned i = 0; i < n; i++) {
