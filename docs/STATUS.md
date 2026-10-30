@@ -289,6 +289,15 @@ python3 -m venv、pip install（含构建隔离与 gcc 调用）均通过；共�
   符号链接 FD 与脚本，fexecve_guard 覆盖读取保护。
 - 硬链接复制改为显式选项 `--link-copy`（类似 PRoot 的 -l），默认保留宿主错误；复制得到的是独立文件，不是
   硬链接语义。设置模式或时间失败时删除副本并返回原错误。dpkg 在拒绝硬链接的存储上需要此选项。
+2026-10-30 性能与可见性：跟随型 stat 复用最终 lstat 的结果（内核仍负责写回，坏缓冲区仍为 EFAULT），跟随型 open
+先以 O_NOFOLLOW 打开、遇 ELOOP 或任何失败（含策略拒绝）再完整解析；真机 stat 从 3.1x 降到 2.4x，open+close
+从 2.4x 降到 1.8x。loader 不再向 guest 留下 memfd 描述符（PRoot 构建从不使用），诊断输出默认不再写入 guest
+的 stderr（只有设置日志级别时输出，致命错误和崩溃转储仍输出）。真机 git status 约为原生的 1.1 倍；每次 exec
+约多 13 ms（主要是 loader 以匿名内存复制目标 ELF 以绕过签名）。
+2026-10-30 身份与 uname：exec 设置了 set-user/group-ID 位的程序（脚本按其解释器）时，新映像的有效、保存与 fs
+身份变为文件的报告属主（PRoot fake_id0 语义）；附加组由 setgroups/getgroups 模拟（初始 {0}，需伪特权，经
+`--fake-groups` 跨 exec）。新增 `--kernel-release`（PRoot -k）与 `--kernel-sysname`：鸿蒙内核的 uname
+sysname 不是 Linux，按 uname -s 识别系统的脚本（config.guess 等）需要后者。uname 进入共享慢路径（共 147 项）。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 路径竞争未处理；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -328,7 +337,7 @@ python3 -m venv、pip install（含构建隔离与 gcc 调用）均通过；共�
 `make check` 不含 FD 实验工作流；两套都通过才能支持上表结论。
 构建与离线验收报告位于忽略目录 `vendor/proot/svc/build/`；不提交二进制或 rootfs。
 当前全量扫描记录是 98 个参数配方、13 个不同 SIGSYS 编号，不是所有 syscall 的证明。
-共享慢路径 146 项表示“进入处理器”，不能作为“实现 146 项”的完成率。
+共享慢路径 147 项表示“进入处理器”，不能作为“实现 147 项”的完成率。
 固定危险调用回归另包含 fchmodat2，共 14 项；close_range 有单独的拒绝/回退测试。
 原生配方、支持子集和错误路径都需分别看待，不能把 ENOSYS 算作功能实现。
 

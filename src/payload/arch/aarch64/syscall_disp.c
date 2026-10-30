@@ -1,5 +1,6 @@
 #include <asm/unistd.h>
 #include <errno.h>
+#include <string.h>
 #include "syscall_nums.h"
 #include "syscall_hooks.h"
 #include "config.h"
@@ -49,6 +50,16 @@ static void collect_owners(void)
     owner_count = n;
     __atomic_store_n(&owner_state, 2, __ATOMIC_RELEASE);
 }
+#ifdef PROOT_PATH
+uint32_t fake_reported_owner(uint32_t id, int group)
+{
+    collect_owners();
+    if (__atomic_load_n(&owner_state, __ATOMIC_ACQUIRE) != 2) return id;
+    for (int i = 0; i < owner_count; i++)
+        if (id == (group ? owner_gid[i] : owner_uid[i])) return fake_ids_owner(group);
+    return id;
+}
+#endif
 static void fake_owner(long sys_no, const long *a)
 {
     unsigned char *buffer;
@@ -101,6 +112,15 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     long ret = syscall_handle_common(sys_no, args);
 #endif
     if (!ret) fake_owner(sys_no, a);
+#ifdef PROOT_PATH
+    /* struct utsname: six 65-byte fields; sysname first, release third. */
+    if (!ret && sys_no == __NR_uname && a[0]) {
+        if (g_payload_config.kernel_sysname[0])
+            memcpy((char *)a[0], g_payload_config.kernel_sysname, 65);
+        if (g_payload_config.kernel_release[0])
+            memcpy((char *)a[0] + 130, g_payload_config.kernel_release, 65);
+    }
+#endif
 #ifdef PROOT_PATH
     if (ret >= 0 && capacity)
         proot_socket_name(sys_no, sys_no == __NR_accept || sys_no == __NR_accept4 ? ret : a[0],

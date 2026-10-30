@@ -433,3 +433,7 @@ SLOW_SYSCALL(__NR_removexattrat)
 SLOW_SYSCALL(__NR_open_tree_attr)
 SLOW_SYSCALL(__NR_file_getattr)
 SLOW_SYSCALL(__NR_file_setattr)
+#ifdef __NR_uname
+/* --kernel-release/--kernel-sysname rewrite the result. */
+SLOW_SYSCALL(__NR_uname)
+#endif

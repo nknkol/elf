@@ -26,13 +26,20 @@ try:
     os.chown(work + "/missing", 1, 1)
 except FileNotFoundError:
     out["missing"] = "ENOENT"
+out["groups0"] = os.getgroups()
+os.setgroups([5, 6])
+out["groups"] = os.getgroups()
+out["uname"] = [os.uname().sysname, os.uname().release]
+out["exec_groups"] = subprocess.run([sys.executable, "-B", "-c",
+                                     "import os; print(os.getgroups(), os.uname().release)"],
+                                    capture_output=True, text=True).stdout.strip()
 os.setgroups([])
 os.setresgid(105, 105, 105)
 os.setresuid(105, 105, 105)                      # apt's DropPrivileges.
 out["dropped"] = [os.getresuid(), os.getresgid(), os.getuid(), os.geteuid()]
 out["own_after"] = os.stat(path).st_uid          # Owner follows the saved id.
 for name, call in (("setuid0", lambda: os.setuid(0)), ("seteuid0", lambda: os.seteuid(0)),
-                   ("groups", lambda: os.setgroups([]))):
+                   ("groups_dropped", lambda: os.setgroups([]))):
     try:
         call(); out[name] = "allowed"
     except PermissionError:
@@ -52,6 +59,7 @@ with tempfile.TemporaryDirectory(prefix='fake-ids-', dir=build) as tmp:
         assert hashlib.sha256(loader.read_bytes()).hexdigest() == manifest['sha256']
         # The bind's host owner counts as the caller's (service-owned storage).
         p = subprocess.run([str(loader), '--mode', 'container', '--root', '/', '-v', f'{tmp}:/fake-ids',
+                            '--kernel-release', '6.1.0-elf', '--kernel-sysname', 'Linux',
                             '--', python.lstrip('/'), '-B', '-c', GUEST, '/fake-ids'],
                            cwd='/', capture_output=True, text=True, timeout=120)
         lines = [line for line in p.stdout.splitlines() if line.startswith('RESULT ')]
@@ -60,7 +68,9 @@ with tempfile.TemporaryDirectory(prefix='fake-ids-', dir=build) as tmp:
         expected = {'start': [[0, 0, 0], [0, 0, 0]], 'own': [0, 0], 'give': 'ok',
                     'missing': 'ENOENT',
                     'dropped': [[105, 105, 105], [105, 105, 105], 105, 105], 'own_after': 105,
-                    'setuid0': 'EPERM', 'seteuid0': 'EPERM', 'groups': 'EPERM',
+                    'setuid0': 'EPERM', 'seteuid0': 'EPERM', 'groups': [5, 6],
+                    'groups0': [0], 'uname': ['Linux', '6.1.0-elf'],
+                    'exec_groups': '[5, 6] 6.1.0-elf', 'groups_dropped': 'EPERM',
                     'exec': '(105, 105, 105) (105, 105, 105)'}
         assert out == expected, (suffix, out)
         Path(tmp, 'owned').unlink()

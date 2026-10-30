@@ -32,6 +32,8 @@ Clang、ld.lld、llvm-objcopy、llvm-ar、llvm-nm 及本地 Linux ABI 头文件�
 在拒绝硬链接的存储（HarmonyOS 共享存储、应用私有存储、Android FUSE）上运行 dpkg/apt 时，需要
 `--link-copy`：被拒绝的硬链接改为复制，得到的是独立文件而非共享 inode。默认不启用，保留宿主错误。
 glue 目录树位于 `PROOT_TMP_DIR`、`TMPDIR` 或 `/tmp`。
+`--kernel-release REL`（同 PRoot -k）与 `--kernel-sysname NAME` 改写 guest 看到的 uname；鸿蒙内核报告的
+sysname 不是 Linux，需要按 `uname -s` 识别系统的构建脚本时可加 `--kernel-sysname Linux`。
 构建入口强制重编译 loader/payload，通过临时文件替换可执行文件，生成：
 
 - `vendor/proot/svc/build/elfloader-proot`：运行工具。

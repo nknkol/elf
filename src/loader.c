@@ -1048,6 +1048,9 @@ static void init_payload_config(payload_config_t *cfg)
 		cfg->hook_max_interp = 0x7fffffff;
 		cfg->loader_norecurse = 1;
 		cfg->loader_fd = -1;
+#ifdef PROOT_PATH
+		cfg->fake_group_count = -1;
+#endif
 #ifdef FD_EXPERIMENT
 		cfg->fd_state = -1;
 #endif
@@ -1416,7 +1419,11 @@ static const char *find_config_path_arg(int argc, char **argv)
 		    z_strncmp(arg, CONFIG_CHILD_FAKE_IDS,
 			      z_strlen(CONFIG_CHILD_FAKE_IDS) + 1) == 0 ||
 		    z_strncmp(arg, CONFIG_CHILD_EXEC_FD,
-			      z_strlen(CONFIG_CHILD_EXEC_FD) + 1) == 0) {
+			      z_strlen(CONFIG_CHILD_EXEC_FD) + 1) == 0 ||
+		    z_strncmp(arg, CONFIG_CHILD_FAKE_GROUPS,
+			      z_strlen(CONFIG_CHILD_FAKE_GROUPS) + 1) == 0 ||
+		    z_strncmp(arg, "--kernel-release", 17) == 0 ||
+		    z_strncmp(arg, "--kernel-sysname", 17) == 0) {
 			if (i + 1 >= argc)
 				z_errx(1, "missing value for %s", arg);
 			i++;
@@ -1605,6 +1612,41 @@ static int parse_cli_options(int argc, char **argv, payload_config_t *cfg,
 #ifdef PROOT_PATH
 		if (z_strncmp(arg, "--link-copy", 12) == 0) {
 			cfg->link_copy = 1;
+			continue;
+		}
+		if (z_strncmp(arg, "--kernel-release", 17) == 0 ||
+		    z_strncmp(arg, "--kernel-sysname", 17) == 0) {
+			char *field = arg[9] == 'r' ? cfg->kernel_release : cfg->kernel_sysname;
+			if (i + 1 >= argc || !argv[i + 1][0] || z_strlen(argv[i + 1]) >= 65)
+				z_errx(1, "invalid value for %s", arg);
+			copy_cstr(field, 65, argv[i + 1]);
+			i++;
+			continue;
+		}
+		if (z_strncmp(arg, CONFIG_CHILD_FAKE_GROUPS,
+			      z_strlen(CONFIG_CHILD_FAKE_GROUPS) + 1) == 0) {
+			const char *p = i + 1 < argc ? argv[i + 1] : NULL;
+			int count = 0;
+			if (p && !(p[0] == '-' && !p[1])) {
+				for (;;) {
+					unsigned long long value = 0;
+					const char *start = p;
+					while (*p >= '0' && *p <= '9' && value <= 0xffffffffULL)
+						value = value * 10 + (unsigned)(*p++ - '0');
+					if (p == start || value > 0xffffffffULL || count == 32 ||
+					    (*p && *p != ',')) {
+						p = NULL;
+						break;
+					}
+					cfg->fake_groups[count++] = (uint32_t)value;
+					if (!*p) break;
+					p++;
+				}
+			}
+			if (!p)
+				z_errx(1, "invalid value for %s", arg);
+			cfg->fake_group_count = count;
+			i++;
 			continue;
 		}
 		if (z_strncmp(arg, CONFIG_CHILD_GLUE_DIR,

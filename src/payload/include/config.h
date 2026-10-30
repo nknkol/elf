@@ -51,6 +51,8 @@
 #define CONFIG_CHILD_GLUE_DIR "--glue-dir"
 /* Guest credentials r:e:s:fs uid then gid (PRoot fake_id0), when not root. */
 #define CONFIG_CHILD_FAKE_IDS "--fake-ids"
+/* Supplementary groups, comma separated ("-" for none). */
+#define CONFIG_CHILD_FAKE_GROUPS "--fake-groups"
 /* fexecve: a descriptor of the program itself; the loader opens it through
  * /proc/self/fd and closes it. */
 #define CONFIG_CHILD_EXEC_FD "--exec-fd"
@@ -106,6 +108,12 @@ typedef struct payload_config {
     uint32_t fake_ids[8]; /* Guest r/e/s/fs uid then gid; all 0 initially. */
     /* --link-copy: a hard link the storage refuses becomes a copy. */
     int32_t link_copy;
+    /* Supplementary groups (PRoot fake_id0); fake_group_count < 0: {0}. */
+    int32_t fake_group_count;
+    uint32_t fake_groups[32];
+    /* uname overrides (PRoot -k for the release); empty keeps the kernel's. */
+    char kernel_release[65];
+    char kernel_sysname[65];
 #ifdef FD_EXPERIMENT
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */

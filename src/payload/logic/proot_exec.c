@@ -24,7 +24,7 @@
 /* Script levels the kernel follows (exec_binprm allows five rewrites
  * before ELOOP): the script plus four script interpreters. */
 #define SCRIPT_DEPTH 5
-#define CHAIN_EXTRA (40 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
+#define CHAIN_EXTRA (64 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
 #define CHAIN_ARGS (EXEC_ARGS + CHAIN_EXTRA)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
@@ -39,6 +39,7 @@ typedef struct {
     char **argv;
     char *inline_argv[CHAIN_ARGS];
     char fake_ids[8 * 11];
+    char fake_groups[32 * 11 + 2];
     char exec_fd[16];
 #ifdef FD_EXPERIMENT
     char fd_state[24];
@@ -336,7 +337,20 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = (char *)name;
     }
     uint32_t ids[8];
-    if (fake_ids_current(ids)) {
+    int changed = fake_ids_current(ids);
+    /* A set-user/group-ID program (the final ELF, interpreter for scripts)
+     * runs with its reported owner as effective, saved and fs id, like
+     * PRoot's fake_id0; only the new image gets them. */
+    struct stat program;
+    if (!raw_syscall(SYS_newfstatat, AT_FDCWD, (long)target, (long)&program, 0, 0, 0)) {
+        for (int group = 0; group < 2; group++) {
+            if (!(program.st_mode & (group ? 02000 : 04000))) continue;
+            uint32_t owner = fake_reported_owner(group ? program.st_gid : program.st_uid, group);
+            ids[group * 4 + 1] = ids[group * 4 + 2] = ids[group * 4 + 3] = owner;
+            changed |= owner != 0;
+        }
+    }
+    if (changed) {
         char *out = s->fake_ids;
         for (int i = 0; i < 8; i++) {
             char digits[12];
@@ -350,6 +364,31 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = s->fake_ids;
     }
     if (cfg->link_copy) s->argv[pos++] = "--link-copy";
+    uint32_t groups[32];
+    int group_count = fake_ids_groups(groups);
+    if (group_count != 1 || groups[0]) {
+        char *out = s->fake_groups;
+        if (!group_count) *out++ = '-';
+        for (int i = 0; i < group_count; i++) {
+            char digits[12];
+            int count = 0;
+            uint32_t value = groups[i];
+            do { digits[count++] = '0' + value % 10; value /= 10; } while (value);
+            while (count) *out++ = digits[--count];
+            if (i + 1 < group_count) *out++ = ',';
+        }
+        *out = 0;
+        s->argv[pos++] = CONFIG_CHILD_FAKE_GROUPS;
+        s->argv[pos++] = s->fake_groups;
+    }
+    if (cfg->kernel_release[0]) {
+        s->argv[pos++] = "--kernel-release";
+        s->argv[pos++] = cfg->kernel_release;
+    }
+    if (cfg->kernel_sysname[0]) {
+        s->argv[pos++] = "--kernel-sysname";
+        s->argv[pos++] = cfg->kernel_sysname;
+    }
     if (cfg->glue_dir[0]) {
         s->argv[pos++] = CONFIG_CHILD_GLUE_DIR;
         s->argv[pos++] = (char *)cfg->glue_dir;

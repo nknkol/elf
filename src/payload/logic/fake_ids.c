@@ -6,6 +6,7 @@
  * the same values), fork copies it and the exec chain passes it on. */
 #include <asm/unistd.h>
 #include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "config.h"
 #include "fake_ids.h"
@@ -13,6 +14,8 @@
 #define KEEP 0xffffffffu
 enum { REAL, EFFECTIVE, SAVED, FS };
 static uint32_t ids[2][4]; /* uid then gid sets. */
+static uint32_t groups[32];
+static int group_count;
 static int loaded;
 
 static uint32_t *set_of(int group)
@@ -20,6 +23,9 @@ static uint32_t *set_of(int group)
     if (!__atomic_load_n(&loaded, __ATOMIC_ACQUIRE)) {
         for (int i = 0; i < 8; i++)
             ids[i / 4][i % 4] = g_payload_config.fake_ids[i];
+        group_count = g_payload_config.fake_group_count;
+        if (group_count < 0 || group_count > 32) { group_count = 1; groups[0] = 0; }
+        for (int i = 0; i < group_count; i++) groups[i] = g_payload_config.fake_groups[i];
         __atomic_store_n(&loaded, 1, __ATOMIC_RELEASE);
     }
     return ids[group];
@@ -113,10 +119,27 @@ int fake_ids_syscall(long number, long a[6], long *result)
     case __NR_setresgid: *result = set_res(1, x, y, z); break;
     case __NR_setfsuid: *result = set_fs(0, x); break;
     case __NR_setfsgid: *result = set_fs(1, x); break;
-    case __NR_setgroups:
-        /* Supplementary groups are not modeled; changing them needs root. */
-        *result = privileged() ? 0 : -EPERM;
+    case __NR_setgroups: {
+        size_t size = (size_t)(int)a[0];
+        set_of(0);
+        if (!privileged()) { *result = -EPERM; break; }
+        if ((long)(int)a[0] < 0 || size > 32) { *result = -EINVAL; break; }
+        if (size && !a[1]) { *result = -EFAULT; break; }
+        for (size_t i = 0; i < size; i++) groups[i] = ((const uint32_t *)a[1])[i];
+        group_count = (int)size;
+        *result = 0;
         break;
+    }
+    case __NR_getgroups: {
+        int size = (int)a[0];
+        set_of(0);
+        if (size < 0) { *result = -EINVAL; break; }
+        if (size && size < group_count) { *result = -EINVAL; break; }
+        if (size && group_count && !a[1]) { *result = -EFAULT; break; }
+        for (int i = 0; size && i < group_count; i++) ((uint32_t *)a[1])[i] = groups[i];
+        *result = group_count;
+        break;
+    }
     default: return 0;
     }
     return 1;
@@ -125,6 +148,13 @@ int fake_ids_syscall(long number, long a[6], long *result)
 int fake_ids_privileged(void) { return privileged(); }
 
 uint32_t fake_ids_owner(int group) { return set_of(group)[SAVED]; }
+
+int fake_ids_groups(uint32_t out[32])
+{
+    set_of(0);
+    for (int i = 0; i < group_count; i++) out[i] = groups[i];
+    return group_count;
+}
 
 int fake_ids_current(uint32_t out[8])
 {
