@@ -839,8 +839,10 @@ static long fake_chown(long ret)
     return ret == -EPERM && fake_ids_privileged() ? 0 : ret;
 }
 
-/* Some storage (HarmonyOS shared storage, Android FUSE) refuses every hard
- * link with EPERM, which breaks dpkg's backups like PRoot without -l. Make
+/* Some storage refuses every hard link (HarmonyOS shared storage and Android
+ * FUSE with EPERM, HarmonyOS app storage with EACCES), which breaks dpkg's
+ * backups like PRoot without -l. A copy needs the same directory write
+ * permission, so a genuine permission error still fails as before. Make
  * the new name a copy of a regular file or symlink instead: same content,
  * mode and times, but not the same inode. Anything else keeps the error. */
 static long copy_link(Bridge *b, long error)
@@ -936,7 +938,7 @@ static long mutate(Bridge *b, long number, long a[6])
         return -EXDEV;
     ret = raw_syscall(number, AT_FDCWD, (long)b->first_host,
                       AT_FDCWD, (long)b->host, a[4], 0);
-    if (hardlink && ret == -EPERM)
+    if (hardlink && (ret == -EPERM || ret == -EACCES))
         ret = copy_link(b, ret);
     return ret;
 }

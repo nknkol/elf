@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='link-copy-', dir=build) as tmp:
     try:
         os.link(probe, Path(tmp) / 'probe-link')
         native = 'link'
-    except PermissionError:
+    except PermissionError:  # EPERM or EACCES on storage that refuses links.
         native = 'copy'
     for suffix in ('', '-fd-experiment'):
         work = Path(tmp) / f'work{suffix}'

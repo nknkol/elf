@@ -187,12 +187,13 @@ with tempfile.TemporaryDirectory(prefix='svc-fixture-',dir=build) as temp:
     (root/'native-relative').symlink_to('real/file')
     follow_rc=native_link(root/'native-relative',root/'native-hard-follow',1024)
     bound_rc=native_link(bound/'file',bound/'native-hard')
-    # Storage that refuses every hard link (EPERM) gets a copy instead.
+    # Storage that refuses every hard link (EPERM/EACCES) gets a copy instead.
     def linked(name,rc,source,target,old,new,follow=False,value=0,**kw):
-        mutate(name,'l',old,new,value=value,expected=0 if rc==-errno.EPERM else rc,**kw)
+        refused=rc in (-errno.EPERM,-errno.EACCES)
+        mutate(name,'l',old,new,value=value,expected=0 if refused else rc,**kw)
         stat=(lambda p:p.stat()) if follow or not source.is_symlink() else (lambda p:p.lstat())
         if rc==0:assert stat(source).st_ino==stat(target).st_ino
-        elif rc==-errno.EPERM:
+        elif refused:
             assert stat(source).st_ino!=stat(target).st_ino
             if source.is_symlink() and not follow:assert os.readlink(source)==os.readlink(target)
             else:assert source.read_bytes()==target.read_bytes() and not target.is_symlink()
