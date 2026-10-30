@@ -665,6 +665,8 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 		size_t size;
 		int prot;
 		unsigned long file_off;
+		void *map;
+		size_t map_size;
 	} exec_seg_t;
 	exec_seg_t *exec_segs = z_alloca(ehdr->e_phnum * sizeof(exec_seg_t));
 	int exec_cnt = 0;
@@ -703,6 +705,17 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 		start += TRUNC_PG(iter->p_vaddr);
 		sz = ROUND_PG(iter->p_memsz + off);
 
+		int prot = PFLAGS(iter->p_flags);
+		/* Read-only data (rodata, symbol tables) needs no private copy:
+		 * code signing only forbids executable file mappings. */
+		if (prot == PROT_READ && iter->p_filesz == iter->p_memsz &&
+		    (iter->p_offset & ALIGN) == off) {
+			p = z_mmap((void *)start, sz, PROT_READ, MAP_FIXED | MAP_PRIVATE, fd,
+				   TRUNC_PG(iter->p_offset));
+			if (p != (void *)-1)
+				continue;
+		}
+
 		p = z_mmap((void *)start, sz, PROT_WRITE, flags, -1, 0);
 		if (p == (void *)-1)
 			goto err;
@@ -711,15 +724,18 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 		if (z_read(fd, p + off, iter->p_filesz) !=
 				(ssize_t)iter->p_filesz)
 			goto err;
-		
-		int prot = PFLAGS(iter->p_flags);
 
 		if ((prot & PROT_EXEC) && payload_addr) {
 			exec_segs[exec_cnt].start = (void *)((unsigned long)p + off);
 			exec_segs[exec_cnt].size = iter->p_filesz;
 			exec_segs[exec_cnt].prot = prot;
 			exec_segs[exec_cnt].file_off = iter->p_offset;
+			exec_segs[exec_cnt].map = p;
+			exec_segs[exec_cnt].map_size = sz;
 			exec_cnt++;
+			/* Patched while still writable; made executable once below
+			 * (each exec transition can resync the whole range). */
+			continue;
 		}
 
 		if ((prot & PROT_EXEC) && is_harmonyos()) {
@@ -735,8 +751,13 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr, void *
 	for (int i = 0; i < exec_cnt; i++) {
 		/* Fail closed: a raw svc left unhooked would bypass the payload. */
 		if (install_hook_file(exec_segs[i].start, exec_segs[i].size, payload_addr,
-				      exec_segs[i].prot, fd, exec_segs[i].file_off) < 0)
+				      PROT_READ | PROT_WRITE, fd, exec_segs[i].file_off) < 0)
 			z_errx(1, "cannot place syscall stubs within branch range");
+		if (is_harmonyos())
+			z_prctl(0x6a6974, 0, 0);
+		z_mprotect(exec_segs[i].map, exec_segs[i].map_size, exec_segs[i].prot);
+		if (is_harmonyos())
+			z_prctl(0x6a6974, 0, 1);
 	}
 
 	return (unsigned long)base;
@@ -780,16 +801,29 @@ static int apply_payload_relocations(void *base, const Elf_Ehdr *ehdr, const Elf
 	return 0;
 }
 
-static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
+/* Reads payload bytes from the embedded image (blob) or a descriptor. */
+static int payload_src_read(int fd, const unsigned char *blob, size_t blob_size,
+			    unsigned long offset, void *dst, size_t len)
 {
-	if (fd < 0)
-		return NULL;
+	if (blob) {
+		if (offset > blob_size || len > blob_size - offset)
+			return -1;
+		z_memcpy(dst, blob + offset, len);
+		return 0;
+	}
+	if (z_lseek(fd, (off_t)offset, SEEK_SET) < 0)
+		return -1;
+	return z_read(fd, dst, len) == (ssize_t)len ? 0 : -1;
+}
 
-	if (z_lseek(fd, 0, SEEK_SET) < 0)
+static void *load_elf_payload_src(int fd, const unsigned char *blob, size_t blob_size,
+				  size_t *entry_point_out)
+{
+	if (fd < 0 && !blob)
 		return NULL;
 
 	Elf_Ehdr ehdr;
-	if (z_read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
+	if (payload_src_read(fd, blob, blob_size, 0, &ehdr, sizeof(ehdr)) < 0) {
 		return NULL;
 	}
 
@@ -800,8 +834,7 @@ static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 
 	size_t ph_size = ehdr.e_phnum * sizeof(Elf_Phdr);
 	Elf_Phdr *phdr = z_alloca(ph_size);
-	if (z_lseek(fd, ehdr.e_phoff, SEEK_SET) < 0 ||
-	    z_read(fd, phdr, ph_size) != (ssize_t)ph_size) {
+	if (payload_src_read(fd, blob, blob_size, ehdr.e_phoff, phdr, ph_size) < 0) {
 		return NULL;
 	}
 
@@ -855,12 +888,11 @@ static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 			return NULL;
 		}
 
-		if (z_lseek(fd, phdr[i].p_offset, SEEK_SET) < 0) {
+		if (payload_src_read(fd, blob, blob_size, phdr[i].p_offset,
+				     (void *)((unsigned long)p + off), phdr[i].p_filesz) < 0) {
 			z_munmap(base, total_size);
 			return NULL;
 		}
-
-		z_read(fd, (void *)((unsigned long)p + off), phdr[i].p_filesz);
 	}
 
 	/* The payload is position independent; compilers may still emit
@@ -887,6 +919,11 @@ static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
 		*entry_point_out = (size_t)base + ehdr.e_entry;
 
 	return base;
+}
+
+static void *load_elf_payload_fd(int fd, size_t *entry_point_out)
+{
+	return load_elf_payload_src(fd, NULL, 0, entry_point_out);
 }
 
 static void *load_elf_payload_path(const char *path, size_t *entry_point_out)
@@ -934,7 +971,7 @@ err:
 	return -1;
 }
 
-static int create_payload_memfd(void)
+static __attribute__((unused)) int create_payload_memfd(void)
 {
 	size_t sz = (size_t)(_binary_payload_payload_bin_end -
 			     _binary_payload_payload_bin_start);
@@ -2732,7 +2769,6 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 
 	const char *payload_path = payload_path_override[0] ? payload_path_override : CONFIG_DEFAULT_PAYLOAD_PATH;
 	const char *payload_source = payload_path_override[0] ? payload_path_override : "(embedded)";
-	int payload_fd = -1;
 	int used_embedded = 0;
 
 	if (payload_path_override[0]) {
@@ -2740,11 +2776,11 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		payload_base = load_elf_payload_path(payload_path, &payload_entry_addr);
 	} else {
 		z_printf("[Loader] Loading embedded payload...\n");
-		payload_fd = create_payload_memfd();
-		if (payload_fd >= 0)
-			payload_base = load_elf_payload_fd(payload_fd, &payload_entry_addr);
-		if (payload_fd >= 0)
-			z_close(payload_fd);
+		/* Straight from the embedded image: no memfd copy per exec. */
+		payload_base = load_elf_payload_src(-1, _binary_payload_payload_bin_start,
+						    (size_t)(_binary_payload_payload_bin_end -
+							     _binary_payload_payload_bin_start),
+						    &payload_entry_addr);
 		if (payload_base) {
 			used_embedded = 1;
 		} else {

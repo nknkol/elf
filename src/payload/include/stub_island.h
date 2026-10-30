@@ -168,25 +168,33 @@ static inline long island_hook_code(uintptr_t base, size_t size, uintptr_t paylo
     for (size_t i = 0; i < words; i++)
         sites += ISLAND_SITE(i);
     if (!sites) return 0;
+    /* The sites' word indexes, so later passes do not rescan the code. */
+    size_t list_len = (sites * sizeof(uint32_t) + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
+    long list_mem = island_mmap(0, list_len, ISLAND_PROT_READ | ISLAND_PROT_WRITE,
+                                ISLAND_MAP_PRIVATE | ISLAND_MAP_ANONYMOUS);
+    if (list_mem < 0 && list_mem > -4096) return list_mem;
+    uint32_t *list = (uint32_t *)list_mem;
+    for (size_t i = 0, n = 0; i < words && n < sites; i++)
+        if (ISLAND_SITE(i)) list[n++] = (uint32_t)i;
     size_t len = (sites * STUB_SIZE + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
     struct island after = {0, 0, 0}, before = {0, 0, 0};
     island_place(&after, base, base + size, len, 1);
     /* Sites the after-island cannot reach (segments over 128 MiB). */
     size_t far = 0;
-    for (size_t i = 0; i < words; i++)
-        if (ISLAND_SITE(i) &&
-            (!after.base || !island_slot_ok((uintptr_t)&code[i], after.base) ||
-             !island_slot_ok((uintptr_t)&code[i], after.base + len - STUB_SIZE)))
+    for (size_t k = 0; k < sites; k++) {
+        uintptr_t site = (uintptr_t)&code[list[k]];
+        if (!after.base || !island_slot_ok(site, after.base) ||
+            !island_slot_ok(site, after.base + len - STUB_SIZE))
             far++;
+    }
     if (far) {
         size_t far_len = (far * STUB_SIZE + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1);
         island_place(&before, base, base + size, far_len, -1);
     }
     /* Assign every site before touching the code: all or nothing. */
     long rc = 0;
-    for (size_t i = 0; i < words && !rc; i++) {
-        if (!ISLAND_SITE(i)) continue;
-        uintptr_t site = (uintptr_t)&code[i];
+    for (size_t k = 0; k < sites && !rc; k++) {
+        uintptr_t site = (uintptr_t)&code[list[k]];
         uintptr_t slot = island_take(&after, site);
         if (!slot) slot = island_take(&before, site);
         if (!slot) { rc = -12; break; } /* -ENOMEM: no reachable stub */
@@ -204,28 +212,47 @@ static inline long island_hook_code(uintptr_t base, size_t size, uintptr_t paylo
         if (p < 0 && !rc) rc = p;
         if (p >= 0) island_note(is->base, used);
     }
-    if (rc) return rc;
-    /* Patch: the stubs exist; each branch is one aligned 4-byte store. */
-    uintptr_t page_lo = base & ~(ISLAND_PAGE - 1);
-    size_t span = ((base + size + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1)) - page_lo;
-    rc = island_mprotect(page_lo, span, writable_prot);
-    if (rc < 0) return rc;
-    /* Same assignment order as above, so the same slots: after-island
-     * first, then before (unused tails were unmapped beyond the last). */
-    after.used = before.used = 0;
     long hooked = 0;
-    for (size_t i = 0; i < words; i++) {
-        if (!ISLAND_SITE(i)) continue;
-        uintptr_t site = (uintptr_t)&code[i];
-        uintptr_t slot = island_take(&after, site);
-        if (!slot) slot = island_take(&before, site);
-        long offset = (long)slot - (long)site;
-        __atomic_store_n(&code[i], 0x14000000u | ((uint32_t)(offset >> 2) & 0x03ffffffu),
-                         __ATOMIC_RELEASE);
-        hooked++;
+    if (!rc) {
+        /* Patch: the stubs exist; each branch is one aligned 4-byte store. */
+        uintptr_t page_lo = base & ~(ISLAND_PAGE - 1);
+        size_t span = ((base + size + ISLAND_PAGE - 1) & ~(ISLAND_PAGE - 1)) - page_lo;
+        rc = island_mprotect(page_lo, span, writable_prot);
+        if (!rc) {
+            /* Same assignment order as above, so the same slots: after-island
+             * first, then before (unused tails were unmapped beyond the last). */
+            after.used = before.used = 0;
+            uintptr_t flushed = 0;
+            for (size_t k = 0; k < sites; k++) {
+                uintptr_t site = (uintptr_t)&code[list[k]];
+                uintptr_t slot = island_take(&after, site);
+                if (!slot) slot = island_take(&before, site);
+                long offset = (long)slot - (long)site;
+                __atomic_store_n(&code[list[k]],
+                                 0x14000000u | ((uint32_t)(offset >> 2) & 0x03ffffffu),
+                                 __ATOMIC_RELEASE);
+                /* Only the patched lines need cache maintenance. */
+                uintptr_t line = site & ~63ul;
+                if (line != flushed) {
+                    __asm__ volatile("dc cvau, %0" : : "r"(line) : "memory");
+                    flushed = line;
+                }
+                hooked++;
+            }
+            __asm__ volatile("dsb ish" ::: "memory");
+            flushed = 0;
+            for (size_t k = 0; k < sites; k++) {
+                uintptr_t line = (uintptr_t)&code[list[k]] & ~63ul;
+                if (line != flushed) {
+                    __asm__ volatile("ic ivau, %0" : : "r"(line) : "memory");
+                    flushed = line;
+                }
+            }
+            __asm__ volatile("dsb ish\n isb" ::: "memory");
+            rc = island_mprotect(page_lo, span, final_prot);
+        }
     }
-    island_flush(base, size);
-    rc = island_mprotect(page_lo, span, final_prot);
+    island_munmap((uintptr_t)list, list_len);
     return rc < 0 ? rc : hooked;
 }
 #undef ISLAND_SITE

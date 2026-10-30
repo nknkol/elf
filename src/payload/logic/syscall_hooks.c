@@ -108,6 +108,14 @@ static long mmap_exec_anon_fallback(long *args)
         return rc;
     }
 
+    /* Patch while still writable, then become executable once. Fail
+     * closed: never leave unhooked syscalls executable. */
+    if ((prot & PROT_EXEC) &&
+        install_hook_file(mapped, len, (void *)&_start, PROT_READ | PROT_WRITE, fd,
+                          (unsigned long)off) < 0) {
+        raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
+        return -ENOMEM;
+    }
     int need_prctl = (prot & PROT_EXEC) && is_harmonyos();
     if (need_prctl)
         raw_syscall(SYS_prctl, PR_JIT_WORKAROUND, 0, 0, 0, 0, 0);
@@ -118,13 +126,6 @@ static long mmap_exec_anon_fallback(long *args)
     if (mp < 0) {
         raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
         return mp;
-    }
-
-    /* Fail closed: never leave unhooked syscalls executable. */
-    if ((prot & PROT_EXEC) &&
-        install_hook_file(mapped, len, (void *)&_start, prot, fd, (unsigned long)off) < 0) {
-        raw_syscall(SYS_munmap, (long)mapped, (long)len, 0, 0, 0, 0);
-        return -ENOMEM;
     }
 
     return (long)mapped;

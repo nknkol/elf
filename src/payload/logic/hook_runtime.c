@@ -108,8 +108,11 @@ long install_hook_file(void *target_base, size_t target_size, void *payload_entr
         return 0;
     struct island_code code[ISLAND_CODE_MAX];
     int ranges = island_code_ranges(fd, file_off, target_size, code);
+    /* Code that may already run stays executable while patched; fresh code
+     * (final prot without exec) is patched through a plain writable view. */
+    int writable = (prot & PROT_EXEC) ? PROT_READ | PROT_WRITE | PROT_EXEC : PROT_READ | PROT_WRITE;
     return island_hook_code((uintptr_t)target_base, target_size, (uintptr_t)payload_entry,
-                            PROT_READ | PROT_WRITE | PROT_EXEC, prot, code, ranges);
+                            writable, prot, code, ranges);
 }
 
 int install_hook(void *target_base, size_t target_size, void *payload_entry, size_t payload_size)
