@@ -372,7 +372,7 @@ if that prerequisite is unavailable. The native capability probe runs in a
 separate child. Tests include symlink follow/no-follow, dangling links, nested
 mounts, cwd provenance, create/replace/remove and size queries/short buffers.
 Read visibility is still not default-deny. ACL/security attribute semantics are
-left to the host, newer xattrat interfaces are not added, and pathname races
+left to the host, newer xattrat interfaces report ENOSYS, and pathname races
 remain outside this increment's guarantee.
 
 
@@ -570,7 +570,7 @@ the root, so profiles must expose the interpreter's guest path explicitly.
 Known gaps: the loader resolves an initial target's PT_INTERP with guest
 symlink semantics but without the read policy (the exec helper supplies it);
 ancestor stat reports host metadata; recvfrom sender names are host paths, as
-under PRoot; xattrat entries and path races are not covered (accept/getsockname/getpeername
+under PRoot; xattrat and other newer path calls report ENOSYS; path races are not covered (accept/getsockname/getpeername
 names are reported in guest terms). Pathname AF_UNIX addresses of bind/connect/sendto/sendmsg are
 translated with guest semantics in both builds: bind follows the mutation
 policy, connect and sends need read visibility, host paths longer than

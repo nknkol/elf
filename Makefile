@@ -35,6 +35,7 @@ check: build
 	$(PYTHON) vendor/proot/port-tests/test_exec.py
 	$(PYTHON) vendor/proot/port-tests/test_auxv.py
 	$(PYTHON) test/syscalls/check_dispatch.py
+	$(PYTHON) test/syscalls/newer_paths.py
 	$(PYTHON) test/syscalls/check_guard.py
 	$(PYTHON) test/syscalls/check_runtime.py
 	$(PYTHON) -m unittest discover -s test/agent_sandbox -v

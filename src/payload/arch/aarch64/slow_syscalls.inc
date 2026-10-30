@@ -425,3 +425,11 @@ SLOW_SYSCALL(__NR_fchmodat2)
 #ifdef __NR_kcmp
 SLOW_SYSCALL(__NR_kcmp)
 #endif
+/* Untranslated newer path calls (syscall_nums.h): refused with ENOSYS. */
+SLOW_SYSCALL(__NR_setxattrat)
+SLOW_SYSCALL(__NR_getxattrat)
+SLOW_SYSCALL(__NR_listxattrat)
+SLOW_SYSCALL(__NR_removexattrat)
+SLOW_SYSCALL(__NR_open_tree_attr)
+SLOW_SYSCALL(__NR_file_getattr)
+SLOW_SYSCALL(__NR_file_setattr)

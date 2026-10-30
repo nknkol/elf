@@ -1,4 +1,6 @@
 #include <asm/unistd.h>
+#include <errno.h>
+#include "syscall_nums.h"
 #include "syscall_hooks.h"
 #include "config.h"
 #ifdef PROOT_PATH
@@ -81,6 +83,8 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     args[4] = a[4];
     args[5] = a[5];
 
+    if (sys_no >= __NR_setxattrat && sys_no <= __NR_file_setattr)
+        return -ENOSYS; /* Untranslated newer path calls (syscall_nums.h). */
     int named = sys_no == __NR_accept || sys_no == __NR_accept4 ||
         sys_no == __NR_getsockname || sys_no == __NR_getpeername;
     unsigned capacity = named && a[1] && a[2] ? *(unsigned *)a[2] : 0;

@@ -27,7 +27,8 @@ for name in ('exit', 'exit_group', 'clone', 'rt_sigreturn', 'futex', 'getpid'):
 for name in ('openat', 'read', 'write', 'fchmodat', 'fchmodat2', 'io_uring_enter', 'openat2', 'inotify_add_watch', 'close_range',
              'unshare', 'mount', 'umount2', 'chroot', 'setns', 'pivot_root', 'kcmp',
              'io_setup', 'io_destroy', 'io_submit', 'io_cancel', 'io_getevents', 'io_pgetevents',
-             'io_uring_setup', 'io_uring_register'):
+             'io_uring_setup', 'io_uring_register', 'setxattrat', 'getxattrat', 'listxattrat',
+             'removexattrat', 'open_tree_attr', 'file_getattr', 'file_setattr'):
     assert number('__NR_'+name) in selected, name
 with tempfile.TemporaryDirectory() as temp:
     obj = Path(temp)/'entry.o'

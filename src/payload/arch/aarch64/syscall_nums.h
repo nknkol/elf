@@ -10,6 +10,31 @@
 #define __NR_fchmodat2 452
 #endif
 #define SYS_fchmodat2 __NR_fchmodat2
+/* Path-taking calls newer than the target headers (Linux 6.13-6.17). The
+ * backends do not translate them, and a raw pass would resolve guest paths
+ * on the host: they are routed slowly and refused with ENOSYS, as an older
+ * kernel would, so libc and programs fall back to the translated calls. */
+#ifndef __NR_setxattrat
+#define __NR_setxattrat 463
+#endif
+#ifndef __NR_getxattrat
+#define __NR_getxattrat 464
+#endif
+#ifndef __NR_listxattrat
+#define __NR_listxattrat 465
+#endif
+#ifndef __NR_removexattrat
+#define __NR_removexattrat 466
+#endif
+#ifndef __NR_open_tree_attr
+#define __NR_open_tree_attr 467
+#endif
+#ifndef __NR_file_getattr
+#define __NR_file_getattr 468
+#endif
+#ifndef __NR_file_setattr
+#define __NR_file_setattr 469
+#endif
 #define SYS_getcwd           __NR_getcwd
 #define SYS_mknodat          __NR_mknodat
 #define SYS_mkdirat          __NR_mkdirat
