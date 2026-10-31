@@ -489,6 +489,16 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
     /* A missing directory on the way to a bind is glue, not ENOENT. */
     if (ret == -ENOENT && glue_ancestor(b, guest))
         return 0;
+    /* HarmonyOS refuses lstat on many system library links while readlink
+     * works: readlink tells a link from anything else. */
+    if (ret == -EACCES) {
+        char probe[1];
+        long link = raw_syscall(__NR_readlinkat, AT_FDCWD, (long)host, (long)probe, 1, 0, 0);
+        if (link >= 0)
+            return 1;
+        if (link == -EINVAL)
+            return 0;
+    }
     if (ret < 0)
         return IS_FINAL(finality) ? 0 : (int)ret;
     unsigned int type = st.st_mode & S_IFMT;

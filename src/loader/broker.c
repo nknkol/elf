@@ -180,6 +180,13 @@ static char tree_access(int fd, char current)
 	return current;
 }
 
+/* name in dir is a symlink, by readlink alone (lstat refused). */
+static int is_link(int dir, const char *name)
+{
+	char probe[1];
+	return sys(__NR_readlinkat, dir, (long)name, (long)probe, 1, 0, 0) >= 0;
+}
+
 static int resolve(const char *input, int follow, struct target *t)
 {
 	char path[PATH_BYTES], link[PATH_BYTES];
@@ -241,7 +248,9 @@ static int resolve(const char *input, int follow, struct target *t)
 			if (last) {
 				struct stat st;
 				int lrc = (int)sys(__NR_newfstatat, fd, (long)name, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0);
-				if (!follow || lrc < 0 || (st.st_mode & 0170000) != 0120000) {
+				int link = lrc >= 0 ? (st.st_mode & 0170000) == 0120000 :
+					   lrc == -EACCES_ && is_link(fd, name);
+				if (!follow || !link) {
 					t->dir = fd;
 					copy_cstr(t->name, sizeof(t->name), name);
 					t->parent = access;
@@ -259,12 +268,22 @@ static int resolve(const char *input, int follow, struct target *t)
 				 * symlink here). */
 				struct stat lst;
 				int child = (int)sys(__NR_newfstatat, fd, (long)name, (long)&lst, AT_SYMLINK_NOFOLLOW, 0, 0);
-				if (child >= 0)
+				/* lstat refused (HarmonyOS system links): readlink tells a
+				 * link; anything else is opened as a directory unchecked by
+				 * identity, since its metadata is refused too. Swapped for
+				 * a link meanwhile, it is not followed: lookups relative to
+				 * a link FD fail with ENOTDIR. */
+				int unseen = child == -EACCES_;
+				if (unseen)
+					child = is_link(fd, name) ? -ELOOP_ :
+						(int)sys(__NR_openat, fd, (long)name,
+							 O_PATH_ | O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+				else if (child >= 0)
 					child = (lst.st_mode & 0170000) == 0120000 ? -ELOOP_ :
 						(lst.st_mode & 0170000) != 0040000 ? -ENOTDIR_ :
 						(int)sys(__NR_openat, fd, (long)name,
 							 O_PATH_ | O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
-				if (child >= 0) {
+				if (child >= 0 && !unseen) {
 					unsigned long dev, ino;
 					if (identity(child, "", AT_EMPTY_PATH, &dev, &ino) < 0 ||
 					    dev != lst.st_dev || ino != lst.st_ino) {
