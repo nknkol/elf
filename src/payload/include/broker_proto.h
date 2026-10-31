@@ -40,6 +40,10 @@ struct broker_spec {
 /* Request flags: path argument i was /proc/self/fd/N, so the request acts
  * on the attached FD N itself. */
 #define BROKER_MAGIC(i) (1u << (i))
+/* Optimistic lexical resolution: the paths should contain no symlink; the
+ * broker answers ELOOP instead of traversing one (a final one too when the
+ * call follows it) and the payload resolves the call fully again. */
+#define BROKER_STRICT (1u << 8)
 
 struct broker_request {
     int32_t nr;
@@ -51,6 +55,9 @@ struct broker_request {
 struct broker_answer {
     int64_t result;    /* value or -errno; an attached FD replaces a result >= 0 */
     uint32_t len[6];   /* output bytes for each BK_OUT argument, in order */
+    /* BROKER_STRICT refusal (ELOOP): the symlink met, as its host path and
+     * target, both NUL-terminated after the outputs (0: none). */
+    uint32_t link[2];
 };
 
 #define A_V  {BK_VAL, -1, 0}

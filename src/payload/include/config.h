@@ -47,6 +47,10 @@
 #define CONFIG_CHILD_LOADER_PATH "--loader-path"
 #define CONFIG_CHILD_CASE_FOLDS "--case-folds"
 #define CONFIG_CHILD_EXEC_INTERP_FD "--exec-interp-fd"
+/* Isolation mode: real owners (uid:gid,...) of the user, root and binds,
+ * looked up once by the initial loader (fake_id0 reports them as root). */
+#define CONFIG_CHILD_OWNERS "--owners"
+#define CONFIG_OWNERS (CONFIG_MAX_BINDS + 2)
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -91,6 +95,8 @@ typedef struct payload_config {
     int32_t isolate;
     int32_t isolate_fd;
     int32_t loader_fd; /* the loader binary, not close-on-exec */
+    int32_t owner_count; /* isolation mode: owners known (else looked up) */
+    uint32_t owners[CONFIG_OWNERS][2];
     /* Loader image and the stub islands the loader created: guest memory
      * calls may not unmap, remap or reprotect them. */
     uint32_t protected_count;

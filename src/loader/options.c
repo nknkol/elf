@@ -197,6 +197,22 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
 				z_errx(1, "invalid value for %s", arg);
 			copy_cstr(cfg->loader_path, CONFIG_MAX_PATH, v);
+		} else if (is(arg, CONFIG_CHILD_OWNERS)) {
+			uint32_t ids[CONFIG_OWNERS * 2];
+			const char *v = value(argc, argv, &i);
+			char pairs[CONFIG_OWNERS * 24];
+			copy_cstr(pairs, sizeof(pairs), v);
+			for (char *c = pairs; *c; c++)
+				if (*c == ',')
+					*c = ':';
+			int n = numbers(pairs, ':', ids, CONFIG_OWNERS * 2, 0);
+			if (n < 2 || n % 2)
+				z_errx(1, "invalid value for %s", arg);
+			cfg->owner_count = n / 2;
+			for (int k = 0; k < n / 2; k++) {
+				cfg->owners[k][0] = ids[2 * k];
+				cfg->owners[k][1] = ids[2 * k + 1];
+			}
 		} else if (is(arg, CONFIG_CHILD_CASE_FOLDS)) {
 			opt->case_folds = value(argc, argv, &i);
 		} else if (is(arg, "--kernel-release") || is(arg, "--kernel-sysname")) {

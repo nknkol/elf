@@ -8,6 +8,11 @@ struct proot_open_origin;
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
                             char *guest, char *host, size_t capacity,
                             const struct proot_path_context *context);
+/* Isolation mode: the same resolution, then the file opened read-only
+ * through the broker (one round trip when no symlink is on the way). */
+long proot_open_exec_path(int dirfd, const char *path, bool follow,
+                          char *guest, char *host, size_t capacity,
+                          const struct proot_path_context *context);
 size_t proot_bridge_scratch_size(void);
 size_t proot_exec_scratch_size(void);
 long proot_get_auxv(long args[6]);

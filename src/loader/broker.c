@@ -45,6 +45,10 @@ struct tree {
 static struct tree trees[TREES];
 static int tree_count;
 static long peer_pid;
+static int strict; /* BROKER_STRICT of the current request */
+/* The first symlink a strict request met (its host path and target). */
+static char strict_link[2][PATH_BYTES];
+static int strict_reported;
 
 static long sys(long n, long a, long b, long c, long d, long e, long f)
 {
@@ -249,8 +253,26 @@ static int resolve(const char *input, int follow, struct target *t)
 					return 0;
 				}
 			} else {
-				int child = (int)sys(__NR_openat, fd, (long)name,
-						     O_PATH_ | O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+				/* The type comes from lstat, and the opened object must be
+				 * that same directory: open flags alone are not relied on
+				 * (on this platform O_NOFOLLOW|O_DIRECTORY has opened a
+				 * symlink here). */
+				struct stat lst;
+				int child = (int)sys(__NR_newfstatat, fd, (long)name, (long)&lst, AT_SYMLINK_NOFOLLOW, 0, 0);
+				if (child >= 0)
+					child = (lst.st_mode & 0170000) == 0120000 ? -ELOOP_ :
+						(lst.st_mode & 0170000) != 0040000 ? -ENOTDIR_ :
+						(int)sys(__NR_openat, fd, (long)name,
+							 O_PATH_ | O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+				if (child >= 0) {
+					unsigned long dev, ino;
+					if (identity(child, "", AT_EMPTY_PATH, &dev, &ino) < 0 ||
+					    dev != lst.st_dev || ino != lst.st_ino) {
+						sys(__NR_close, child, 0, 0, 0, 0, 0);
+						sys(__NR_close, fd, 0, 0, 0, 0, 0);
+						return -EACCES_; /* changed under us */
+					}
+				}
 				if (child >= 0) {
 					sys(__NR_close, fd, 0, 0, 0, 0, 0);
 					fd = child;
@@ -270,6 +292,16 @@ static int resolve(const char *input, int follow, struct target *t)
 			if (len < 0)
 				return (int)(len == -EINVAL_ ? -ENOTDIR_ : len);
 			link[len] = 0;
+			if (strict) {
+				if (!strict_reported) {
+					size_t upto = (size_t)(end - path);
+					z_memcpy(strict_link[0], path, upto);
+					strict_link[0][upto] = 0;
+					copy_cstr(strict_link[1], PATH_BYTES, link);
+					strict_reported = 1;
+				}
+				return -ELOOP_;
+			}
 			char spliced[PATH_BYTES];
 			size_t s = 0;
 			if (link[0] != '/') {
@@ -851,7 +883,9 @@ static void serve(int channel)
 		if (rc >= 0 && (int)r->fds != c.fds)
 			rc = -EINVAL_;
 		if (rc >= 0) {
-			c.magic = r->flags;
+			c.magic = r->flags & 0x3f;
+			strict = (r->flags & BROKER_STRICT) != 0;
+			strict_reported = 0;
 			rc = execute(&c, r->nr);
 		}
 		a->result = rc;
@@ -869,6 +903,16 @@ static void serve(int channel)
 				z_memcpy(answer + sizeof(*a) + out, c.out[i], len);
 			a->len[i] = len;
 			out += len;
+		}
+		if (rc == -ELOOP_ && strict && strict_reported) {
+			for (int k = 0; k < 2; k++) {
+				size_t n = z_strlen(strict_link[k]) + 1;
+				if (out + n > BROKER_DATA_MAX)
+					break;
+				z_memcpy(answer + sizeof(*a) + out, strict_link[k], n);
+				a->link[k] = (uint32_t)n;
+				out += n;
+			}
 		}
 		send_answer(channel, answer, sizeof(*a) + out, c.answer_fd);
 		if (c.answer_fd >= 0)

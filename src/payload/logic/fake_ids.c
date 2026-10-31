@@ -185,6 +185,16 @@ static void collect_owners(void)
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
     int n = 0;
+    /* Isolation mode: from the initial loader (a lookup is a round trip). */
+    if (g_payload_config.owner_count > 0) {
+        for (; n < g_payload_config.owner_count && n < OWNERS && n < CONFIG_OWNERS; n++) {
+            owner_uid[n] = g_payload_config.owners[n][0];
+            owner_gid[n] = g_payload_config.owners[n][1];
+        }
+        owner_count = n;
+        __atomic_store_n(&owner_state, 2, __ATOMIC_RELEASE);
+        return;
+    }
     owner_uid[n] = (unsigned)raw_syscall(__NR_getuid, 0, 0, 0, 0, 0, 0);
     owner_gid[n++] = (unsigned)raw_syscall(__NR_getgid, 0, 0, 0, 0, 0, 0);
     for (int i = -1; i < g_payload_config.bind_count && i < CONFIG_MAX_BINDS; i++) {

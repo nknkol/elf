@@ -5,7 +5,7 @@
 
 /* Layout of payload_config_t and the stub contract; the loader refuses a
  * payload with another version. */
-#define PAYLOAD_ABI_VERSION 18
+#define PAYLOAD_ABI_VERSION 19
 
 /* Fixed addresses: the seccomp backstop allows syscalls by address. */
 #define LOADER_FIXED_BASE  0x3f00000000ul

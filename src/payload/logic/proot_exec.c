@@ -47,6 +47,7 @@ typedef struct {
     char isolate_fd[16];
     char interp_fd[16], loader_fd[16];
     char case_folds[CONFIG_MAX_BINDS * 11];
+    char owners[CONFIG_OWNERS * 24];
 #ifdef GUARDED
     char fd_state[24];
 #endif
@@ -71,20 +72,42 @@ static void fd_name(char *out, const char *prefix, int fd)
     *out = 0;
 }
 
-/* Isolation mode (keep): the file is opened first, checked and read through
- * that FD, which is kept for the child loader (not close-on-exec). */
+/* execve's permission check (execute for the real ids), from the file's
+ * metadata: no round trip to the broker for an access(X_OK). */
+static long may_execute(const struct stat *st)
+{
+    long uid = raw_syscall(__NR_getuid, 0, 0, 0, 0, 0, 0);
+    if (!uid)
+        return st->st_mode & 0111 ? 0 : -EACCES;
+    if (st->st_uid == (unsigned long)uid)
+        return st->st_mode & 0100 ? 0 : -EACCES;
+    unsigned groups[33];
+    long count = raw_syscall(__NR_getgroups, 32, (long)groups, 0, 0, 0, 0);
+    groups[count < 0 ? 0 : count] = (unsigned)raw_syscall(__NR_getgid, 0, 0, 0, 0, 0, 0);
+    for (long i = 0; i <= (count < 0 ? 0 : count); i++)
+        if (groups[i] == st->st_gid)
+            return st->st_mode & 0010 ? 0 : -EACCES;
+    return st->st_mode & 0001 ? 0 : -EACCES;
+}
+
+/* Isolation mode (keep): the file is opened first (unless *keep already is
+ * an FD the broker opened), checked and read through that FD, which is kept
+ * for the child loader (not close-on-exec). */
 static int read_open_executable(const char *path, int nofollow, char header[256], long *keep)
 {
     struct stat st;
-    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | (nofollow ? O_NOFOLLOW : 0),
-                          0, 0, 0);
+    long fd = *keep;
+    if (fd < 0)
+        fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | (nofollow ? O_NOFOLLOW : 0),
+                         0, 0, 0);
+    *keep = -1;
     if (fd < 0)
         return (int)fd;
     long ret = raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0);
     if (!ret && ((st.st_mode & S_IFMT) != S_IFREG || !(st.st_mode & 0111)))
         ret = -EACCES;
     if (!ret)
-        ret = raw_syscall(__NR_faccessat, AT_FDCWD, (long)path, 1, 0, 0, 0);
+        ret = may_execute(&st);
     if (!ret)
         ret = raw_syscall(__NR_pread64, fd, (long)header, 255, 0, 0, 0);
     if (ret < 0) {
@@ -261,6 +284,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         if (fd_copy < 0) { ret = fd_copy; goto done; }
         fd_name(s->host, "/proc/self/fd/", (int)fd_copy);
         strcpy(s->guest, named);
+    } else if (cfg->isolate) {
+        target_fd = proot_open_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
+                                         s->guest, s->host, sizeof(s->host), context);
+        if (target_fd < 0) { ret = target_fd; goto done; }
     } else {
         ret = proot_resolve_exec_path(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW),
                                       s->guest, s->host, sizeof(s->host), context);
@@ -311,12 +338,22 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         }
         names[depth] = interpreter;
         options[depth++] = optional_arg;
-        ret = proot_resolve_exec_path(AT_FDCWD, interpreter, true,
-                                      s->interpreter_guest, s->interpreter_host,
-                                      sizeof(s->interpreter_host), context);
-        if (ret < 0) goto done;
         long previous = target_fd;
         target_fd = -1;
+        if (cfg->isolate) {
+            ret = target_fd = proot_open_exec_path(AT_FDCWD, interpreter, true, s->interpreter_guest,
+                                                   s->interpreter_host, sizeof(s->interpreter_host),
+                                                   context);
+            if (ret >= 0) ret = 0;
+        } else {
+            ret = proot_resolve_exec_path(AT_FDCWD, interpreter, true,
+                                          s->interpreter_guest, s->interpreter_host,
+                                          sizeof(s->interpreter_host), context);
+        }
+        if (ret < 0) {
+            if (previous >= 0) raw_syscall(__NR_close, previous, 0, 0, 0, 0, 0);
+            goto done;
+        }
         n = read_executable(s->interpreter_host, 0, s->header[depth], &target_fd);
         if (previous >= 0) raw_syscall(__NR_close, previous, 0, 0, 0, 0, 0);
         if (n < 0) { ret = n; goto done; }
@@ -335,10 +372,17 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         dynamic = elf_interpreter(target, target_fd, s);
         if (dynamic < 0) { ret = dynamic; goto done; }
         if (dynamic) {
-            ret = proot_resolve_exec_path(AT_FDCWD, s->elf_interp, true,
-                                          s->elf_interp_guest, s->elf_interp_host,
-                                          sizeof(s->elf_interp_host), context);
-            if (ret < 0) goto done;
+            if (cfg->isolate) {
+                ret = interp_fd = proot_open_exec_path(AT_FDCWD, s->elf_interp, true,
+                                                       s->elf_interp_guest, s->elf_interp_host,
+                                                       sizeof(s->elf_interp_host), context);
+                if (ret >= 0) ret = 0;
+            } else {
+                ret = proot_resolve_exec_path(AT_FDCWD, s->elf_interp, true,
+                                              s->elf_interp_guest, s->elf_interp_host,
+                                              sizeof(s->elf_interp_host), context);
+            }
+            if (ret < 0) { interp_fd = -1; goto done; }
             char magic[256];
             n = read_executable(s->elf_interp_host, 0, magic, &interp_fd);
             if (n < 0) { ret = n; goto done; }
@@ -395,6 +439,19 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         if (folded) {
             s->argv[pos++] = CONFIG_CHILD_CASE_FOLDS;
             s->argv[pos++] = s->case_folds;
+        }
+        if (cfg->owner_count > 0) {
+            out = s->owners;
+            for (int i = 0; i < cfg->owner_count && i < CONFIG_OWNERS; i++) {
+                if (i) *out++ = ',';
+                fd_name(out, "", (int)cfg->owners[i][0]);
+                out += strlen(out);
+                *out++ = ':';
+                fd_name(out, "", (int)cfg->owners[i][1]);
+                out += strlen(out);
+            }
+            s->argv[pos++] = CONFIG_CHILD_OWNERS;
+            s->argv[pos++] = s->owners;
         }
     } else if (exec_fd >= 0) {
         fd_name(s->exec_fd, "", (int)fd_copy);

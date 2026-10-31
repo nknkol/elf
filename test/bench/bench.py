@@ -44,6 +44,12 @@ with tempfile.TemporaryDirectory(prefix='bench-', dir=build) as tmp:
         'guarded': ([str(build / 'elfloader-guarded'), '--mode', 'container',
                      '--root', str(root), '-v', f'{work}:/work', '--guard-file-access', 'dw',
                      '--allow-stdio-output', '--', './bench', '/work'], root),
+        # Isolation mode: host path calls go to the broker process.
+        'isolate': ([str(build / 'elfloader'), '--isolate', '--mode', 'container', '--root', str(root),
+                     '-v', f'{work}:/work', '--', './bench', '/work'], root),
+        'isolate-g': ([str(build / 'elfloader-guarded'), '--isolate', '--mode', 'container',
+                       '--root', str(root), '-v', f'{work}:/work', '--guard-file-access', 'dw',
+                       '--allow-stdio-output', '--', './bench', '/work'], root),
         # Default build with the opt-in seccomp backstop (filter on every call).
         'backstop': ([str(build / 'elfloader'), '--mode', 'container', '--root', str(root),
                       '--seccomp-backstop', '-v', f'{work}:/work', '--', './bench', '/work'], root),

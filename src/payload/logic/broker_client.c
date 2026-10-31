@@ -20,11 +20,14 @@ extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5
 #define O_CLOEXEC_ 02000000
 #define CHANNEL_FD_BASE 900
 #define CHANNELS 64
-#define BUFFER_SIZE (2 * (BROKER_MESSAGE_MAX + 4096))
+#define BUFFER_SIZE (2 * (BROKER_MESSAGE_MAX + 4096) + 2 * 4096)
+#define REPORT_OFFSET (2 * (BROKER_MESSAGE_MAX + 4096)) /* strict symlink report */
 
 struct channel {
     long tid, pid;
     int fd;
+    int strict; /* BROKER_STRICT on this thread's requests */
+    int reported; /* the last strict refusal named a symlink (REPORT_OFFSET) */
     unsigned char *buffer; /* request then answer; kept across forks */
 };
 static struct channel channels[CHANNELS];
@@ -102,6 +105,7 @@ static struct channel *channel(void)
         free_slot->tid = tid;
         free_slot->pid = pid;
         free_slot->fd = -1;
+        free_slot->strict = 0;
     }
     unlock();
     if (!free_slot)
@@ -155,6 +159,8 @@ static long broker_call(const struct broker_spec *spec, long nr, const long a[6]
     int fds[BROKER_FDS_MAX];
     memset(request, 0, sizeof(*request));
     request->nr = (int32_t)nr;
+    if (c->strict)
+        request->flags |= BROKER_STRICT;
     int directory = AT_FDCWD;
     int cloexec = nr == __NR_chdir || (nr == __NR_openat && (a[2] & O_CLOEXEC_)) ||
                   (nr == __NR_socket && (a[1] & O_CLOEXEC_));
@@ -257,6 +263,15 @@ static long broker_call(const struct broker_spec *spec, long nr, const long a[6]
         memcpy((void *)a[i], out, answer->len[i]);
         out += answer->len[i];
     }
+    c->reported = 0;
+    if (answer->result == -ELOOP && answer->link[0] && answer->link[1] &&
+        answer->link[0] <= 4096 && answer->link[1] <= 4096 &&
+        out + answer->link[0] + answer->link[1] <= reply + rc &&
+        !out[answer->link[0] - 1] && !out[answer->link[0] + answer->link[1] - 1]) {
+        memcpy(c->buffer + REPORT_OFFSET, out, answer->link[0]);
+        memcpy(c->buffer + REPORT_OFFSET + 4096, out + answer->link[0], answer->link[1]);
+        c->reported = 1;
+    }
     if (received >= 0) {
         if (nr == __NR_chdir) {
             long changed = raw_syscall(__NR_fchdir, received, 0, 0, 0, 0, 0);
@@ -328,6 +343,24 @@ int broker_fd_guard(long nr, const long a[6], long *result)
     default:
         return 0;
     }
+}
+
+void broker_strict(int on)
+{
+    struct channel *c = g_payload_config.isolate ? channel() : 0;
+    if (c)
+        c->strict = on;
+}
+
+int broker_link_report(char *path, char *target)
+{
+    struct channel *c = g_payload_config.isolate ? channel() : 0;
+    if (!c || !c->reported)
+        return 0;
+    c->reported = 0;
+    strcpy(path, (char *)c->buffer + REPORT_OFFSET);
+    strcpy(target, (char *)c->buffer + REPORT_OFFSET + 4096);
+    return 1;
 }
 
 int broker_route(long nr, long a[6], long *result)

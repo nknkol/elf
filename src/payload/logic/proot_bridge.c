@@ -47,6 +47,12 @@ struct guest_msghdr {
 _Static_assert(sizeof(struct guest_msghdr) == 56, "AArch64 msghdr ABI");
 
 #define BRIDGE_FRAMES 6
+#define LINK_HINTS 8
+struct link_hints {
+    int count;
+    char path[LINK_HINTS][PATH_MAX], target[LINK_HINTS][PATH_MAX];
+};
+
 typedef struct {
     BindingTable table;
     bool mutation;
@@ -64,6 +70,15 @@ typedef struct {
      * guarded walk rewrites b->host; the walk pins that same inode). */
     bool final_match;
     struct stat final_stat;
+    /* Isolation mode: every host lookup is a round trip to the broker.
+     * Optimistic resolution skips them and maps the guest path lexically;
+     * the broker then refuses (ELOOP) any symlink on the way, and the call
+     * is run again with full resolution. Allowed for the first attempt of
+     * a call; used once a resolution actually skipped lookups. */
+    bool optimistic_allowed, optimistic, optimistic_used, force_full;
+    /* Symlinks the broker reported in earlier attempts of this call: an
+     * optimistic lookup of such a host path is a symlink, read from here. */
+    const struct link_hints *hints;
     /* Guarded modes: the final call goes through a directory descriptor
      * walked component by component without following symlinks, so a
      * component swapped for a symlink after resolution cannot redirect it. */
@@ -448,6 +463,14 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
     if (rc < 0)
         return rc;
     Bridge *b = opaque;
+    /* The broker checks the lexical result for symlinks itself, from the
+     * mount's root: ancestors of a nested mount point stay real lookups. */
+    if (b->optimistic && (!strcmp(guest, "/") || !glue_ancestor(b, guest))) {
+        for (int i = 0; b->hints && i < b->hints->count; i++)
+            if (!strcmp(b->hints->path[i], host))
+                return 1;
+        return 0;
+    }
     /* Each host lstat walks the whole host path, which dominates path calls.
      * Skip it where the answer cannot change resolution: a non-followed final
      * name (an existing link stays a link; a missing one is fine), and the
@@ -481,7 +504,14 @@ static int host_lookup(void *opaque, Finality finality, unsigned int depth,
 
 static int host_readlink(void *opaque, const char *path, char *out, size_t size)
 {
-    (void)opaque;
+    const Bridge *b = opaque;
+    for (int i = 0; b->optimistic && b->hints && i < b->hints->count; i++)
+        if (!strcmp(b->hints->path[i], path)) {
+            size_t n = strlen(b->hints->target[i]);
+            if (n > size) n = size;
+            memcpy(out, b->hints->target[i], n);
+            return (int)n;
+        }
     return (int)raw_syscall(__NR_readlinkat, AT_FDCWD, (long)path, (long)out,
                            size, 0, 0);
 }
@@ -928,9 +958,33 @@ static int secure_host(Bridge *b)
 /* A deferred final lookup does not know where a final symlink points, and
  * policy decisions may depend on its target: any failure is resolved again
  * with the full lookup before it is reported. */
+/* Without ".." a path resolves lexically exactly when no component is a
+ * symlink (a ".." would silently undo a symlink the broker never sees). */
+static bool lexical_path(const char *path)
+{
+    for (const char *p = path; *p;) {
+        while (*p == '/') p++;
+        if (p[0] == '.' && p[1] == '.' && (!p[2] || p[2] == '/')) return false;
+        while (*p && *p != '/') p++;
+    }
+    return true;
+}
+
 static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
 {
+    b->optimistic = b->optimistic_allowed && path && lexical_path(path);
+    if (b->optimistic && !b->optimistic_used) {
+        b->optimistic_used = true;
+        broker_strict(1);
+    }
     int rc = resolve_once(b, dirfd, path, follow);
+    /* /proc is emulated through lookups (self, fd links): not lexical. */
+    Comparison proc = rc >= 0 && b->optimistic ? compare_paths("/proc", b->guest) : PATHS_ARE_NOT_COMPARABLE;
+    if (proc == PATHS_ARE_EQUAL || proc == PATH1_IS_PREFIX) {
+        /* The whole call again, fully (bridge_run). */
+        b->force_full = true;
+        return -ELOOP;
+    }
     if (rc < 0 && b->defer_final) {
         b->defer_final = false;
         rc = resolve_once(b, dirfd, path, follow);
@@ -1664,6 +1718,8 @@ static long bridge_create(Bridge **out)
     b->defer_final = false;
     b->final_valid = false;
     b->traverse = false;
+    b->optimistic_allowed = b->optimistic = b->optimistic_used = b->force_full = false;
+    b->hints = NULL;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
     b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings,
@@ -1865,6 +1921,49 @@ int proot_revalidate_regular_fd(int fd, struct proot_open_origin *origin)
 #define DIRENT_OFFSET 8
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME 19
+/* Isolation mode: naming a directory FD is a round trip to the broker, and
+ * a listing takes several getdents calls. The guest name found for an open
+ * directory is kept per FD while the FD still refers to the same directory
+ * (dev/ino): it only selects names to hide here (the broker decides every
+ * access), so a rename of the open directory leaves it merely stale. */
+#define DIR_NAMES 4
+static struct dir_name {
+    long pid;
+    int fd;
+    unsigned long dev, ino;
+    char guest[PATH_MAX];
+} dir_names[DIR_NAMES];
+static int dir_names_lock, dir_names_next;
+
+static void dir_names_take(void)
+{
+    while (__atomic_exchange_n(&dir_names_lock, 1, __ATOMIC_ACQUIRE))
+        raw_syscall(__NR_sched_yield, 0, 0, 0, 0, 0, 0);
+}
+static void dir_names_drop(void) { __atomic_store_n(&dir_names_lock, 0, __ATOMIC_RELEASE); }
+
+static int cached_dir_name(int fd, char *guest, struct stat *st, bool store)
+{
+    long pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+    int found = 0;
+    dir_names_take();
+    for (int i = 0; i < DIR_NAMES && !store; i++) {
+        struct dir_name *d = &dir_names[i];
+        if (d->pid == pid && d->fd == fd && d->dev == st->st_dev && d->ino == st->st_ino) {
+            strcpy(guest, d->guest);
+            found = 1;
+            break;
+        }
+    }
+    if (store) {
+        struct dir_name *d = &dir_names[dir_names_next++ % DIR_NAMES];
+        *d = (struct dir_name){pid, fd, st->st_dev, st->st_ino, ""};
+        strcpy(d->guest, guest);
+    }
+    dir_names_drop();
+    return found;
+}
+
 long proot_getdents_visible(int fd, void *buffer, unsigned long count,
                             const struct proot_open_origin *anchor)
 {
@@ -1874,7 +1973,16 @@ long proot_getdents_visible(int fd, void *buffer, unsigned long count,
     if (ret < 0) return ret;
     b->anchor = *anchor;
     b->anchor_fd = fd;
-    ret = host_fd(b, fd, b->first_guest);
+    struct stat dir;
+    bool cacheable = g_payload_config.isolate &&
+        !raw_syscall(__NR_fstat, fd, (long)&dir, 0, 0, 0, 0) && (dir.st_mode & S_IFMT) == S_IFDIR;
+    if (cacheable && cached_dir_name(fd, b->first_guest, &dir, false))
+        ret = 0;
+    else {
+        ret = host_fd(b, fd, b->first_guest);
+        if (ret >= 0 && cacheable && strlen(b->first_guest) < PATH_MAX)
+            cached_dir_name(fd, b->first_guest, &dir, true);
+    }
     if (ret == -ENOTDIR) {
         /* Not a directory: the kernel reports its own error, no names. */
         ret = raw_syscall(__NR_getdents64, fd, (long)buffer, (long)count, 0, 0, 0);
@@ -1942,22 +2050,97 @@ done:
 }
 #endif
 
+/* A link target spliced in optimistically may only climb ("../" first):
+ * those components were walked by the broker; a later ".." would undo an
+ * unchecked one. */
+static bool climbing_target(const char *target)
+{
+    const char *p = target;
+    while (p[0] == '.' && p[1] == '.' && (p[2] == '/' || !p[2]))
+        for (p += 2; *p == '/'; p++)
+            ;
+    return lexical_path(p);
+}
+
+/* Optimistic attempts of one call (isolation mode, see Bridge): each
+ * symlink the broker refuses is reported and the call runs again with it
+ * known, still optimistic; after LINK_HINTS of them, or a target that is
+ * not lexical, with full resolution. A refused attempt has no effect: the
+ * broker acts on nothing. */
+struct optimism {
+    bool on;
+    struct link_hints *hints; /* mapped on the first refusal */
+};
+
+static void optimism_begin(Bridge *b, struct optimism *o)
+{
+    b->optimistic_allowed = o->on;
+    b->hints = o->hints;
+}
+
+/* After an attempt that returned ret: whether to run it again. */
+static bool optimism_retry(Bridge *b, struct optimism *o, long ret)
+{
+    if (!b->optimistic_used)
+        return false;
+    broker_strict(0);
+    if (ret != -ELOOP)
+        return false;
+    if (!o->hints) {
+        long mem = raw_syscall(__NR_mmap, 0, sizeof(*o->hints), 3, 0x22, -1, 0);
+        o->hints = (unsigned long)mem >= (unsigned long)-4095 ? NULL : (void *)mem;
+        if (o->hints) o->hints->count = 0;
+    }
+    struct link_hints *h = o->hints;
+    o->on = !b->force_full && h && h->count < LINK_HINTS &&
+        broker_link_report(h->path[h->count], h->target[h->count]) &&
+        climbing_target(h->target[h->count]);
+    if (o->on) h->count++;
+    return true;
+}
+
+static void optimism_end(struct optimism *o)
+{
+    if (o->hints) raw_syscall(__NR_munmap, (long)o->hints, sizeof(*o->hints), 0, 0, 0, 0);
+}
+
+/* One call through the bridge, optimistically first in isolation mode. */
+static long bridge_run(long number, long args[6], const struct proot_open_origin *anchor,
+                       struct proot_open_origin *origin, const struct proot_path_context *context)
+{
+    long saved[6];
+    memcpy(saved, args, sizeof(saved));
+    struct optimism o = {g_payload_config.isolate, NULL};
+    for (;;) {
+        Bridge *b;
+        long ret = bridge_create(&b);
+        if (ret < 0) {
+            optimism_end(&o);
+            return ret;
+        }
+        b->context = context;
+        if (anchor) {
+            b->anchor = *anchor;
+            b->anchor_fd = (number == __NR_chdir || number == __NR_getcwd) ? AT_FDCWD : (int)args[0];
+        }
+        optimism_begin(b, &o);
+        ret = dispatch(b, number, args, origin);
+        bool again = optimism_retry(b, &o, ret);
+        bridge_release(b);
+        if (!again) {
+            optimism_end(&o);
+            return ret;
+        }
+        memcpy(args, saved, sizeof(saved));
+    }
+}
+
 static long bridge_syscall(long number, long args[6], const struct proot_open_origin *anchor,
                            struct proot_open_origin *origin)
 {
     if (!proot_handles_syscall(number))
         return -ENOSYS;
-    Bridge *b;
-    long ret = bridge_create(&b);
-    if (ret < 0)
-        return ret;
-    if (anchor) {
-        b->anchor = *anchor;
-        b->anchor_fd = (number == __NR_chdir || number == __NR_getcwd) ? AT_FDCWD : (int)args[0];
-    }
-    ret = dispatch(b, number, args, origin);
-    bridge_release(b);
-    return ret;
+    return bridge_run(number, args, anchor, origin, NULL);
 }
 
 long proot_syscall(long number, long args[6])
@@ -1985,13 +2168,7 @@ long proot_cwd(long number, long args[6], const struct proot_open_origin *anchor
 long proot_context_syscall(long number, long args[6], const struct proot_path_context *context)
 {
     if (!context || !proot_handles_syscall(number)) return -EINVAL;
-    Bridge *b;
-    long ret = bridge_create(&b);
-    if (ret < 0) return ret;
-    b->context = context;
-    ret = dispatch(b, number, args, NULL);
-    bridge_release(b);
-    return ret;
+    return bridge_run(number, args, NULL, NULL, context);
 }
 
 int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
@@ -2016,6 +2193,43 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
     }
     bridge_release(b);
     return (int)ret;
+}
+
+/* Isolation mode: resolve an exec path and open it read-only (not
+ * close-on-exec) through the broker, optimistically like bridge_run, so a
+ * plain path costs one round trip. Returns the FD. */
+long proot_open_exec_path(int dirfd, const char *path, bool follow,
+                          char *guest, char *host, size_t capacity,
+                          const struct proot_path_context *context)
+{
+    if (!guest || !host || !capacity)
+        return -EINVAL;
+    struct optimism o = {true, NULL};
+    for (;;) {
+        Bridge *b;
+        long ret = bridge_create(&b);
+        if (ret < 0) {
+            optimism_end(&o);
+            return ret;
+        }
+        b->context = context;
+        optimism_begin(b, &o);
+        ret = resolve(b, dirfd, path, follow);
+        if (!ret && (strlen(b->guest) >= capacity || strlen(b->host) >= capacity))
+            ret = -ENAMETOOLONG;
+        if (!ret) {
+            strcpy(guest, b->guest);
+            strcpy(host, b->host);
+            ret = raw_syscall(__NR_openat, AT_FDCWD, (long)b->host, O_RDONLY | (follow ? 0 : O_NOFOLLOW),
+                              0, 0, 0);
+        }
+        bool again = optimism_retry(b, &o, ret);
+        bridge_release(b);
+        if (!again) {
+            optimism_end(&o);
+            return ret;
+        }
+    }
 }
 
 /* This deliberately does not emulate general openat2 resolution. Holding the

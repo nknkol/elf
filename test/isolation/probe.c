@@ -32,6 +32,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/inotify.h>
+#include <time.h>
 #include <unistd.h>
 #include <asm/unistd.h>
 #include "config.h"
@@ -397,6 +398,90 @@ static void after_broker_gone(const char *path)
     waitpid(pid, 0, 0);
 }
 
+static long now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000000000l + t.tv_nsec;
+}
+
+/* Round-trip costs (ns/op): an empty request the broker refuses at once,
+ * an lstat of PATH (a host path) through the broker, the same lstat issued
+ * natively from the broker's point of view is not measurable here. */
+static void rtt(const char *path, const char *guest)
+{
+    payload_config_t *cfg = payload_config();
+    enum { N = 2000 };
+    long t0;
+    if (!cfg || !cfg->isolate)
+        goto guest;
+    int pair[2];
+    via(__NR_socketpair, AF_UNIX, SOCK_SEQPACKET, 0, (long)pair, 0, 0);
+    char hello = 'c', control[CMSG_SPACE(sizeof(int))];
+    struct iovec io = {&hello, 1};
+    struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+    h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(h), &pair[1], sizeof(int));
+    via(__NR_sendmsg, cfg->isolate_fd, (long)&m, 0, 0, 0, 0);
+    struct broker_request *r = calloc(1, BROKER_MESSAGE_MAX);
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) { r->nr = 99999; request(pair[0], r, sizeof(*r), 0, 0, 0, 0); }
+    printf("empty %ld\n", (now_ns() - t0) / N);
+    size_t n = with_paths(r, __NR_newfstatat, path, 1, 0, 0);
+    r->args[0] = AT_FDCWD; r->args[3] = AT_SYMLINK_NOFOLLOW; r->len[2] = 128;
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) request(pair[0], r, n, 0, 0, 0, 0);
+    printf("lstat %ld\n", (now_ns() - t0) / N);
+    n = with_paths(r, __NR_openat, path, 1, 0, 0);
+    r->args[0] = AT_FDCWD;
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) { long fd = request(pair[0], r, n, 0, 0, 0, 0); if (fd >= 1000) close((int)fd - 1000); }
+    printf("open %ld\n", (now_ns() - t0) / N);
+guest:;
+    struct stat st;
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) hooked(__NR_newfstatat, AT_FDCWD, (long)guest, (long)&st, 0, 0, 0);
+    printf("guest-stat %ld\n", (now_ns() - t0) / N);
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) hooked(__NR_getppid, 0, 0, 0, 0, 0, 0);
+    printf("getppid %ld\n", (now_ns() - t0) / N);
+    int sp[2];
+    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sp);
+    if (!fork()) { char b[64]; while (read(sp[1], b, 64) > 0) write(sp[1], b, 1); _exit(0); }
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) { char b[64]; write(sp[0], b, 64); read(sp[0], b, 64); }
+    printf("pingpong %ld\n", (now_ns() - t0) / N);
+    /* The same with an FD back each time (SCM_RIGHTS), no broker involved. */
+    int fp[2];
+    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fp);
+    if (!fork()) {
+        int file = open("/dev/null", O_RDONLY);
+        char b[64], control[CMSG_SPACE(sizeof(int))];
+        while (read(fp[1], b, 64) > 0) {
+            struct iovec io = {b, 1};
+            struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+            struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+            h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+            memcpy(CMSG_DATA(h), &file, sizeof(int));
+            sendmsg(fp[1], &m, 0);
+        }
+        _exit(0);
+    }
+    t0 = now_ns();
+    for (int i = 0; i < N; i++) {
+        char b[64], control[CMSG_SPACE(sizeof(int))];
+        write(fp[0], b, 64);
+        struct iovec io = {b, 64};
+        struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+        recvmsg(fp[0], &m, 0);
+        int got; memcpy(&got, CMSG_DATA(CMSG_FIRSTHDR(&m)), sizeof(int));
+        close(got);
+    }
+    printf("pingpong-fd %ld\n", (now_ns() - t0) / N);
+    close(sp[0]); close(fp[0]);
+}
+
 static void killbroker(const char *path)
 {
     char line[8];
@@ -472,6 +557,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "forge")) forge(p, q, argv[5], argv[6]);
     else if (!strcmp(op, "killbroker")) killbroker(p);
     else if (!strcmp(op, "cutoff")) cutoff(p);
+    else if (!strcmp(op, "rtt")) rtt(p, q);
     else if (!strcmp(op, "procs")) procs();
     else {
         long rc = path_op(op, p, q);

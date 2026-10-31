@@ -293,6 +293,19 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "isolate: cannot open the loader binary");
 		z_close(self);
 		cfg.loader_fd = (int32_t)high;
+		/* The owners fake_id0 reports as root, for every guest process. */
+		int n = 0;
+		cfg.owners[n][0] = (uint32_t)z_syscall(__NR_getuid);
+		cfg.owners[n++][1] = (uint32_t)z_syscall(__NR_getgid);
+		for (int i = -1; i < cfg.bind_count && n < CONFIG_OWNERS; i++) {
+			const char *host = i < 0 ? cfg.root : cfg.binds[i].dst;
+			struct stat st;
+			if (host[0] && z_newfstatat(AT_FDCWD, host, &st, 0) == 0 && (st.st_mode & 0170000) == 0040000) {
+				cfg.owners[n][0] = st.st_uid;
+				cfg.owners[n++][1] = st.st_gid;
+			}
+		}
+		cfg.owner_count = n;
 	}
 	int envc;
 	char **env = environment(&cfg, &opt, host_env, &envc);
