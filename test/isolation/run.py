@@ -114,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
             policy = ['--guard-file-access', 'wrdwwr', '--allow-stdio-output', '--allow-stream-input'] if guarded else []
 
             def run(*args, isolate=True, shell=False, control=False):
-                argv = [str(loader), *(['--isolate'] if isolate else []), '--mode', 'container',
+                argv = [str(loader), *(['--isolate', *lib.ISOLATE_EXTRA] if isolate else []), '--mode', 'container',
                         '--root', str(alpine)]
                 for host, guest in volumes:
                     argv += ['-v', f'{host}:{guest}']
@@ -204,7 +204,11 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
             p, v = run('d', 'filter')
             table = {k: x for k, x in v.items() if k.startswith('nr')}
             bad = {k: x for k, x in table.items() if not eperm(x)}
-            rules = {'execveat-path': eperm, 'execveat-empty': lambda x: x not in (None, EPERM),
+            # --isolate-device: execveat runs only the loader FD with the
+            # loader's own empty path (docs/ISOLATION.md, "GPU 设备").
+            device = '--isolate-device' in lib.ISOLATE_EXTRA
+            rules = {'execveat-path': eperm,
+                     'execveat-empty': eperm if device else lambda x: x not in (None, EPERM),
                      'socket-unix': eperm, 'socket-inet': lambda x: x == 1,
                      'socketpair-dgram': eperm, 'socketpair-stream': zero, 'prlimit-self': zero,
                      'prlimit-other': eperm, 'ioctl-setflags': eperm, 'getpid-ok': lambda x: x == 1,
@@ -228,7 +232,7 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
             # from its svc, and the broker processes killed from outside.
             expect('H', ('h', 'cutoff', '/rw/file'), {'before': zero, 'close-control': zero,
                                                        'after': neg, 'after-stat': neg, 'after-child': neg})
-            argv = [str(loader), '--isolate', '--mode', 'container', '--root', str(alpine),
+            argv = [str(loader), '--isolate', *lib.ISOLATE_EXTRA, '--mode', 'container', '--root', str(alpine),
                     *sum((['-v', f'{h}:{g}'] for h, g in volumes), []), *policy, '--',
                     './iso-probe', 'h', 'killbroker', '/rw/file']
             guest_process = subprocess.Popen(argv, cwd=alpine, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

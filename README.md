@@ -40,6 +40,8 @@ build/elfloader --mode container --root /absolute/path/to/rootfs \
 | `--link-copy` | 存储拒绝硬链接时改为复制（dpkg/apt 需要） |
 | `--kernel-release R`、`--kernel-sysname S` | 改写 uname（同 PRoot -k） |
 | `--seccomp-backstop` | seccomp 兜底：截获未改写的系统调用；每次调用约多 2 µs |
+| `--isolate` | 隔离模式：文件访问由 broker 进程授权，guest 装 seccomp 过滤器（[设计](docs/ISOLATION.md)） |
+| `--isolate-device DEV` | 隔离模式下允许 guest 自己打开 GPU 设备节点（`/dev/hvgr0` 等固定几个；可重复） |
 | `--log LEVEL` | loader 诊断输出（0-4）；非零时崩溃会打印寄存器转储 |
 | `--payload FILE` | 改用外部 payload（测试用；ABI 必须一致） |
 

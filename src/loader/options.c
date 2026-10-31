@@ -185,6 +185,18 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			cfg->seccomp_backstop = 1;
 		} else if (is(arg, "--isolate")) {
 			opt->isolate = 1;
+		} else if (is(arg, "--isolate-device")) {
+			const char *v = value(argc, argv, &i);
+			int index = z_strlen(v) < ISOLATE_PATH_MAX ? isolate_device_index(v) : -1;
+			if (index < 0)
+				z_errx(1, "unsupported isolated device %s", v);
+			cfg->device_mask |= 1u << index;
+		} else if (is(arg, CONFIG_CHILD_ISOLATE_DEVICES)) {
+			unsigned long mask = number(value(argc, argv, &i), (1ul << ISOLATE_DEVICES) - 1,
+						    "isolated devices");
+			cfg->device_mask = (uint32_t)mask;
+		} else if (is(arg, "--guest-filter-dump")) {
+			opt->filter_dump = 1;
 		} else if (is(arg, CONFIG_CHILD_ISOLATE_FD)) {
 			cfg->isolate = 1;
 			cfg->isolate_fd = (int32_t)number(value(argc, argv, &i), 2147483647ul, "isolate fd");
@@ -259,6 +271,8 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			z_errx(1, "unknown option %s", arg);
 		}
 	}
+	if (cfg->device_mask && !opt->isolate && !cfg->isolate && !opt->filter_dump)
+		z_errx(1, "--isolate-device requires --isolate");
 #ifdef GUARDED
 	check_guarded(cfg, opt);
 #else

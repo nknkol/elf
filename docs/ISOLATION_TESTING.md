@@ -80,6 +80,7 @@
 | L | UNIX 套接字：只能经 broker 得到流或顺序包套接字；bind 到 `r`/`d` 树或树外失败，bind 到 `w` 树成功；connect 到树外或 `d` 树的套接字失败；数据报 socketpair 以顺序包代替；抽象命名空间与 AF_INET 不受限（属网络范围） | 按左列逐项核对 |
 | M | 保留 FD：guest 关闭、dup 覆盖或设 close-on-exec 于控制套接字、loader FD 与通道 FD，不影响后续访问与 exec；即便真的失去它们，也只导致自身访问失败（H） | 后续访问与 exec 正常，或按 H 失败 |
 | N | 实际工作负载：在 `--isolate` 下运行 apt、gcc/make、git、python venv+pip、node/npm（见 STATUS.md 已验证的工作流） | 记录成功与否及与非隔离模式的耗时比；性能属第三阶段，只记录不判定。`test/isolation/workloads.py`、`test/isolation/apt_install.py`（需联网） |
+| O | `--isolate-device`：选中的 GPU 设备由 guest 自己打开并可用；ISOLATION.md“GPU 设备”验收标准中的反向项全部被拒（`test/isolation/device.py`，并入 `make check-isolation`） | 按该节逐项核对；不加选项时过滤器程序与之前逐条相同 |
 
 ## 判定标准
 

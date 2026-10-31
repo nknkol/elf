@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix='iso-case-', dir=base_dir) as tmp:
             guarded = suffix == '-guarded'
 
             def expect(args, checks):
-                argv = [str(loader), '--isolate', '--mode', 'container', '--root', str(alpine),
+                argv = [str(loader), '--isolate', *lib.ISOLATE_EXTRA, '--mode', 'container', '--root', str(alpine),
                         '-v', f'{work}:/work', '-v', f'{work}/Secret:/work/Secret', '-v', f'{work}/Ro:/work/Ro']
                 if guarded:
                     argv += ['--guard-file-access', 'rwdr', '--allow-stdio-output']

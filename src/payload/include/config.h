@@ -51,6 +51,12 @@
  * looked up once by the initial loader (fake_id0 reports them as root). */
 #define CONFIG_CHILD_OWNERS "--owners"
 #define CONFIG_OWNERS (CONFIG_MAX_BINDS + 2)
+/* Isolation mode: the GPU devices the guest may open itself (bit i: entry i
+ * of the loader's constant page). */
+#define CONFIG_CHILD_ISOLATE_DEVICES "--isolate-devices"
+#define CONFIG_ISOLATE_DEVICES 4
+/* Isolation mode: the loader FD every guest exec runs (the filter knows it). */
+#define CONFIG_ISOLATE_LOADER_FD 898
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -97,6 +103,12 @@ typedef struct payload_config {
     int32_t loader_fd; /* the loader binary, not close-on-exec */
     int32_t owner_count; /* isolation mode: owners known (else looked up) */
     uint32_t owners[CONFIG_OWNERS][2];
+    /* --isolate-device: selected devices; the addresses of their paths and
+     * of the empty execveat path in the loader's constant page (the filter
+     * allows only those pointers). */
+    uint32_t device_mask;
+    uint64_t device_paths[CONFIG_ISOLATE_DEVICES];
+    uint64_t empty_path;
     /* Loader image and the stub islands the loader created: guest memory
      * calls may not unmap, remap or reprotect them. */
     uint32_t protected_count;

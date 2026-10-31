@@ -168,3 +168,19 @@ Linux 上 stat 只要求路径各级目录的搜索权限，不检查对象本�
   - shell 域经 loader 读 `/dev/cgroup_info/cgroup.rc`：修复前常规与 `--isolate` 都是 EACCES，bionic 链接器还报
     找不到 `/linkerconfig/ld.config.txt`；修复后两种模式的内容与原生一致，链接器警告消失。broker 对这种目录用
     `O_PATH|O_DIRECTORY|O_NOFOLLOW` 打开（O_PATH 不经 LSM 打开检查），之后的相对查找只需要搜索权限。
+
+## 2026-11-01，GPU 设备（`--isolate-device`）
+
+- 设备与构建同上；`test/isolation/device.py`（并入 `make check-isolation`），逐项判定见 ISOLATION.md“GPU 设备”
+  的验收标准与验收结果。
+- 两种构建共 38 项 PASS、0 FAIL、2 项 SKIP（宿主不允许创建硬链接，loader 硬链接的写入用例无法构造；
+  同一身份检查由大小写别名用例覆盖）。
+- 正向：Vulkan 在初始进程、fork 子进程、exec 之后、多线程中建设备并读写 1 MiB 显存均成功；只加 `--isolate`
+  的对照失败。
+- 反向：其他指针、不允许的标志、未选中的设备、与常量页相交的内存调用、userfaultfd、execveat 的其他形式、
+  对 FD 898 的关闭/覆盖/close-on-exec 均 EPERM 或被宿主沙箱 SIGSYS 终止；broker 拒绝写 loader 文件
+  （本名、大小写别名、`/proc/self/fd/898`）、`/proc/<pid>/mem`、改名或删除 `/dev/hvgr0`。
+- 回归（全部 rc=0）：`make check`、`make check-guarded`、`check-alpine`、`check-ubuntu` 各在常规、
+  `ELF_LOADER_OPTIONS=--isolate`、`ELF_LOADER_OPTIONS="--isolate --isolate-device /dev/hvgr0"` 下通过；
+  `make check-isolation` 在常规与加设备选项（run.py 与 case_alias.py 读取该变量）下均 0 failure。
+

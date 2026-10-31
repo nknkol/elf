@@ -206,6 +206,9 @@ static void configure_payload(unsigned long payload_entry, const payload_config_
 		dst->protected_ranges[n][1] = g_loader_islands[i][1];
 	}
 	dst->protected_count = n;
+	for (int i = 0; i < CONFIG_ISOLATE_DEVICES; i++)
+		dst->device_paths[i] = (uint64_t)g_isolate_page.table.path[i];
+	dst->empty_path = (uint64_t)g_isolate_page.table.empty;
 }
 
 /* argv, envp and auxv are rewritten in place: the program's arguments
@@ -248,6 +251,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	Elf_auxv_t *auxv = (Elf_auxv_t *)p;
 
 	options_parse(argc, argv, &cfg, &opt);
+	if (opt.filter_dump) {
+		guest_filter_dump(cfg.device_mask);
+		z_exit(0);
+	}
 	z_printf_enabled = cfg.log_level != LOG_LEVEL_NONE;
 	hook_set_section_scan(cfg.seccomp_backstop);
 	normalize_host_path(cfg.root, CONFIG_MAX_PATH);
@@ -285,13 +292,24 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	choose_exec_exe(&cfg, &opt, file);
 	/* The broker starts before anything of the guest is loaded. */
 	if (opt.isolate && !cfg.isolate) {
+		/* Devices the guest opens itself: checked, and their paths and the
+		 * loader file protected, before the broker starts. */
+		if (cfg.device_mask)
+			broker_guard_devices(cfg.device_mask, cfg.loader_path);
 		broker_start(&cfg);
 		/* Every guest exec re-executes this binary through an FD. */
 		int self = z_openat(AT_FDCWD, cfg.loader_path, O_RDONLY);
-		long high = self < 0 ? self : z_syscall(__NR_fcntl, self, 0 /* F_DUPFD */, 898, 0, 0, 0);
+		long high = self < 0 ? self : z_syscall(__NR_fcntl, self, 0 /* F_DUPFD */,
+							CONFIG_ISOLATE_LOADER_FD, 0, 0, 0);
 		if (high < 0)
 			z_errx(1, "isolate: cannot open the loader binary");
 		z_close(self);
+		/* The filter lets only this FD number run. */
+		if (cfg.device_mask) {
+			if (high != CONFIG_ISOLATE_LOADER_FD)
+				z_errx(1, "isolate: FD %d is taken", CONFIG_ISOLATE_LOADER_FD);
+			broker_guard_loader_fd((int)high);
+		}
 		cfg.loader_fd = (int32_t)high;
 		/* The owners fake_id0 reports as root, for every guest process. */
 		int n = 0;
@@ -335,7 +353,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	/* Last of the initial loader's own work: from here on no guest process
 	 * names a file except through the broker. */
 	if (cfg.isolate && !opt.child)
-		guest_filter_install();
+		guest_filter_install(cfg.device_mask);
 	/* /proc/<pid>/{comm,stat,status} name the guest program, not the loader. */
 	const char *name = opt.exec_name ? opt.exec_name : cfg.exec_exe;
 	for (const char *c = name; *c; c++)

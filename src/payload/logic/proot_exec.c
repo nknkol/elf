@@ -45,6 +45,7 @@ typedef struct {
     char fake_groups[32 * 11 + 2];
     char exec_fd[16];
     char isolate_fd[16];
+    char device_mask[16];
     char interp_fd[16], loader_fd[16];
     char case_folds[CONFIG_MAX_BINDS * 11];
     char owners[CONFIG_OWNERS * 24];
@@ -503,6 +504,11 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         fd_name(s->isolate_fd, "", cfg->isolate_fd);
         s->argv[pos++] = CONFIG_CHILD_ISOLATE_FD;
         s->argv[pos++] = s->isolate_fd;
+        if (cfg->device_mask) {
+            fd_name(s->device_mask, "", (int)cfg->device_mask);
+            s->argv[pos++] = CONFIG_CHILD_ISOLATE_DEVICES;
+            s->argv[pos++] = s->device_mask;
+        }
     }
     uint32_t groups[32];
     int group_count = fake_ids_groups(groups);
@@ -585,8 +591,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
 #endif
     struct reentry_slot *lease = reentry_exec_release();
     /* Isolation mode: the guest filter only lets an FD run. */
+    /* The empty path of the loader's constant page (--isolate-device). */
     if (cfg->isolate)
-        ret = raw_syscall(__NR_execveat, cfg->loader_fd, (long)"", (long)s->argv,
+        ret = raw_syscall(__NR_execveat, cfg->loader_fd,
+                          cfg->empty_path ? (long)cfg->empty_path : (long)"", (long)s->argv,
                           (long)env, AT_EMPTY_PATH, 0);
     else
         ret = raw_syscall(__NR_execve, (long)cfg->loader_path, (long)s->argv,

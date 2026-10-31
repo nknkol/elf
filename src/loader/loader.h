@@ -52,7 +52,23 @@ struct loader_options {
 	int isolate;             /* --isolate: start the broker (initial loader) */
 	int exec_interp_fd;      /* isolation: the interpreter, opened by the broker */
 	const char *case_folds;  /* isolation: bind fold marks, comma separated */
+	int filter_dump;         /* --guest-filter-dump: print the guest filter */
 };
+
+/* devices.c: the isolation constant page (docs/ISOLATION.md, "GPU 设备"). */
+#define ISOLATE_DEVICES 4
+#define ISOLATE_PATH_MAX 64
+#define ISOLATE_PAGE_MAGIC "elf-isolate-pg1"
+union isolate_page {
+	struct {
+		char magic[16];  /* lets probes find the page */
+		char empty[16];  /* the empty path of every isolated execveat */
+		char path[ISOLATE_DEVICES][ISOLATE_PATH_MAX];
+	} table;
+	char page[PAGE_SIZE];
+};
+extern const union isolate_page g_isolate_page;
+int isolate_device_index(const char *path);
 
 /* options.c */
 void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_options *opt);
@@ -92,7 +108,10 @@ void debugger_install(void);
 
 /* broker.c (isolation mode) */
 void broker_start(payload_config_t *cfg);
-void guest_filter_install(void);
+void broker_guard_devices(uint32_t mask, const char *loader_path);
+void broker_guard_loader_fd(int fd);
+void guest_filter_install(uint32_t device_mask);
+void guest_filter_dump(uint32_t device_mask);
 
 /* backstop.c */
 void backstop_install(unsigned long payload_entry, int with_filter);

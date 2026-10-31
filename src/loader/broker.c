@@ -55,6 +55,112 @@ static long sys(long n, long a, long b, long c, long d, long e, long f)
 	return z_syscall(n, a, b, c, d, e, f);
 }
 
+/* --isolate-device (docs/ISOLATION.md, "GPU 设备"): the guest opens the
+ * selected device paths itself, so what they name and the loader file that
+ * holds them must not change through the broker. */
+static struct {
+	int on;
+	unsigned long loader_dev, loader_ino;
+	int chain_count; /* directories every device path walks through */
+	unsigned long chain[ISOLATE_DEVICES * 8][2];
+} guard;
+
+static int same_file(const struct stat *st, unsigned long dev, unsigned long ino)
+{
+	return st->st_dev == dev && st->st_ino == ino;
+}
+
+/* Run by the initial loader before the broker starts: every directory a
+ * selected device path walks through is a real directory (no symlink), the
+ * device a character device; both recorded with the loader file. */
+void broker_guard_devices(uint32_t mask, const char *loader_path)
+{
+	struct stat st;
+	if (sys(__NR_newfstatat, AT_FDCWD, (long)loader_path, (long)&st, 0, 0, 0) < 0)
+		z_errx(1, "isolate: cannot stat the loader binary");
+	guard.loader_dev = st.st_dev;
+	guard.loader_ino = st.st_ino;
+	for (int i = 0; i < ISOLATE_DEVICES; i++) {
+		if (!(mask & (1u << i)))
+			continue;
+		const char *path = g_isolate_page.table.path[i];
+		for (size_t j = 0;; j++) {
+			if (path[j] && path[j] != '/')
+				continue;
+			char prefix[ISOLATE_PATH_MAX];
+			size_t n = j ? j : 1;
+			z_memcpy(prefix, path, n);
+			prefix[n] = 0;
+			if (sys(__NR_newfstatat, AT_FDCWD, (long)prefix, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) < 0)
+				z_errx(1, "isolate: cannot stat %s", prefix);
+			if (!path[j]) {
+				if ((st.st_mode & 0170000) != 0020000)
+					z_errx(1, "isolate: %s is not a character device", path);
+				break;
+			}
+			if ((st.st_mode & 0170000) != 0040000)
+				z_errx(1, "isolate: %s is not a directory", prefix);
+			int known = 0;
+			for (int k = 0; k < guard.chain_count; k++)
+				known |= same_file(&st, guard.chain[k][0], guard.chain[k][1]);
+			if (!known && guard.chain_count < (int)(sizeof(guard.chain) / sizeof(guard.chain[0]))) {
+				guard.chain[guard.chain_count][0] = st.st_dev;
+				guard.chain[guard.chain_count++][1] = st.st_ino;
+			}
+		}
+	}
+	guard.on = 1;
+}
+
+/* The FD every guest exec runs must be the file checked above. */
+void broker_guard_loader_fd(int fd)
+{
+	struct stat st;
+	if (sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) < 0 ||
+	    !same_file(&st, guard.loader_dev, guard.loader_ino))
+		z_errx(1, "isolate: the loader binary changed");
+}
+
+static int is_loader_fd(int fd)
+{
+	struct stat st;
+	return guard.on && sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) == 0 &&
+	       same_file(&st, guard.loader_dev, guard.loader_ino);
+}
+
+static int is_loader_at(int dir, const char *name)
+{
+	struct stat st;
+	return guard.on && dir >= 0 &&
+	       sys(__NR_newfstatat, dir, (long)name, (long)&st,
+		   AT_SYMLINK_NOFOLLOW | (name[0] ? 0 : AT_EMPTY_PATH), 0, 0) == 0 &&
+	       same_file(&st, guard.loader_dev, guard.loader_ino);
+}
+
+/* Names in these directories may not be removed or replaced. */
+static int on_device_path(int dir)
+{
+	struct stat st;
+	if (!guard.on || sys(__NR_fstat, dir, (long)&st, 0, 0, 0, 0) < 0)
+		return 0;
+	for (int k = 0; k < guard.chain_count; k++)
+		if (same_file(&st, guard.chain[k][0], guard.chain[k][1]))
+			return 1;
+	return 0;
+}
+
+/* /proc/<pid>/mem and /proc/<pid>/task/<tid>/mem write through page
+ * protections (the constant page). */
+static int proc_mem(const char *path)
+{
+	if (!guard.on || z_strncmp(path, "/proc/", 6))
+		return 0;
+	for (const char *p = path; *p; p++)
+		if (p[0] == '/' && !z_strncmp(p + 1, "mem", 3) && (!p[4] || p[4] == '/'))
+			return 1;
+	return 0;
+}
+
 static int identity(int fd, const char *name, int flags, unsigned long *dev, unsigned long *ino)
 {
 	struct stat st;
@@ -203,6 +309,8 @@ static int resolve(const char *input, int follow, struct target *t)
 		rc = proc_rewrite(path);
 		if (rc < 0)
 			return rc;
+		if (proc_mem(path))
+			return -EACCES_;
 		const struct tree *tree = 0;
 		for (int i = 0; i < tree_count; i++)
 			if (prefix_of(trees[i].path, trees[i].length, path) &&
@@ -357,6 +465,9 @@ static int check(const struct target *t, int write)
 		return -ENOENT_;
 	if (write && t->access != 'w')
 		return -EROFS_;
+	/* The loader file holds the device constants (and every exec). */
+	if (write && is_loader_at(t->dir, t->name))
+		return -EACCES_;
 	return 0;
 }
 
@@ -562,6 +673,11 @@ static long execute(struct call *c, long nr)
 		} else {
 			rc = sys(__NR_openat, t.dir, (long)t.name, flags | O_NOFOLLOW | O_CLOEXEC_, a[3], 0, 0);
 		}
+		/* Checked again on what was opened: the name may have changed. */
+		if (rc >= 0 && write && is_loader_fd((int)rc)) {
+			sys(__NR_close, rc, 0, 0, 0, 0, 0);
+			rc = -EACCES_;
+		}
 		if (rc >= 0) {
 			c->answer_fd = (int)rc;
 			rc = 0;
@@ -626,6 +742,8 @@ static long execute(struct call *c, long nr)
 			rc = nr == __NR_mkdirat ? -17 /* EEXIST */ : -EBUSY_;
 		if (rc >= 0)
 			rc = t.parent == 'w' ? 0 : t.parent == 'd' ? -ENOENT_ : -EROFS_;
+		if (rc >= 0 && nr == __NR_unlinkat && on_device_path(t.dir))
+			rc = -EACCES_;
 		if (rc >= 0)
 			rc = sys(nr, t.dir, (long)t.name, a[2], a[3], 0, 0);
 		break;
@@ -651,6 +769,9 @@ static long execute(struct call *c, long nr)
 		if (rc >= 0 && (t.parent != 'w' || u.parent != 'w' ||
 				(nr == __NR_linkat && t.access != 'w')))
 			rc = t.parent == 'd' || u.parent == 'd' ? -ENOENT_ : -EROFS_;
+		/* A device path keeps its names (link only adds one). */
+		if (rc >= 0 && nr != __NR_linkat && (on_device_path(t.dir) || on_device_path(u.dir)))
+			rc = -EACCES_;
 		if (rc < 0)
 			break;
 		if (nr == __NR_linkat)
@@ -697,7 +818,7 @@ static long execute(struct call *c, long nr)
 				fd_path(magic, c->fd[0]);
 				fd = (int)sys(__NR_openat, AT_FDCWD, (long)magic, 1 | O_CLOEXEC_, 0, 0, 0);
 			}
-			rc = fd < 0 ? fd : sys(__NR_ftruncate, fd, a[1], 0, 0, 0, 0);
+			rc = fd < 0 ? fd : is_loader_fd(fd) ? -EACCES_ : sys(__NR_ftruncate, fd, a[1], 0, 0, 0, 0);
 			if (fd >= 0)
 				sys(__NR_close, fd, 0, 0, 0, 0, 0);
 		}
@@ -770,6 +891,8 @@ static long execute(struct call *c, long nr)
 		rc = fd_target(c->fd[0], &t);
 		if (rc >= 0)
 			rc = check(&t, 1);
+		if (rc >= 0 && is_loader_fd(c->fd[0]))
+			rc = -EACCES_;
 		if (rc >= 0)
 			rc = sys(nr, c->fd[0], nr == __NR_fsetxattr || nr == __NR_fremovexattr ?
 				 (long)c->path[1] : a[1], nr == __NR_fsetxattr ? (long)c->path[2] : a[2],

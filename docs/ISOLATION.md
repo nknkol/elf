@@ -126,7 +126,7 @@ payload 的 exec（proot_exec）：
    目录不走乐观模式。broker 逐级走查时先 lstat 判断类型，打开目录后核对 dev/ino，不依赖打开标志（本平台上
    `O_NOFOLLOW|O_DIRECTORY` 曾打开符号链接本身）。
 
-## GPU 设备（设计，未实现）
+## GPU 设备（2026-11-01 实现，见文末“实现”）
 
 目标：显式授权后（`--isolate-device`，默认关闭），guest 进程能使用 GPU 设备节点（HarmonyOS 为
 `/dev/hvgr0`），同时过滤器仍是唯一边界：授权之外的文件访问照旧全部经 broker，且不引入依赖 guest
@@ -204,12 +204,71 @@ payload 的 exec（proot_exec）：
   （含经硬链接、大小写别名）；打开 `/proc/self/mem`。
 - 不加选项时：过滤器程序与现在逐条一致（单元比较）。
 
+### 实现（2026-11-01）
+
+用法：`--isolate --isolate-device /dev/hvgr0`（可重复，只能选表中的路径；不加 `--isolate` 时拒绝启动）。
+guest 视图里的设备路径必须翻译成同一宿主路径：compat 模式，或 container 模式下 `-v /dev/hvgr0:/dev/hvgr0`
+（或 `-v /dev:/dev`）。
+
+- **常量页**：`src/loader/devices.c` 的 `g_isolate_page`，单独占 `.rodata` 里按页对齐的一页（当前构建为
+  `0x3f00003000`）：16 字节标记 `elf-isolate-pg1`（供探针定位）、空串 `E`、四个设备路径各 64 字节。
+  `--guest-filter-dump [--isolate-device …]` 打印过滤器程序与该页地址后退出（测试用）。
+- **过滤器**（`guest_filter.c`）：不加选项时程序与之前逐条相同（`test/isolation/guest_filter_base.txt`
+  由提交 e5bc7df 的生成器导出，`device.py` 比较）。加选项时在调用号判断之前插入跳转（`JEQ` + `JA`），
+  各规则段放在原程序之后、自带返回（经典 BPF 只能前跳，条件跳转不超过 255 条）：openat（选中的 `P_i`，
+  标志只允许上表五类）、execveat（fd 898、`E`、`AT_EMPTY_PATH`）、close/close_range/dup3/fcntl(F_SETFD)/
+  ioctl(FIOCLEX) 对 898、与常量页相交的 munmap/mprotect/pkey_mprotect/madvise/remap_file_pages、
+  `MAP_FIXED` 的 mmap、mremap（旧区间或 `MREMAP_FIXED` 新区间）、`SHM_REMAP` 的 shmat、userfaultfd，
+  另加 unshare、setns（宿主沙箱也拦截，这里不依赖它）。区间相交用 32 位两半比较，`g0 - a` 存在 BPF 草稿
+  内存 M[0]/M[1]。FD 参数只比较低 32 位，与内核按 unsigned int 截断一致。约 500 条指令。
+- **loader**：选中设备时 loader FD 必须恰好是 898（被占用则拒绝启动），并核对它就是启动检查过的 loader 文件；
+  payload 配置新增 `device_mask`、各设备路径与 `E` 的地址（payload ABI 21），子 loader 经
+  `--isolate-devices <掩码>` 继承选择。
+- **payload**（`broker_client.c` 的 `host_syscall`）：翻译后的宿主路径等于选中的设备、标志在允许集合内时，
+  直接以 `P_i` 发 openat；bridge 的延迟打开会加 `O_NOFOLLOW`，对设备去掉它（末级在启动时确认是字符设备，
+  其名字由 broker 保护）。exec 用 `E` 作 execveat 的路径。
+- **broker**（`broker.c`），与上面的设计有两处不同：
+  1. 不再“loader 文件在可写树内时拒绝启用”：compat 模式的根 `/` 是可写树，这样选项在 compat 下无法使用。
+     改为按对象拒绝：启动时记录 loader 文件的 (dev, ino)，`check()` 对写类操作检查对象，写方式 openat 与
+     truncate 在打开之后再对 FD 做 fstat（名字可能在检查后被换掉），fchmod/fchown/fsetxattr/fremovexattr
+     检查收到的 FD。经硬链接、大小写别名或 `/proc/self/fd/N` 都是同一对象。（broker 原本就按 dev/ino 把
+     loader 文件识别为只读树，这里是不依赖解析路径、无竞争的第二层。）
+  2. 不再“设备路径的祖先在可写树内时拒绝启用”（同样排除了 compat 模式）。改为：启动时逐级 lstat 设备路径，
+     每级必须是目录（不是链接）、末级是字符设备，记录各级目录的 (dev, ino)；之后 broker 拒绝在这些目录中
+     unlinkat 与 renameat（两端），所以设备路径的各级名字不能被删除或替换（创建新名字不影响已有名字）。
+  另外拒绝 `/proc/<pid>/…/mem`（含 task 下）。本机上宿主本来就不让 broker 打开 guest 的 mem
+  （EACCES），这一条不依赖它。
+- **线程**：本机 Vulkan 在任何非主线程里建设备都会崩溃（原生也一样：从 ld-musl 跳到非代码地址），所以
+  “多线程”验收为主线程建设备时另一线程反复经 payload 打开设备。
+
+### 验收结果（2026-11-01，HarmonyOS 真机）
+
+`test/isolation/device.py`（并入 `make check-isolation`），两种构建：
+
+- 不加选项时过滤器与之前逐条相同；加选项后多出设备规则。
+- 拒绝启动：不带 `--isolate`、表外路径、本机不存在的 `/dev/mali0` 等。
+- 正向：Vulkan 在初始进程、fork 子进程、exec 之后、多线程（见上）中建设备、分配并映射 1 MiB 显存、写入后
+  读回，均成功；对照：只加 `--isolate` 时 createDevice 失败。
+- 反向（从 payload 自身的 svc 发出）：其他指针（同内容副本、高 32 位不同、常量中间）、O_CREAT/O_PATH/
+  O_TRUNC/O_DIRECTORY/O_TMPFILE/O_NOFOLLOW/O_APPEND、未选中的三个常量、与常量页相交的每一种内存调用
+  （含从下方跨入、MAP_FIXED 覆盖、mremap 移入）、userfaultfd、execveat 的其他 FD / 自带空串 / 缺
+  AT_EMPTY_PATH / 按路径、execve、close/dup3/fcntl/ioctl/close_range 对 898（含高位）均 EPERM，或被宿主
+  沙箱以 SIGSYS 终止（pkey_mprotect、remap_file_pages、shmat、unshare、setns、close_range）。相邻页的
+  mprotect、自己的 MAP_FIXED、提示地址 mmap 正常；`execveat(898, E, …, AT_EMPTY_PATH)` 确实运行 loader。
+- broker：loader 文件本名与大小写别名以 O_RDWR/O_WRONLY/O_TRUNC 打开、truncate、`/proc/self/fd/898`
+  写方式重开均失败，只读打开正常，文件哈希与权限不变；硬链接本机宿主不允许创建（SKIP）。
+  `/proc/self/mem`、`/proc/<pid>/mem`、`/proc/<pid>/task/<tid>/mem` 失败、`/proc/self/status` 正常；
+  `/dev/hvgr0` 的改名与删除失败。
+- 回归：见 ISOLATION_RESULTS.md。
+
 ## 剩余风险（本模式也不能消除）
 
 - 内核漏洞（guest 仍直接使用 read/write/mmap 等）；
 - 资源耗尽与拒绝服务（无 cgroup；guest 可以杀掉 broker，结果是失败即关闭）；
 - 侧信道；
 - 与宿主应用同一 uid：kill 其他同 uid 进程、网络、经 binder 等访问系统服务；
-- `execveat` 带非空路径时可执行任意可执行文件（不能读写文件，但可读取其映像内容）；
+- 不加 `--isolate-device` 时：`execveat` 带非空路径可执行任意可执行文件（不能读写文件，但可读取其映像内容）；
+  加了该选项时过滤器只放行 loader FD 与常量页的空串，这一条不再存在；
+- 加 `--isolate-device` 时：所选设备驱动的 ioctl 面（内核驱动漏洞），由用户显式接受；
 - 宿主上已有的跨区硬链接（同一 inode 在只读与可写区都可见）；
 - 从宿主继承来的数据报 UNIX 套接字（可向任意路径名发送）。

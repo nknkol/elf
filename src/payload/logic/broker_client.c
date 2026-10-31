@@ -403,11 +403,39 @@ static long broker_call(const struct broker_spec *spec, long nr, const long a[6]
     return answer->result;
 }
 
+/* --isolate-device: a selected device is opened by this process itself
+ * (its driver binds to the opener's address space), naming it with the
+ * loader's constant: the only path pointer the guest filter lets through.
+ * Other flags go to the broker as usual. */
+#define O_NOFOLLOW_ 0100000
+#define DEVICE_OPEN_FLAGS (03L | 0400L | 04000L | 0400000L | 02000000L)
+
+static int device_open(long path, long flags, long *rc)
+{
+    uint32_t mask = g_payload_config.device_mask;
+    /* The bridge's deferred open adds O_NOFOLLOW: the device node itself
+     * (checked at start, its name kept by the broker) is no symlink. */
+    flags &= ~(long)O_NOFOLLOW_;
+    if (!mask || !path || *(const char *)path != '/' || (flags & ~DEVICE_OPEN_FLAGS))
+        return 0;
+    for (int i = 0; i < CONFIG_ISOLATE_DEVICES; i++) {
+        const char *device = (const char *)g_payload_config.device_paths[i];
+        if ((mask & (1u << i)) && device && !strcmp((const char *)path, device)) {
+            *rc = raw_syscall(__NR_openat, AT_FDCWD, (long)device, flags, 0, 0, 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 long host_syscall(long nr, long a0, long a1, long a2, long a3, long a4, long a5)
 {
     const struct broker_spec *spec;
     if (!g_payload_config.isolate || !(spec = broker_spec(nr)))
         return raw_syscall(nr, a0, a1, a2, a3, a4, a5);
+    long rc;
+    if (nr == __NR_openat && device_open(a1, a2, &rc))
+        return rc;
     /* fstat spelled as fstatat (glibc): the FD's own metadata, no path. */
     if (nr == __NR_newfstatat && (int)a0 != AT_FDCWD && a1 && !*(const char *)a1 &&
         (a3 & 0x1000 /* AT_EMPTY_PATH */))

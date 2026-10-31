@@ -18,6 +18,9 @@ UBUNTU = BUILD / 'ubuntu-test-root'
 SUFFIXES = ('', '-guarded')
 # Extra loader options for whole test runs, e.g. ELF_LOADER_OPTIONS=--isolate.
 EXTRA = os.environ.get('ELF_LOADER_OPTIONS', '').split()
+# The same minus --isolate, for tests that pass --isolate themselves
+# (e.g. ELF_LOADER_OPTIONS='--isolate --isolate-device /dev/hvgr0').
+ISOLATE_EXTRA = [option for option in EXTRA if option != '--isolate']
 sys.path.insert(0, str(REPO / 'tools'))
 import elf_abi  # noqa: E402  (tools/elf_abi.py)
 ABI = elf_abi

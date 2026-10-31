@@ -64,6 +64,7 @@ check-ubuntu:
 check-isolation: build
 	$(PYTHON) test/isolation/run.py
 	$(PYTHON) test/isolation/case_alias.py
+	$(PYTHON) test/isolation/device.py
 check-guarded: build
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py
