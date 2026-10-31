@@ -41,7 +41,17 @@ static struct payload_stack *claim_stack(long tid)
     for (int i = 0; i < PAYLOAD_STACKS; i++)
         if (__atomic_load_n(&payload_stacks[i].owner, __ATOMIC_RELAXED) == tid)
             return 0; /* Already on it (a nested call). */
+    for (int pass = 0; pass < 2; pass++)
     for (int i = 0; i < PAYLOAD_STACKS; i++) {
+        /* Second pass: stacks of threads that exited holding them (a thread
+         * that unmapped its own stack exits from the payload). */
+        if (pass) {
+            long owner = __atomic_load_n(&payload_stacks[i].owner, __ATOMIC_RELAXED);
+            if (owner > 0 && raw_syscall(__NR_tgkill, raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0),
+                                         owner, 0, 0, 0, 0) == -ESRCH)
+                __atomic_compare_exchange_n(&payload_stacks[i].owner, &owner, 0, 0,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
         struct payload_stack *s = &payload_stacks[i];
         long free_owner = 0;
         if (!__atomic_compare_exchange_n(&s->owner, &free_owner, tid, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
@@ -97,6 +107,15 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
 static long dispatch_here(long sys_no, pt_regs *regs)
 {
     long *a = (long *)regs->regs;
+    /* A thread unmapping the stack it entered on (musl's __unmapself: munmap
+     * then exit, touching no stack): nothing can return to it, since the
+     * entry saved the registers there. Its only next step is exit. */
+    if (sys_no == __NR_munmap && (unsigned long)regs - (unsigned long)a[0] < (unsigned long)a[1]) {
+        long rc = raw_syscall(__NR_munmap, a[0], a[1], 0, 0, 0, 0);
+        if (!rc)
+            raw_syscall(__NR_exit, 0, 0, 0, 0, 0, 0);
+        return rc;
+    }
     /* The backends may rewrite their copy; the saved registers stay. */
     long args[6] = {a[0], a[1], a[2], a[3], a[4], a[5]};
     long ret;
