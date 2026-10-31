@@ -39,13 +39,13 @@ class LaunchTests(unittest.TestCase):
         self.assertIn('--allow-local-output', argv)
 
     def test_limits(self):
-        many = dict(self.compiled, mounts=self.compiled['mounts'] * 4)
+        many = dict(self.compiled, mounts=self.compiled['mounts'] * 16)
         with self.assertRaises(launch.ProfileError):
             launch.command_line(many, self.state/'root', Path('/l'), '/', ['/bin/sh'], [])
         with self.assertRaises(launch.ProfileError):
             launch.command_line(self.compiled, self.state/'root', Path('/l'), '/', ['sh'], [])
         with self.assertRaises(launch.ProfileError):
-            launch.environment(self.compiled, [f'K{i}=v' for i in range(16)], None)
+            launch.environment(self.compiled, [f'K{i}=v' for i in range(launch.MAX_ENVS)], None)
         with self.assertRaises(launch.ProfileError):
             launch.environment(self.compiled, ['LONG=' + 'x' * 300], None)
 

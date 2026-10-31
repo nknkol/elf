@@ -135,10 +135,12 @@ static long dispatch_here(long sys_no, pt_regs *regs)
         ret = DISPATCH(sys_no, again);
     }
     if (!ret) fake_ids_stat_owner(sys_no, a);
-    /* struct utsname: six 65-byte fields; sysname first, release third. */
+    /* struct utsname: six 65-byte fields; sysname, nodename, release. */
     if (!ret && sys_no == __NR_uname && a[0]) {
         if (g_payload_config.kernel_sysname[0])
             memcpy((char *)a[0], g_payload_config.kernel_sysname, 65);
+        if (g_payload_config.hostname[0])
+            memcpy((char *)a[0] + 65, g_payload_config.hostname, 65);
         if (g_payload_config.kernel_release[0])
             memcpy((char *)a[0] + 130, g_payload_config.kernel_release, 65);
     }

@@ -350,6 +350,14 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		debugger_install();
 	if (cfg.seccomp_backstop)
 		backstop_install(payload_entry, !opt.child);
+	/* --cwd: the guest directory, through the root and binds (the program
+	 * and its interpreter are loaded: they were named from the root). */
+	if (opt.cwd && !opt.child) {
+		char host[CONFIG_MAX_PATH];
+		const char *dir = resolve_interp_path(&cfg, opt.cwd, host, sizeof(host));
+		if (z_chdir(dir) < 0)
+			z_errx(1, "cannot enter working directory %s", opt.cwd);
+	}
 	/* Last of the initial loader's own work: from here on no guest process
 	 * names a file except through the broker. */
 	if (cfg.isolate && !opt.child)

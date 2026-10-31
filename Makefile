@@ -43,6 +43,7 @@ check: build
 	$(PYTHON) test/fs_policy/interp_links.py
 	$(PYTHON) test/proot/test_inotify.py
 	$(PYTHON) test/proot/test_exec.py
+	$(PYTHON) test/proot/test_runspec.py
 	$(PYTHON) test/proot/test_auxv.py
 	$(PYTHON) test/proot/test_jit.py
 	$(PYTHON) test/syscalls/check_dispatch.py

@@ -32,7 +32,7 @@
 #define ROUND_PG(x) (((x) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 #define TRUNC_PG(x) ((x) & ~(PAGE_SIZE - 1))
 
-#define LOADER_MAX_ENVS 16
+#define LOADER_MAX_ENVS 512
 
 /* Command line: the user's options, and the child-loader protocol the
  * payload uses to re-execute the loader for a guest exec. */
@@ -53,6 +53,7 @@ struct loader_options {
 	int exec_interp_fd;      /* isolation: the interpreter, opened by the broker */
 	const char *case_folds;  /* isolation: bind fold marks, comma separated */
 	int filter_dump;         /* --guest-filter-dump: print the guest filter */
+	const char *cwd;         /* --cwd: guest working directory of the program */
 };
 
 /* devices.c: the isolation constant page (docs/ISOLATION.md, "GPU 设备"). */

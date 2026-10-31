@@ -19,7 +19,7 @@
 
 #define CONFIG_MAX_PATH     256
 #define CONFIG_AUXV_PAIRS   64
-#define CONFIG_MAX_BINDS    16
+#define CONFIG_MAX_BINDS    64
 #define CONFIG_CHILD_LOADER_ARG "--child-loader"
 #define CONFIG_CHILD_EXEC_TARGET "--exec-target"
 #define CONFIG_CHILD_EXEC_PATH "--exec-path"
@@ -119,6 +119,8 @@ typedef struct payload_config {
     /* uname overrides (PRoot -k for the release); empty keeps the kernel's. */
     char kernel_release[65];
     char kernel_sysname[65];
+    /* --hostname: uname nodename; empty keeps the kernel's. */
+    char hostname[65];
     /* Guarded build only (zero otherwise). */
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */

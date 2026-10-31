@@ -227,6 +227,30 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			}
 		} else if (is(arg, CONFIG_CHILD_CASE_FOLDS)) {
 			opt->case_folds = value(argc, argv, &i);
+		} else if (is(arg, "--hostname")) {
+			const char *v = value(argc, argv, &i);
+			if (z_strlen(v) >= sizeof(cfg->hostname))
+				z_errx(1, "invalid value for %s", arg);
+			copy_cstr(cfg->hostname, sizeof(cfg->hostname), v);
+		} else if (is(arg, "--cwd")) {
+			const char *v = value(argc, argv, &i);
+			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
+				z_errx(1, "--cwd needs an absolute guest path");
+			opt->cwd = v;
+		} else if (is(arg, "--user")) {
+			/* UID[:GID]: real, effective, saved and fs ids; the group is
+			 * also the only supplementary group. */
+			uint32_t ids[2];
+			const char *v = value(argc, argv, &i);
+			int n = numbers(v, ':', ids, 2, 0);
+			if (n < 1)
+				z_errx(1, "--user needs UID[:GID]");
+			for (int k = 0; k < 4; k++) {
+				cfg->fake_ids[k] = ids[0];
+				cfg->fake_ids[4 + k] = n > 1 ? ids[1] : 0;
+			}
+			cfg->fake_group_count = 1;
+			cfg->fake_groups[0] = n > 1 ? ids[1] : 0;
 		} else if (is(arg, "--kernel-release") || is(arg, "--kernel-sysname")) {
 			char *field = arg[9] == 'r' ? cfg->kernel_release : cfg->kernel_sysname;
 			const char *v = value(argc, argv, &i);
