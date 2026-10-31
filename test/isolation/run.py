@@ -93,6 +93,12 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
     (base / 'rw/abs-link').symlink_to(base / 'outside/secret')
     (base / 'rw/rel-link').symlink_to('../../outside/secret')
     (base / 'rw/ro-link').symlink_to('/ro/file')
+    # Directory links: one to a host directory outside every tree, one
+    # inside the tree (relative, like Ubuntu's /bin -> usr/bin).
+    (base / 'rw/out-dir').symlink_to(base / 'outside')
+    (base / 'rw/sub').mkdir()
+    (base / 'rw/sub/inner').write_text('inner-data\n')
+    (base / 'rw/in-dir').symlink_to('sub')
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(base / 'outside/sock'))
     listener.listen(8)
@@ -183,6 +189,9 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
                 expect('D', ('h', 'open', '/rw/ro-link', '1001'), {'open': neg})
                 expect('D', ('h', 'link', '/hidden/secret', '/rw/hard2'), {'link': neg})
                 expect('D', ('h', 'rename', '/hidden/secret', '/rw/stolen'), {'rename': neg})
+            expect('D', ('h', 'open', '/rw/out-dir/secret', '0'), {'open': neg})
+            expect('D', ('h', 'open', '/rw/in-dir/inner', '0'), {'open': zero})
+            expect('D', ('h', 'stat', '/rw/in-dir/inner'), {'stat': zero})
             expect('D', ('h', 'symlink', f'{o}/secret', '/rw/made-link'), {'symlink': zero})
             expect('D', ('h', 'open', '/rw/made-link', '0'), {'open': neg})
             # E: tampering with the payload configuration.
@@ -256,6 +265,9 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
                 checks.update({'f-open-ro-rw': neg, 'f-link-ro-to-rw': neg})
             expect('I', ('h', 'forge', f'{o}/secret', f'{H["ro"]}/file', f'{H["rw"]}/file',
                          f'{o}/sock'), checks)
+            # A host path through a directory link that leaves the trees.
+            expect('I', ('h', 'forge', f'{H["rw"]}/out-dir/secret', f'{H["ro"]}/file', f'{H["rw"]}/file',
+                         f'{o}/sock'), {'f-open-outside': neg})
             # J: exec.
             p, v = run('h', 'exec', '/ro/prog')
             ok = p.returncode == 2 and 'exec' not in v  # the program ran (no args: exit 2)
