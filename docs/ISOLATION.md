@@ -126,6 +126,84 @@ payload 的 exec（proot_exec）：
    目录不走乐观模式。broker 逐级走查时先 lstat 判断类型，打开目录后核对 dev/ino，不依赖打开标志（本平台上
    `O_NOFOLLOW|O_DIRECTORY` 曾打开符号链接本身）。
 
+## GPU 设备（设计，未实现）
+
+目标：显式授权后（`--isolate-device`，默认关闭），guest 进程能使用 GPU 设备节点（HarmonyOS 为
+`/dev/hvgr0`），同时过滤器仍是唯一边界：授权之外的文件访问照旧全部经 broker，且不引入依赖 guest
+可写内存的放行条件。
+
+### 实测事实（2026-10-31，HarmonyOS 真机，原生运行，`test/isolation/gpu_bind_probe.c`）
+
+驱动在 Vulkan 建逻辑设备时自己打开两次 `/dev/hvgr0`。用进程内 seccomp TRAP 换掉这两次 openat 的结果：
+
+| 交给驱动的 FD | vkCreateDevice |
+|---|---|
+| 驱动自己打开 | 成功 |
+| 另一进程打开、经 SCM_RIGHTS 传入（现在 broker 的做法） | -1 |
+| fork 前父进程打开、子进程继承 | -1 |
+| 本进程事先打开一个，两次都 dup 它 | -1 |
+| 本进程事先打开多个，每次给一个新的 | 成功（建设备、分配并映射显存、写入） |
+| 本进程打开后 exec 自身（同 pid，新地址空间） | -1 |
+
+结论：上下文绑定到**打开者的地址空间**，每次 open 一个上下文，打开的时间无关。所以 broker 代开永远不行，
+必须由使用它的 guest 进程（同一地址空间）自己执行 open。
+
+宿主应用沙箱自带的 seccomp 对 Landlock、mseal、unshare（user/mount namespace）一律 SIGSYS，用户通知也不可用：
+没有“内核持有的路径白名单”或“不可改写的内存”可借用，只能靠我们自己的过滤器。
+
+### 方案：过滤器按“固定地址的常量路径”放行
+
+过滤器读不到路径字符串，但能比较指针。放行条件：
+
+- `openat(任意, P_i, flags)`：`P_i` 是 loader 映像只读段中第 i 个设备路径常量的地址（loader 为静态非 PIE，
+  地址链接时固定）；只放行 `--isolate-device` 选中的那几个 i；`flags` 只允许 `O_ACCMODE`、`O_CLOEXEC`、
+  `O_NONBLOCK`、`O_LARGEFILE`、`O_NOCTTY`（无 O_CREAT、O_PATH、O_TMPFILE、O_TRUNC、O_DIRECTORY）。
+  路径是绝对的，dirfd 不参与解析。
+- 设备路径表编译进 loader（如 `/dev/hvgr0`、`/dev/mali0`、`/dev/kgsl-3d0`、`/dev/dri/renderD128`），放在单独
+  按页对齐的只读节；运行时只能选，不能填，因为内容必须来自 loader 文件本身。
+- payload：guest 路径经 PRoot 翻译后的宿主路径等于选中的设备时，直接以 `P_i` 发 openat，不经 broker。
+
+该条件安全，当且仅当**每个受过滤进程里 `P_i` 处都是 loader 映像中的那个常量**。需要以下不变量，全部由过滤器
+或 broker 强制，不依赖 payload：
+
+1. **受过滤进程都在运行 loader 映像**（归纳）：初始 loader 装过滤器；之后 `execveat` 只放行
+   `fd == 898`（loader FD）且 `pathname == E`（同一只读节中的空串常量）且带 `AT_EMPTY_PATH`。
+   FD 898 不可替换：过滤器拒绝 `close(898)`、覆盖 898 的 `close_range`、`dup3/dup2` 以 898 为目标、
+   `fcntl(898, F_SETFD)`、`ioctl(898, FIOCLEX)`（payload 现已对这些“假装成功”，这里改由过滤器兜底）。
+   `F_DUPFD` 取不到已占用的 898。副作用：现有剩余风险“`execveat` 带非空路径可执行任意文件”随之消除。
+2. **常量页不可替换**：过滤器拒绝与该只读节区间 `[G0, G1)` 相交的 `munmap`、`mprotect`、`pkey_mprotect`、
+   `madvise`、`mremap`（旧区间相交，或 `MREMAP_FIXED` 的新地址相交）、带 `MAP_FIXED` 的 `mmap`、
+   带 `SHM_REMAP` 的 `shmat`、`remap_file_pages`；`userfaultfd` 整体拒绝。不带 MAP_FIXED 的提示地址与
+   `MAP_FIXED_NOREPLACE` 不会覆盖已有映射，无需拦。区间检查在 BPF 里用 32 位两半与进位比较实现；只守这一节
+   （一两页），loader 其余部分、payload 与 stub 岛不受影响。
+3. **常量页的内容不可改**：
+   - 它是 loader 文件的 MAP_PRIVATE 只读映射，未写过的页随文件内容变化：broker 启动时记录 loader 文件
+     (dev, ino)，拒绝对它的写方式打开、截断、改元数据；loader 文件位于可写树内时拒绝启用 `--isolate-device`。
+   - 绕过页保护的写入：`/proc/<pid>/mem`（FOLL_FORCE）由 broker 拒绝打开；ptrace、process_vm_writev 已拒绝。
+4. **路径解析不受 guest 影响**：chroot、mount 一族已拒绝，unshare 被宿主沙箱拦截；启动时检查设备路径的各级
+   祖先都不在任何可写树内、末级是字符设备，否则拒绝启用。
+
+授予的能力仅是“打开选中的设备节点”；驱动 ioctl 面（内核驱动漏洞）是用户显式接受的剩余风险，写入
+“剩余风险”一节。不加 `--isolate-device` 时过滤器与现在逐条相同。
+
+### 否决的方案
+
+- broker 代开 / SCM_RIGHTS / fork 前预开：见上表，上下文属于打开者。
+- 初始 loader 装过滤器前预开一池 FD：只对初始进程有效（fork、exec 后的进程用不了），每建一个设备耗两个，
+  池用完即止。若方案的区间检查与平台冲突，可作退路。
+- 进程内不受过滤的辅助线程代开：与 guest 共享内存，可被劫持成不受过滤的线程。
+- seccomp 用户通知 + CONTINUE：本平台不可用，且内核文档明确 CONTINUE 不能用于安全决策（检查后路径可被改写）。
+
+### 验收标准（实现时）
+
+- 正向：`--isolate --isolate-device /dev/hvgr0` 下 gpu_bind_probe 的 self 流程在初始进程、fork 子进程、
+  exec 之后的进程、多线程中都成功；四套回归与 check-isolation 在加该选项后仍通过。
+- 反向（均须 EPERM，broker 的情形为拒绝）：其他指针的 openat；`P_i` 但带 O_CREAT/O_PATH/O_TRUNC/O_DIRECTORY；
+  未选中的 `P_j`；与常量节相交的每一种内存调用；`userfaultfd`；`execveat` 的 fd ≠ 898 或 pathname ≠ E；
+  `close(898)`、`dup3(x, 898)`、`fcntl(898, F_SETFD)`、`close_range` 覆盖 898；写方式打开 loader 文件
+  （含经硬链接、大小写别名）；打开 `/proc/self/mem`。
+- 不加选项时：过滤器程序与现在逐条一致（单元比较）。
+
 ## 剩余风险（本模式也不能消除）
 
 - 内核漏洞（guest 仍直接使用 read/write/mmap 等）；

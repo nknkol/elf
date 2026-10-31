@@ -434,6 +434,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 父进程关错 FD（make 丢失 stdout、guarded 下每次 spawn 泄漏两个 FD）。现在慢路径调用在 payload 自己的栈上运行（8 个 64 KiB，
 按线程认领，vfork 父进程在返回时收回子进程占用的），guest 栈只用约 1.2–1.6 KiB；FD 运行时的交接快照移出栈、
 `guarded_mapping` 不再内联。`small_stack.py` 改为测量用量，上限 4 KiB，两种构建、加不加 `--isolate`。
+2026-10-31 GPU（Maleoon 916，系统 Vulkan/EGL）：原生可用，loader 下原先任何模式都不行。(1) HarmonyOS 上大量系统库链接（`/system/lib64/platformsdk/*.so`、`/bin/ls`）lstat 返回 EACCES 而 readlink 可用，payload 与 broker 的逐级解析因此失败（vkCreateInstance -9，`/bin/ls` 在 `--isolate` 下不能运行）；现在 lstat 被拒时用 readlink 判断是否为链接，broker 对查不到元数据的中间目录以 `O_NOFOLLOW|O_DIRECTORY` 打开（无法核对 dev/ino，被换成链接时其后的相对查找为 ENOTDIR）。常规与 guarded 下 Vulkan 能枚举并使用 GPU。(2) 加载 GPU 库后退出崩溃：libhicollie 的分离线程由 musl `__unmapself` 卸载自己的栈后退出，而 payload 入口把寄存器存在那段栈上；现在卸载覆盖入口寄存器的 munmap 直接接 exit，payload 栈槽位回收已退出（tgkill 返回 ESRCH）的持有者。(3) `--isolate` 下仍不可用：实测 GPU 上下文绑定到打开者的地址空间（broker 代开、fork 前打开、exec 前打开都失败），设计见 [ISOLATION](ISOLATION.md)“GPU 设备”，未实现。四套回归在常规与 `--isolate` 下通过（252 / 171 / 18 / 18），check-isolation 159 项通过。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -479,8 +480,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
    sendto/sendmsg 带 UNIX 路径名返回 EPERM。syslog()、SysLogHandler、logger、数据报 socketpair 与常规模式表现相同；
    只有直接使用命名或抽象名数据报套接字的程序受影响。安全支持需要 broker 代理收发（guest 持有的数据报套接字
    可用 sendmsg 向任意路径发送，过滤器看不到地址），出现具体需求前不做（HarmonyOS 原生程序的 HiLog 因此连不上，
-   只是一条警告）。另外：exec 经 broker 打开程序，宿主上能执行却查不到的名字（HarmonyOS 的 `/bin/ls` 等，
-   stat 返回 EACCES）不能运行，同一 toybox 经 `/usr/bin/ls` 可以；`/proc/<其他 pid>` 不可达；loader 自身的
+   只是一条警告）。另外：GPU 设备不可用（上下文属于打开者，broker 代开无效，设计见 ISOLATION.md“GPU 设备”）；`/proc/<其他 pid>` 不可达；loader 自身的
    TMPDIR 是 glue 基目录，其中只开放 `proot-glue-*`，guest 的 TMPDIR 应另设。
 3. **剩余风险**（ISOLATION.md）：内核漏洞、资源耗尽、侧信道、同 uid 的信号/网络/系统服务、`execveat`
    带非空路径、宿主已有的跨区硬链接、继承的数据报 UNIX 套接字。
@@ -493,3 +493,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 1. 实际 agent/brew 工具链在 `--isolate` 下的端到端验证（第 6 项）。
 2. 带回 FD 的隔离调用（open）是否值得再优化（第 1 项）。
+3. 隔离模式下的 GPU 设备（`--isolate-device`，ISOLATION.md“GPU 设备”）。
