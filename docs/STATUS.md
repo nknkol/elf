@@ -424,6 +424,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-10-31 隔离模式下 Python venv 卡住：Python 3.14 的 subprocess 走 glibc posix_spawn + closefrom(3)。glibc 先试 close_range，payload 原先返回 ENOSYS，glibc 退回逐个关闭：列 /proc/self/fd，每轮关过 FD 就回到开头重读。保留 FD （898–900）close 假装成功但仍在，于是 vfork 子进程永远循环。现在 close_range 由 payload 代办（跳过保留 FD，HarmonyOS 上经 broker 列 /proc/self/fd，guarded 构建逐个经 FD 运行时关闭以保持记录）。验收新增 K closerange （117 项通过）；check、check-guarded 在常规与 `--isolate` 下通过，check-guarded 的 vfork 用例也已通过；实际工作负载（goal N，`test/isolation/workloads.py`）两种构建在 `--isolate` 下输出与常规一致（[结果](ISOLATION_RESULTS.md)）。
 2026-10-31 隔离模式通道槽位：每个线程的 broker 通道槽位（64 个）在线程退出后从不回收，进程累计创建第 64 个线程起所有路径调用返回 EACCES；现在槽位用满时回收已退出线程的槽位。vfork 子进程原先会在共享内存里清掉父进程的槽位，现在改由 clone 通知处理（fork 子进程关掉继承的通道，vfork 父进程在返回后释放子进程的槽位）。procfs FD 列表不再显示保留 FD 898–900。验收新增 K channels（200 个先后创建的线程、vfork 之后、/proc/self/fd 列表），119 项通过；四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18），实际工作负载输出一致。
 2026-10-31 大小写别名隔离验收（`test/isolation/case_alias.py`，并入 `make check-isolation`，38 项通过）：在大小写不敏感的 /storage/Users 上，隐藏树与只读树的每种大小写拼写（经 payload 和直接伪造给 broker 的请求）都按对象所在树处理，可写树中的大小写变体照常可用；未发现缺陷。apt 对比（`test/isolation/apt_install.py`，需联网）：两种构建在 `--isolate` 下 update/install/remove 与常规模式输出一致；耗时随镜像波动（镜像断开连接时 apt 重试并在等待期间反复 stat，两种模式都有），同时运行的五对中四对隔离不慢于常规。数据报 UNIX 套接字的兼容代价已评估，暂不改。
+2026-10-31 隔离模式性能第二轮：每次请求的成本几乎全是进程睡眠与唤醒的调度延迟（SEQPACKET 往返 15–26 µs）。通道改为 broker 建的封印 memfd 共享区，双方先自旋再睡在套接字上（套接字仍传 FD、唤醒与 EOF）：空请求往返 25–40→1–2 µs，guest stat 46–73→9–13 µs（rtt 探针，新旧版本同时测），`make bench` 的 isolate stat 17 µs、open_close 38 µs、readdir_64 91 µs（之前 67 / 92 / 163 µs）。payload ABI 20。验收 157 项通过，四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18），实际工作负载输出一致。探针的 rtt 模式修正了 pingpong 子进程不退出的问题，伪造通道改用新协议。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -442,7 +443,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 | FD 元数据与来源标签 | 无 | 常用创建/dup/关闭、CLOEXEC、SCM_RIGHTS；最多 128 条 | 同所选构建 |
 | 只读/隐藏策略（`--guard-*` 向量） | 无（全部可写） | 进程内执行 | broker 按树执行，payload 被篡改也不变 |
 | 绕过 payload 的直接系统调用 | 到达宿主 | 到达宿主（`--seccomp-backstop` 改为交给 payload） | guest 过滤器 EPERM |
-| 典型路径调用开销（stat） | 约 2.5× 原生 | 约 3.5× 原生 | 约 5–6×（每次一个进程往返，见 BENCHMARKS） |
+| 典型路径调用开销（stat） | 约 2.5× 原生 | 约 3.5× 原生 | 约 2×（共享区通道，见 BENCHMARKS） |
 
 `make build` 生成两个二进制及各自 manifest（`build/elfloader[-guarded].json`）；测试拒绝不是最后一次
 构建的二进制。两种构建共用中间产物，不能并发编译。
@@ -462,9 +463,9 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 ## 尚未完成
 
-1. **隔离模式性能**（第三阶段第一轮已完成）：乐观解析后每个路径调用通常一次进程间往返
-   （HongMeng 上约 20–40 µs，带回 FD 再多约 17 µs），exec 3 次；见 BENCHMARKS.md。再降只能减少
-   往返本身的成本（共享内存通道等）。
+1. **隔离模式性能**（第三阶段两轮已完成）：乐观解析后每个路径调用通常一次请求；共享区通道把一次往返
+   降到 1–2 µs，stat 约 17 µs（原生约 9 µs，进程内默认约 21 µs）。剩余成本主要在带回 FD 的调用
+   （open 约 38 µs，FD 仍经 SCM_RIGHTS）；见 BENCHMARKS.md。
 2. **隔离模式的兼容代价**（2026-10-31 评估，见 ISOLATION_RESULTS.md 第四轮）：不能创建数据报 UNIX 套接字，
    sendto/sendmsg 带 UNIX 路径名返回 EPERM。syslog()、SysLogHandler、logger、数据报 socketpair 与常规模式表现相同；
    只有直接使用命名或抽象名数据报套接字的程序受影响。安全支持需要 broker 代理收发（guest 持有的数据报套接字
@@ -479,4 +480,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 ## 下一步顺序
 
 1. 实际 agent/brew 工具链在 `--isolate` 下的端到端验证（第 6 项）。
-2. 隔离模式性能第二轮：降低单次往返成本（第 1 项）。
+2. 带回 FD 的隔离调用（open）是否值得再优化（第 1 项）。

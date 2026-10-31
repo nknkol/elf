@@ -265,10 +265,10 @@ static void tamper(const char *host_out, const char *rw, const char *ro)
 }
 
 /* A channel of our own to the broker, and raw requests on it. */
-static long request(int ch, struct broker_request *r, size_t size, int *fds, int nfds, char *out, size_t cap)
+static long send_with_fds(int ch, const void *data, size_t size, int *fds, int nfds)
 {
     char control[CMSG_SPACE(sizeof(int) * 4)];
-    struct iovec io = {r, size};
+    struct iovec io = {(void *)data, size};
     struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1};
     if (nfds) {
         memset(control, 0, sizeof(control));
@@ -280,19 +280,81 @@ static long request(int ch, struct broker_request *r, size_t size, int *fds, int
         h->cmsg_len = CMSG_LEN(sizeof(int) * nfds);
         memcpy(CMSG_DATA(h), fds, sizeof(int) * nfds);
     }
-    long sent = via(__NR_sendmsg, ch, (long)&m, MSG_NOSIGNAL, 0, 0, 0);
-    if (sent < 0) return sent;
-    char answer[sizeof(struct broker_answer) + 4096], rcontrol[CMSG_SPACE(sizeof(int))];
-    struct iovec rio = {answer, sizeof(answer)};
-    struct msghdr rm = {.msg_iov = &rio, .msg_iovlen = 1, .msg_control = rcontrol,
-                        .msg_controllen = sizeof(rcontrol)};
-    long n = via(__NR_recvmsg, ch, (long)&rm, 0, 0, 0, 0);
-    if (n < (long)sizeof(struct broker_answer)) return n < 0 ? n : -7777;
-    struct broker_answer *a = (struct broker_answer *)answer;
-    struct cmsghdr *h = CMSG_FIRSTHDR(&rm);
-    if (h && h->cmsg_type == SCM_RIGHTS) {
-        int fd;
-        memcpy(&fd, CMSG_DATA(h), sizeof(int));
+    return via(__NR_sendmsg, ch, (long)&m, MSG_NOSIGNAL, 0, 0, 0);
+}
+
+/* One socket message: its length; an attached FD into *fd. */
+static long receive_fd(int ch, void *data, size_t size, int flags, int *fd)
+{
+    char control[CMSG_SPACE(sizeof(int))];
+    struct iovec io = {data, size};
+    struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    long n = via(__NR_recvmsg, ch, (long)&m, flags, 0, 0, 0);
+    struct cmsghdr *h = n > 0 ? CMSG_FIRSTHDR(&m) : 0;
+    if (h && h->cmsg_type == SCM_RIGHTS)
+        memcpy(fd, CMSG_DATA(h), sizeof(int));
+    return n;
+}
+
+/* A forged channel speaks the payload's protocol (broker_proto.h): the
+ * broker's first message is the shared area. */
+static struct { int ch; struct broker_shared *s; uint32_t seq; } forged[4];
+static struct broker_shared *shared_of(int ch)
+{
+    for (int i = 0; i < 4; i++)
+        if (forged[i].s && forged[i].ch == ch)
+            return forged[i].s;
+    char m;
+    int fd = -1;
+    if (receive_fd(ch, &m, 1, 0, &fd) <= 0 || fd < 0)
+        return 0;
+    /* Straight from the payload's svc: the FD came past the payload. */
+    long p = via(__NR_mmap, 0, BROKER_SHARED_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    via(__NR_close, fd, 0, 0, 0, 0, 0);
+    if (p < 0 && p > -4096)
+        return 0;
+    struct broker_shared *s = (struct broker_shared *)p;
+    for (int i = 0; i < 4; i++)
+        if (!forged[i].s) {
+            forged[i].ch = ch;
+            forged[i].s = s;
+            forged[i].seq = 0;
+            break;
+        }
+    return s;
+}
+
+static long request(int ch, struct broker_request *r, size_t size, int *fds, int nfds, char *out, size_t cap)
+{
+    struct broker_shared *s = shared_of(ch);
+    uint32_t *seq = 0;
+    for (int i = 0; i < 4; i++)
+        if (forged[i].s == s)
+            seq = &forged[i].seq;
+    if (!s || !seq) return -7777;
+    if (nfds && send_with_fds(ch, "f", 1, fds, nfds) < 0) return -7777;
+    memcpy(s->request, r, size);
+    s->request_size = (uint32_t)size;
+    __atomic_store_n(&s->request_seq, ++*seq, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&s->broker_sleeping, __ATOMIC_RELAXED))
+        send_with_fds(ch, "w", 1, 0, 0);
+    int fd = -1;
+    uint64_t deadline = broker_deadline(BROKER_ANSWER_SPIN_US);
+    while (__atomic_load_n(&s->answer_seq, __ATOMIC_ACQUIRE) != *seq) {
+        if (broker_ticks() < deadline) continue;
+        __atomic_store_n(&s->payload_sleeping, 1, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        char b;
+        long n = __atomic_load_n(&s->answer_seq, __ATOMIC_ACQUIRE) == *seq ? 1 : receive_fd(ch, &b, 1, 0, &fd);
+        __atomic_store_n(&s->payload_sleeping, 0, __ATOMIC_RELAXED);
+        if (n <= 0) return -7777;
+    }
+    char b;
+    while (s->answer_fd && fd < 0)
+        if (receive_fd(ch, &b, 1, MSG_DONTWAIT, &fd) <= 0) return -7777;
+    struct broker_answer *a = (struct broker_answer *)s->answer;
+    if (fd >= 0) {
         if (out) {
             long k = read(fd, out, cap - 1);
             out[k > 0 ? k : 0] = 0;
@@ -449,7 +511,7 @@ guest:;
     printf("getppid %ld\n", (now_ns() - t0) / N);
     int sp[2];
     socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sp);
-    if (!fork()) { char b[64]; while (read(sp[1], b, 64) > 0) write(sp[1], b, 1); _exit(0); }
+    if (!fork()) { char b[64]; close(sp[0]); while (read(sp[1], b, 64) > 0) write(sp[1], b, 1); _exit(0); }
     t0 = now_ns();
     for (int i = 0; i < N; i++) { char b[64]; write(sp[0], b, 64); read(sp[0], b, 64); }
     printf("pingpong %ld\n", (now_ns() - t0) / N);
@@ -457,6 +519,7 @@ guest:;
     int fp[2];
     socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fp);
     if (!fork()) {
+        close(fp[0]);
         int file = open("/dev/null", O_RDONLY);
         char b[64], control[CMSG_SPACE(sizeof(int))];
         while (read(fp[1], b, 64) > 0) {

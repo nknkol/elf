@@ -34,6 +34,8 @@ struct channel {
     int strict; /* BROKER_STRICT on this thread's requests */
     int reported; /* the last strict refusal named a symlink (REPORT_OFFSET) */
     unsigned char *buffer; /* request then answer; kept across forks */
+    struct broker_shared *shared; /* this channel's area (0: socket messages) */
+    uint32_t seq;
 };
 static struct channel channels[CHANNELS];
 static int channels_lock;
@@ -63,6 +65,38 @@ static long send_fds(int socket, const void *data, size_t length, const int *fds
     return raw_syscall(__NR_sendmsg, socket, (long)&message, MSG_NOSIGNAL, 0, 0, 0);
 }
 
+static long receive(int fd, int flags, int *received)
+{
+    char byte, control[CMSG_SPACE(sizeof(int))];
+    struct iovec io = {&byte, 1};
+    struct msghdr message = {.msg_iov = &io, .msg_iovlen = 1,
+                             .msg_control = control, .msg_controllen = sizeof(control)};
+    long rc;
+    do
+        rc = raw_syscall(__NR_recvmsg, fd, (long)&message, MSG_CMSG_CLOEXEC | flags, 0, 0, 0);
+    while (rc == -EINTR);
+    struct cmsghdr *header = rc > 0 ? CMSG_FIRSTHDR(&message) : 0;
+    if (header && header->cmsg_type == SCM_RIGHTS) {
+        int fd_in;
+        memcpy(&fd_in, CMSG_DATA(header), sizeof(int));
+        if (*received >= 0)
+            raw_syscall(__NR_close, *received, 0, 0, 0, 0, 0);
+        *received = fd_in;
+    }
+    return rc;
+}
+
+/* The broker's first message: the shared area, if it could make one. */
+static struct broker_shared *map_shared(int fd)
+{
+    int area = -1;
+    if (receive(fd, 0, &area) <= 0 || area < 0)
+        return 0;
+    long p = raw_syscall(__NR_mmap, 0, BROKER_SHARED_SIZE, 3 /* RW */, 1 /* MAP_SHARED */, area, 0);
+    raw_syscall(__NR_close, area, 0, 0, 0, 0, 0);
+    return p < 0 && p > -4096 ? 0 : (struct broker_shared *)p;
+}
+
 /* A new channel: one end stays here (high, close-on-exec), the other goes
  * to the broker. */
 static int open_channel(void)
@@ -86,6 +120,9 @@ static int open_channel(void)
 
 static void release_slot(struct channel *c)
 {
+    if (c->shared)
+        raw_syscall(__NR_munmap, (long)c->shared, BROKER_SHARED_SIZE, 0, 0, 0, 0);
+    c->shared = 0;
     c->tid = c->pid = 0;
     c->fd = 0;
 }
@@ -147,11 +184,14 @@ static struct channel *channel(void)
         }
         free_slot->buffer = (unsigned char *)mem;
     }
-    free_slot->fd = open_channel();
-    if (free_slot->fd < 0) {
+    int fd = open_channel();
+    if (fd < 0) {
         free_slot->tid = free_slot->pid = 0;
         return 0;
     }
+    free_slot->shared = map_shared(fd);
+    free_slot->seq = 0;
+    __atomic_store_n(&free_slot->fd, fd, __ATOMIC_RELEASE);
     return free_slot;
 }
 
@@ -175,6 +215,65 @@ static int magic_fd(const char *path)
         return (int)fd;
     }
     return -1;
+}
+
+/* The request in c->buffer to the broker and its answer: the answer's
+ * length (shorter than an answer when the broker is gone), *reply and the
+ * attached FD (close-on-exec). */
+static long exchange(struct channel *c, size_t size, const int *fds, unsigned count,
+                     unsigned char **reply, int *received)
+{
+    struct broker_shared *s = c->shared;
+    if (!s) {
+        long rc = send_fds(c->fd, c->buffer, size, fds, count);
+        if (rc < 0)
+            return rc;
+        *reply = c->buffer + BROKER_MESSAGE_MAX + 4096;
+        char control[CMSG_SPACE(sizeof(int))];
+        struct iovec io = {*reply, BROKER_MESSAGE_MAX};
+        struct msghdr message = {.msg_iov = &io, .msg_iovlen = 1,
+                                 .msg_control = control, .msg_controllen = sizeof(control)};
+        do
+            rc = raw_syscall(__NR_recvmsg, c->fd, (long)&message, MSG_CMSG_CLOEXEC, 0, 0, 0);
+        while (rc == -EINTR);
+        struct cmsghdr *header = rc > 0 ? CMSG_FIRSTHDR(&message) : 0;
+        if (header && header->cmsg_type == SCM_RIGHTS)
+            memcpy(received, CMSG_DATA(header), sizeof(int));
+        return rc;
+    }
+    /* FDs first, then the request, then a wake byte if the broker sleeps. */
+    if (count) {
+        long rc = send_fds(c->fd, "f", 1, fds, count);
+        if (rc < 0)
+            return rc;
+    }
+    memcpy(s->request, c->buffer, size);
+    s->request_size = (uint32_t)size;
+    uint32_t seq = ++c->seq;
+    __atomic_store_n(&s->request_seq, seq, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&s->broker_sleeping, __ATOMIC_RELAXED))
+        send_fds(c->fd, "w", 1, 0, 0);
+    uint64_t deadline = broker_deadline(BROKER_ANSWER_SPIN_US);
+    while (__atomic_load_n(&s->answer_seq, __ATOMIC_ACQUIRE) != seq) {
+        if (broker_ticks() < deadline) {
+            __asm__ volatile("yield");
+            continue;
+        }
+        __atomic_store_n(&s->payload_sleeping, 1, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        long rc = __atomic_load_n(&s->answer_seq, __ATOMIC_ACQUIRE) == seq ? 1 : receive(c->fd, 0, received);
+        __atomic_store_n(&s->payload_sleeping, 0, __ATOMIC_RELAXED);
+        if (rc <= 0)
+            return -EACCES; /* The broker is gone. */
+    }
+    /* The answer's FD came before it; skip wake bytes. */
+    while (s->answer_fd && *received < 0)
+        if (receive(c->fd, MSG_DONTWAIT, received) <= 0)
+            return -EIO;
+    uint32_t length = s->answer_size;
+    *reply = s->answer;
+    return length > sizeof(s->answer) ? -EIO : (long)length;
 }
 
 static long broker_call(const struct broker_spec *spec, long nr, const long a[6])
@@ -264,25 +363,17 @@ static long broker_call(const struct broker_spec *spec, long nr, const long a[6]
             break;
         }
     }
-    long rc = send_fds(c->fd, c->buffer, sizeof(*request) + used, fds, request->fds);
-    if (rc < 0)
-        return rc == -EPIPE || rc == -ECONNRESET ? -EACCES : rc;
-
-    unsigned char *reply = c->buffer + BROKER_MESSAGE_MAX + 4096;
-    char control[CMSG_SPACE(sizeof(int))];
-    struct iovec io = {reply, BROKER_MESSAGE_MAX};
-    struct msghdr message = {.msg_iov = &io, .msg_iovlen = 1,
-                             .msg_control = control, .msg_controllen = sizeof(control)};
-    do
-        rc = raw_syscall(__NR_recvmsg, c->fd, (long)&message, cloexec ? MSG_CMSG_CLOEXEC : 0, 0, 0, 0);
-    while (rc == -EINTR);
-    if (rc < (long)sizeof(struct broker_answer))
-        return -EACCES; /* The broker is gone: no file access (fail closed). */
-    struct broker_answer *answer = (struct broker_answer *)reply;
+    unsigned char *reply;
     int received = -1;
-    struct cmsghdr *header = CMSG_FIRSTHDR(&message);
-    if (header && header->cmsg_type == SCM_RIGHTS)
-        memcpy(&received, CMSG_DATA(header), sizeof(int));
+    long rc = exchange(c, sizeof(*request) + used, fds, request->fds, &reply, &received);
+    if (rc < (long)sizeof(struct broker_answer)) {
+        if (received >= 0)
+            raw_syscall(__NR_close, received, 0, 0, 0, 0, 0);
+        return rc < 0 && rc != -EPIPE && rc != -ECONNRESET ? rc : -EACCES; /* fail closed */
+    }
+    if (received >= 0 && !cloexec)
+        raw_syscall(__NR_fcntl, received, 2 /* F_SETFD */, 0, 0, 0, 0);
+    struct broker_answer *answer = (struct broker_answer *)reply;
     unsigned char *out = reply + sizeof(*answer);
     for (int i = 0; i < 6; i++) {
         if (spec->arg[i].kind != BK_OUT || !answer->len[i])

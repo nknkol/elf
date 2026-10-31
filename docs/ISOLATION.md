@@ -40,9 +40,15 @@
 
 ## 协议
 
-- 每个 guest 线程一条私有通道（`SOCK_SEQPACKET`）：payload 首次需要时建 socketpair，经继承的
-  控制套接字把一端交给 broker；broker 为每条通道 fork 一个处理进程（阻塞操作互不影响）。
-  fork 后的子进程按 pid 发现通道不属于自己，重新建立。
+- 每个 guest 线程一条私有通道：payload 首次需要时建 socketpair（`SOCK_SEQPACKET`），经继承的
+  控制套接字把一端交给 broker；broker 为每条通道 fork 一个处理进程（阻塞操作互不影响）。处理进程先建一个
+  memfd 作为通道的共享区（封印为不可截短、不可扩大，guest 无法让 broker 读到 SIGBUS），作为第一条消息发给
+  payload。之后请求与应答经共享区传递：payload 写请求并递增序号，broker 先把请求整体拷到私有缓冲区再解析
+  （guest 可能同时改写共享区），写应答后置应答序号。双方先自旋等待（payload 等应答 300 µs，broker 应答后等下一
+  请求 150 µs，用 cntvct_el0 计时），超时才置“睡眠”标志并阻塞在套接字的 recvmsg 上，另一方见到标志就发一个唤醒
+  字节。套接字仍是通道本身：FD 以 SCM_RIGHTS 随请求或应答先行，对端退出时 recvmsg 读到 EOF（payload 失败即
+  拒绝，broker 处理进程退出）；broker 在自旋中接到请求时用零超时 ppoll 检查套接字是否已挂断，guest 关掉自己
+  那一端后共享区也不再应答。memfd 建不成时退回到套接字消息。
 - 请求：系统调用号、6 个参数、按参数表复制的字符串与输入缓冲区、至多两个 FD
   （目录 FD 或操作对象）。响应：返回值、输出缓冲区、至多一个 FD。
 - 参数表（`broker_proto.h`，loader 与 payload 共用）逐个系统调用描述哪个参数是目录 FD、
@@ -112,7 +118,8 @@ payload 的 exec（proot_exec）：
    AF_UNIX 套接字按上表处理。对抗测试：跳进 payload 的 `svc` 打开隐藏文件、改写 payload 配置
    后访问只读区、硬链接只读文件、大小写别名、`/proc/<其他 pid>`、`process_vm_writev` 写 broker，
    均必须失败。
-3. **性能**（第一轮已完成，见 BENCHMARKS.md）：路径解析的每一级查找原本都是一次往返。现为乐观解析：
+3. **性能**（两轮已完成，见 BENCHMARKS.md）：第二轮把通道改为共享区加自旋（见上文“通道”），一次空请求往返
+   从 25–40 µs 降到 1–2 µs，broker lstat 6–7 µs，带回 FD 的 open 21–25 µs（FD 仍经套接字）。第一轮：路径解析的每一级查找原本都是一次往返。现为乐观解析：
    payload 按字面映射，最终请求带 `BROKER_STRICT`；broker 走查时遇到任何符号链接（需要跟随的末级也算）
    即返回 ELOOP、不执行操作，并在应答中报告该链接的宿主路径与目标；payload 带着已知链接重试，仍按乐观方式，
    至多 8 个链接，之后或链接目标在名字之后含 ".." 时改为完整解析。含 ".." 的路径、`/proc`、嵌套挂载点的祖先

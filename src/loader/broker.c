@@ -846,6 +846,121 @@ static long send_answer(int channel, const void *data, size_t length, int fd)
 	return sys(__NR_sendmsg, channel, (long)&m, MSG_NOSIGNAL, 0, 0, 0);
 }
 
+/* One message: its bytes into data (when given), FDs added to fds (excess
+ * ones closed). The length, or <= 0 at end of file or error. */
+static long receive(int channel, void *data, size_t size, int flags, int *fds, int *count)
+{
+	char control[CMSG_SPACE(sizeof(int) * BROKER_FDS_MAX)];
+	char byte;
+	struct iovec io = {data ? data : &byte, data ? size : 1};
+	struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1,
+			   .msg_control = control, .msg_controllen = sizeof(control)};
+	long n;
+	do
+		n = sys(__NR_recvmsg, channel, (long)&m, MSG_CMSG_CLOEXEC | flags, 0, 0, 0);
+	while (n == -4 /* EINTR */);
+	struct cmsghdr *h = n >= 0 ? CMSG_FIRSTHDR(&m) : 0;
+	if (h && h->cmsg_level == SOL_SOCKET && h->cmsg_type == SCM_RIGHTS) {
+		int got = (int)((h->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+		for (int i = 0; i < got && i < BROKER_FDS_MAX; i++) {
+			int fd;
+			z_memcpy(&fd, CMSG_DATA(h) + sizeof(int) * (size_t)i, sizeof(int));
+			if (*count < BROKER_FDS_MAX)
+				fds[(*count)++] = fd;
+			else
+				sys(__NR_close, fd, 0, 0, 0, 0, 0);
+		}
+	}
+	return n;
+}
+
+/* One request of n bytes with its FDs (closed here): the answer, its
+ * length returned and its FD in *answer_fd (-1: none; the caller closes). */
+static size_t handle(const unsigned char *request, long n, const int *fds, int count,
+		     unsigned char *answer, int *answer_fd)
+{
+	struct call c;
+	z_memset(&c, 0, sizeof(c));
+	c.answer_fd = -1;
+	c.fds = count;
+	z_memcpy(c.fd, fds, sizeof(int) * (size_t)count);
+	const struct broker_request *r = (const struct broker_request *)request;
+	struct broker_answer *a = (struct broker_answer *)answer;
+	z_memset(a, 0, sizeof(*a));
+	const struct broker_spec *spec = n >= (long)sizeof(*r) ? broker_spec(r->nr) : 0;
+	long rc = spec ? parse(r, (size_t)n, spec, &c, answer + sizeof(*a)) : -EACCES_;
+	if (rc >= 0 && (int)r->fds != c.fds)
+		rc = -EINVAL_;
+	if (rc >= 0) {
+		c.magic = r->flags & 0x3f;
+		strict = (r->flags & BROKER_STRICT) != 0;
+		strict_reported = 0;
+		rc = execute(&c, r->nr);
+	}
+	a->result = rc;
+	z_printf("[broker %d] nr=%d path=%s flags=%x fds=%d -> %ld\n", (int)peer_pid, spec ? r->nr : 0,
+		 c.path[1] ? c.path[1] : c.path[0] ? c.path[0] : "-", spec ? r->flags : 0, c.fds, rc);
+	size_t out = 0;
+	for (int i = 0; spec && i < 6 && rc >= 0; i++) {
+		if (spec->arg[i].kind != BK_OUT)
+			continue;
+		/* Variable outputs carry rc bytes; fixed ones are filled on success. */
+		uint32_t len = spec->arg[i].len_arg >= 0 ? (rc > 0 ? (uint32_t)rc : 0) : c.out_len[i];
+		if (len > c.out_len[i])
+			len = c.out_len[i];
+		if (c.out[i] != answer + sizeof(*a) + out)
+			z_memcpy(answer + sizeof(*a) + out, c.out[i], len);
+		a->len[i] = len;
+		out += len;
+	}
+	if (rc == -ELOOP_ && strict && strict_reported) {
+		for (int k = 0; k < 2; k++) {
+			size_t len = z_strlen(strict_link[k]) + 1;
+			if (out + len > BROKER_DATA_MAX)
+				break;
+			z_memcpy(answer + sizeof(*a) + out, strict_link[k], len);
+			a->link[k] = (uint32_t)len;
+			out += len;
+		}
+	}
+	for (int i = 0; i < c.fds; i++)
+		sys(__NR_close, c.fd[i], 0, 0, 0, 0, 0);
+	*answer_fd = c.answer_fd;
+	return sizeof(*a) + out;
+}
+
+/* The channel's shared area, sent first ('m', without an FD when it cannot
+ * be made: requests then come as socket messages). */
+static struct broker_shared *share(int channel)
+{
+	long fd = sys(__NR_memfd_create, (long)"broker-channel", 1 /* MFD_CLOEXEC */ | 2 /* MFD_ALLOW_SEALING */,
+		      0, 0, 0, 0);
+	void *area = 0;
+	if (fd >= 0 && !sys(__NR_ftruncate, fd, BROKER_SHARED_SIZE, 0, 0, 0, 0) &&
+	    /* F_ADD_SEALS: SHRINK | GROW | SEAL, the guest holds the FD too. */
+	    !sys(__NR_fcntl, fd, 1033, 0x2 | 0x4 | 0x1, 0, 0, 0)) {
+		long p = sys(__NR_mmap, 0, BROKER_SHARED_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		if (p < 0 && p > -4096)
+			p = 0;
+		area = (void *)p;
+	}
+	if (!area && fd >= 0) {
+		sys(__NR_close, fd, 0, 0, 0, 0, 0);
+		fd = -1;
+	}
+	send_answer(channel, "m", 1, area ? (int)fd : -1);
+	if (fd >= 0)
+		sys(__NR_close, fd, 0, 0, 0, 0, 0);
+	return area;
+}
+
+static void wake(int channel, uint32_t *sleeping)
+{
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if (__atomic_load_n(sleeping, __ATOMIC_RELAXED))
+		send_answer(channel, "w", 1, -1);
+}
+
 static void serve(int channel)
 {
 	static unsigned char request[BROKER_MESSAGE_MAX + 64];
@@ -855,70 +970,69 @@ static void serve(int channel)
 	if (sys(__NR_getsockopt, channel, SOL_SOCKET, SO_PEERCRED, (long)&peer, (long)&length, 0) < 0)
 		z_exit(1);
 	peer_pid = peer.pid;
+	struct broker_shared *s = share(channel);
+	int fds[BROKER_FDS_MAX], count = 0, answer_fd;
+	uint32_t seen = 0;
 	for (;;) {
-		char control[CMSG_SPACE(sizeof(int) * BROKER_FDS_MAX)];
-		struct iovec io = {request, sizeof(request)};
-		struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1,
-				   .msg_control = control, .msg_controllen = sizeof(control)};
-		long n = sys(__NR_recvmsg, channel, (long)&m, MSG_CMSG_CLOEXEC, 0, 0, 0);
-		if (n == -4 /* EINTR */)
+		long n;
+		if (!s) {
+			count = 0;
+			n = receive(channel, request, sizeof(request), 0, fds, &count);
+			if (n <= 0)
+				z_exit(0);
+			size_t size = handle(request, n, fds, count, answer, &answer_fd);
+			send_answer(channel, answer, size, answer_fd);
+			if (answer_fd >= 0)
+				sys(__NR_close, answer_fd, 0, 0, 0, 0, 0);
 			continue;
-		if (n <= 0)
-			z_exit(0);
-		struct call c;
-		z_memset(&c, 0, sizeof(c));
-		c.answer_fd = -1;
-		struct cmsghdr *h = CMSG_FIRSTHDR(&m);
-		if (h && h->cmsg_level == SOL_SOCKET && h->cmsg_type == SCM_RIGHTS) {
-			c.fds = (int)((h->cmsg_len - CMSG_LEN(0)) / sizeof(int));
-			if (c.fds > BROKER_FDS_MAX)
-				c.fds = BROKER_FDS_MAX;
-			z_memcpy(c.fd, CMSG_DATA(h), sizeof(int) * (size_t)c.fds);
 		}
-		const struct broker_request *r = (const struct broker_request *)request;
-		struct broker_answer *a = (struct broker_answer *)answer;
-		z_memset(a, 0, sizeof(*a));
-		const struct broker_spec *spec = n >= (long)sizeof(*r) ? broker_spec(r->nr) : 0;
-		long rc = spec ? parse(r, (size_t)n, spec, &c, answer + sizeof(*a)) : -EACCES_;
-		if (rc >= 0 && (int)r->fds != c.fds)
-			rc = -EINVAL_;
-		if (rc >= 0) {
-			c.magic = r->flags & 0x3f;
-			strict = (r->flags & BROKER_STRICT) != 0;
-			strict_reported = 0;
-			rc = execute(&c, r->nr);
-		}
-		a->result = rc;
-		z_printf("[broker %d] nr=%d path=%s flags=%x fds=%d -> %ld\n", (int)peer_pid, r->nr,
-			 c.path[1] ? c.path[1] : c.path[0] ? c.path[0] : "-", r->flags, c.fds, rc);
-		size_t out = 0;
-		for (int i = 0; spec && i < 6 && rc >= 0; i++) {
-			if (spec->arg[i].kind != BK_OUT)
+		/* The next request: spin, then sleep until a wake byte. FDs
+		 * arriving meanwhile belong to it. */
+		uint64_t deadline = broker_deadline(BROKER_IDLE_SPIN_US);
+		int slept = 0;
+		while (__atomic_load_n(&s->request_seq, __ATOMIC_ACQUIRE) == seen) {
+			if (broker_ticks() < deadline) {
+				__asm__ volatile("yield");
 				continue;
-			/* Variable outputs carry rc bytes; fixed ones are filled on success. */
-			uint32_t len = spec->arg[i].len_arg >= 0 ? (rc > 0 ? (uint32_t)rc : 0) : c.out_len[i];
-			if (len > c.out_len[i])
-				len = c.out_len[i];
-			if (c.out[i] != answer + sizeof(*a) + out)
-				z_memcpy(answer + sizeof(*a) + out, c.out[i], len);
-			a->len[i] = len;
-			out += len;
-		}
-		if (rc == -ELOOP_ && strict && strict_reported) {
-			for (int k = 0; k < 2; k++) {
-				size_t n = z_strlen(strict_link[k]) + 1;
-				if (out + n > BROKER_DATA_MAX)
-					break;
-				z_memcpy(answer + sizeof(*a) + out, strict_link[k], n);
-				a->link[k] = (uint32_t)n;
-				out += n;
 			}
+			__atomic_store_n(&s->broker_sleeping, 1, __ATOMIC_RELAXED);
+			__atomic_thread_fence(__ATOMIC_SEQ_CST);
+			if (__atomic_load_n(&s->request_seq, __ATOMIC_ACQUIRE) == seen &&
+			    receive(channel, 0, 0, 0, fds, &count) <= 0)
+				z_exit(0);
+			__atomic_store_n(&s->broker_sleeping, 0, __ATOMIC_RELAXED);
+			slept = 1;
 		}
-		send_answer(channel, answer, sizeof(*a) + out, c.answer_fd);
-		if (c.answer_fd >= 0)
-			sys(__NR_close, c.answer_fd, 0, 0, 0, 0, 0);
-		for (int i = 0; i < c.fds; i++)
-			sys(__NR_close, c.fd[i], 0, 0, 0, 0, 0);
+		/* Caught while spinning: a guest that closed its end of the
+		 * channel gets no more answers through the area either. */
+		struct { int fd; short events, revents; } watch = {channel, 0, 0};
+		struct { long sec, nsec; } now = {0, 0};
+		if (!slept && sys(__NR_ppoll, (long)&watch, 1, (long)&now, 0, 0, 0) > 0 &&
+		    (watch.revents & (0x10 /* POLLHUP */ | 0x8 /* POLLERR */)))
+			z_exit(0);
+		seen = __atomic_load_n(&s->request_seq, __ATOMIC_ACQUIRE);
+		/* A private copy first: the guest may still write the area. */
+		n = __atomic_load_n(&s->request_size, __ATOMIC_RELAXED);
+		if (n > (long)BROKER_MESSAGE_MAX)
+			n = 0;
+		z_memcpy(request, s->request, (size_t)n);
+		uint32_t want = n >= (long)sizeof(struct broker_request) ?
+			((const struct broker_request *)request)->fds : 0;
+		/* The request's FDs were sent before it. */
+		while ((uint32_t)count < want && want <= BROKER_FDS_MAX &&
+		       receive(channel, 0, 0, MSG_DONTWAIT, fds, &count) > 0)
+			;
+		size_t size = handle(request, n, fds, count, answer, &answer_fd);
+		count = 0;
+		if (answer_fd >= 0) {
+			send_answer(channel, "f", 1, answer_fd);
+			sys(__NR_close, answer_fd, 0, 0, 0, 0, 0);
+		}
+		z_memcpy(s->answer, answer, size);
+		s->answer_size = (uint32_t)size;
+		s->answer_fd = answer_fd >= 0;
+		__atomic_store_n(&s->answer_seq, seen, __ATOMIC_RELEASE);
+		wake(channel, &s->payload_sleeping);
 	}
 }
 

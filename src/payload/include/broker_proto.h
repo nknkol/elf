@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Isolation mode (docs/ISOLATION.md): the payload's host path syscalls are
  * requests to the broker process. Shared by the payload (marshaling) and
- * the loader (the broker). One request and one answer per SOCK_SEQPACKET
- * message; FDs travel as SCM_RIGHTS. */
+ * the loader (the broker). Each channel is a SOCK_SEQPACKET pair plus a
+ * shared area (struct broker_shared) holding one request and one answer;
+ * the socket carries FDs (SCM_RIGHTS), wakeups and end of file. */
 #ifndef BROKER_PROTO_H
 #define BROKER_PROTO_H
 #include <stdint.h>
@@ -59,6 +60,44 @@ struct broker_answer {
      * target, both NUL-terminated after the outputs (0: none). */
     uint32_t link[2];
 };
+
+/* The shared area of a channel: a memfd the broker makes, seals against
+ * resizing and sends first on the channel ('m' message; none: requests and
+ * answers travel as socket messages instead). The payload writes a request
+ * and bumps request_seq; the broker copies the request out before reading
+ * it (the guest may change it meanwhile), writes the answer and sets
+ * answer_seq to the request's number. Both sides spin a while before
+ * sleeping in recvmsg on the socket, after setting their sleeping flag;
+ * the other side then sends a wake byte ('w'). FDs go before the request
+ * or answer they belong to, as an 'f' message. */
+struct broker_shared {
+    uint32_t request_seq, answer_seq;
+    uint32_t broker_sleeping, payload_sleeping;
+    uint32_t request_size, answer_size;
+    uint32_t answer_fd; /* 1: an 'f' message with the answer's FD came first */
+    uint32_t reserved[9];
+    unsigned char request[BROKER_MESSAGE_MAX];
+    unsigned char answer[sizeof(struct broker_answer) + BROKER_DATA_MAX];
+};
+#define BROKER_SHARED_SIZE ((sizeof(struct broker_shared) + 4095) & ~(size_t)4095)
+/* How long each side spins before sleeping: the payload for an answer, the
+ * broker for the next request after an answer. */
+#define BROKER_ANSWER_SPIN_US 300
+#define BROKER_IDLE_SPIN_US 150
+
+/* aarch64 virtual counter: a deadline us microseconds from now. */
+static inline uint64_t broker_ticks(void)
+{
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+static inline uint64_t broker_deadline(unsigned us)
+{
+    uint64_t frequency;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    return broker_ticks() + frequency / 1000000 * us;
+}
 
 #define A_V  {BK_VAL, -1, 0}
 #define A_D  {BK_DIRFD, -1, 0}

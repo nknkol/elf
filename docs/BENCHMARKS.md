@@ -140,3 +140,41 @@ process round trip, so the work was to need fewer of them.
   loader and passed to every child (two lookups per process before).
 - Guarded listings keep the guest name of an open directory per FD while
   its dev/ino is unchanged (every getdents call named it again).
+
+## HarmonyOS, 2026-10-31: isolation round two (shared channel area)
+
+A broker request cost about one process round trip, and a round trip was
+almost all scheduler latency: putting a process to sleep and waking it.
+Measured between two guest processes (load average about 17, 20 CPUs):
+SEQPACKET 18-19 us, pipe 15 us, futex 10-16 us, futex with both sides
+spinning first 1.5-2 us. Each channel now has a shared area (a sealed
+memfd made by the broker, docs/ISOLATION.md); both sides spin on it before
+sleeping on the channel socket, which still carries FDs, wakeups and end
+of file.
+
+`test/isolation/probe.c` mode `rtt`, old (be4c2f1) and new loader run at
+the same time, two rounds, ns per op:
+
+| | old | new |
+| --- | ---: | ---: |
+| empty request | 29221 / 39777 | 1825 / 1213 |
+| broker lstat | 36301 / 61955 | 7270 / 6290 |
+| broker open (FD back) | 57428 / 76331 | 24862 / 21435 |
+| guest stat | 45957 / 72723 | 8795 / 11312 |
+
+`make bench` afterwards (load average 22):
+
+| case | native | default | guarded | isolate | isolate-g |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| getpid | 269 | 274 | 375 | 289 | 299 |
+| fstat | 758 | 1332 | 1514 | 1169 | 1467 |
+| stat | 8583 | 21260 | 30261 | 16869 | 18330 |
+| open_close | 14364 | 27237 | 33816 | 37562 | 38973 |
+| pread_4k | 801 | 1286 | 1505 | 1281 | 1493 |
+| pwrite_4k | 1493 | 1983 | 2219 | 2080 | 2198 |
+| readdir_64 | 71629 | 73832 | 105922 | 91491 | 105384 |
+| mmap_64k | 1531 | 2336 | 3060 | 2532 | 3192 |
+
+An isolated `stat` is now cheaper than the in-process default: one lexical
+mapping and one request, where the default walks the path itself. Calls
+that bring an FD back (open) still pay for SCM_RIGHTS on the socket.
