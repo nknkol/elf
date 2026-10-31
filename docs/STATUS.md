@@ -494,3 +494,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 1. 实际 agent/brew 工具链在 `--isolate` 下的端到端验证（第 6 项）。
 2. 带回 FD 的隔离调用（open）是否值得再优化（第 1 项）。
+3. Docker/OCI 镜像支持（设计见 [OCI](OCI.md)）。
