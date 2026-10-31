@@ -484,6 +484,7 @@ static long close_range_between(unsigned first, unsigned last, unsigned flags)
 /* Without the kernel call (HarmonyOS refuses it): the open FDs from a
  * /proc/self/fd listing, which the broker opens for this process; failing
  * that, every number below the FD limit. */
+__attribute__((noinline)) /* its buffer stays out of every call's guard frame */
 static long close_range_listed(unsigned first, unsigned last, unsigned flags)
 {
     long dir = host_syscall(__NR_openat, AT_FDCWD, (long)"/proc/self/fd",

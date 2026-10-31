@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* A vfork child on a small stack, as glibc's posix_spawn (about 36 KiB with
  * a guard page) and CPython's child (getdents64 over /proc/self/fd before
- * exec): the intercepted calls must fit. Freestanding, raw SVC only. */
+ * exec): the intercepted calls must fit. The stack is filled with a pattern
+ * first; how much of it the child used is reported (musl's posix_spawn
+ * stack is about 5 KiB). Freestanding, raw SVC only. */
 #include <asm/unistd.h>
 #define STACK (36 * 1024)
 #define PAGE 4096
@@ -38,17 +40,32 @@ static long spawn(void *top)
     return x0;
 }
 static void out(const char *s){long n=0;while(s[n])n++;sc(__NR_write,1,(long)s,n,0,0,0);}
+static void out_number(const char *label,long v)
+{
+    char b[32];int n=0;char d[20];int c=0;
+    while(*label)b[n++]=*label++;
+    do d[c++]='0'+v%10; while(v/=10);
+    while(c)b[n++]=d[--c];
+    b[n++]='\n';b[n]=0;out(b);
+}
 void run(long *sp)
 {
     target=(const char *)sp[2];
     char *base=(char *)sc(__NR_mmap,0,STACK+PAGE,3,0x22,-1,0);
     sc(__NR_mprotect,(long)base,PAGE,0,0,0,0); /* Guard page below the stack. */
+    volatile unsigned char *stack=(unsigned char *)base+PAGE;
+    long used=0;
     for(int i=0;i<3;i++) {
+        for(long k=0;k<STACK;k++)stack[k]=0xa5;
         long pid=spawn(base+PAGE+STACK);
         int status=-1;
         if(pid>0)sc(__NR_wait4,pid,(long)&status,0,0,0,0);
         out(status==0 ? "child=0\n" : "child=bad\n");
+        long k=0;
+        while(k<STACK && stack[k]==0xa5)k++;
+        if(STACK-k>used)used=STACK-k;
     }
+    out_number("used=",used);
     sc(__NR_exit_group,0,0,0,0,0,0);
 }
 __asm__(".global _start\n_start:\nmov x0, sp\nbl run\n");

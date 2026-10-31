@@ -23,7 +23,78 @@ typedef struct {
 
 long raw_syscall(long sys_no, long a1, long a2, long a3, long a4, long a5, long a6);
 
+/* The intercepted calls run on a stack of the payload's: a vfork child may
+ * run on musl's posix_spawn stack, about 5 KiB, which path walking, the
+ * broker and the guard would overrun into the suspended parent's frame.
+ * A stack is claimed by thread id and given back on return; the parent of
+ * a vfork child that exec'd gives back what the child held when vfork
+ * returns (the memory is shared), and a forked child starts with none
+ * claimed. None free (or already on one): the current stack. Signals are
+ * blocked while the payload runs, so no guest handler runs on it. */
+#define PAYLOAD_STACKS 8
+#define PAYLOAD_STACK_SIZE (64 * 1024)
+static struct payload_stack { long owner; void *base; } payload_stacks[PAYLOAD_STACKS];
+extern long call_on_stack(long (*fn)(void *), void *arg, void *top);
+
+static struct payload_stack *claim_stack(long tid)
+{
+    for (int i = 0; i < PAYLOAD_STACKS; i++)
+        if (__atomic_load_n(&payload_stacks[i].owner, __ATOMIC_RELAXED) == tid)
+            return 0; /* Already on it (a nested call). */
+    for (int i = 0; i < PAYLOAD_STACKS; i++) {
+        struct payload_stack *s = &payload_stacks[i];
+        long free_owner = 0;
+        if (!__atomic_compare_exchange_n(&s->owner, &free_owner, tid, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            continue;
+        if (!s->base) {
+            long mem = raw_syscall(__NR_mmap, 0, PAYLOAD_STACK_SIZE, 3, 0x22, -1, 0);
+            if ((unsigned long)mem >= (unsigned long)-4095) {
+                __atomic_store_n(&s->owner, 0, __ATOMIC_RELEASE);
+                return 0;
+            }
+            s->base = (void *)mem;
+        }
+        return s;
+    }
+    return 0;
+}
+
+void payload_stack_clone_finish(unsigned long flags, long result)
+{
+    if (result < 0)
+        return;
+    for (int i = 0; i < PAYLOAD_STACKS; i++) {
+        if (!result && !(flags & 0x100 /* CLONE_VM */)) {
+            /* A private copy: the claims are other threads' of the parent. */
+            payload_stacks[i].owner = 0;
+        } else if (result && (flags & 0x4000 /* CLONE_VFORK */)) {
+            long child = result;
+            __atomic_compare_exchange_n(&payload_stacks[i].owner, &child, 0, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+struct dispatch_call { long sys_no; pt_regs *regs; };
+static long dispatch_here(long sys_no, pt_regs *regs);
+static long dispatch_run(void *opaque)
+{
+    struct dispatch_call *c = opaque;
+    return dispatch_here(c->sys_no, c->regs);
+}
+
 long syscall_dispatcher(long sys_no, pt_regs *regs)
+{
+    struct payload_stack *stack = claim_stack(raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0));
+    if (!stack)
+        return dispatch_here(sys_no, regs);
+    struct dispatch_call call = {sys_no, regs};
+    long ret = call_on_stack(dispatch_run, &call, (char *)stack->base + PAYLOAD_STACK_SIZE);
+    __atomic_store_n(&stack->owner, 0, __ATOMIC_RELEASE);
+    return ret;
+}
+
+static long dispatch_here(long sys_no, pt_regs *regs)
 {
     long *a = (long *)regs->regs;
     /* The backends may rewrite their copy; the saved registers stay. */

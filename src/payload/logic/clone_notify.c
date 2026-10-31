@@ -40,6 +40,9 @@ __attribute__((weak)) void clone_observer_cleanup(const struct clone_event *even
 /* The broker client's channel table (isolation mode); absent in unit tests. */
 __attribute__((weak)) void broker_clone_finish(unsigned long flags, long result)
 { (void)flags; (void)result; }
+/* The payload stacks (syscall_disp.c); absent in unit tests. */
+__attribute__((weak)) void payload_stack_clone_finish(unsigned long flags, long result)
+{ (void)flags; (void)result; }
 
 static struct clone_pool *get_pool(void)
 {
@@ -223,6 +226,7 @@ struct clone_return clone_notify_finish(void *transaction, long result)
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
     broker_clone_finish(t->event.flags, result);
+    payload_stack_clone_finish(t->event.flags, result);
     clone_observer_finish(&t->event, result);
     release(t, result < 0 ? PARENT_DONE | CHILD_DONE :
                result ? PARENT_DONE : CHILD_DONE, 0);

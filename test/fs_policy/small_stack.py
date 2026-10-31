@@ -5,7 +5,10 @@ The child runs on a 36 KiB stack with a guard page (glibc posix_spawn),
 reads /proc/self/fd with getdents64 (CPython) and execs through a chain of
 five symlinks (a venv python), or of 15. Path walking used 8 KiB of stack
 per link and the legacy getdents64 reserved 132 KiB, overflowing such
-stacks."""
+stacks. musl's posix_spawn gives its child about 5 KiB (1024 + PATH_MAX,
+part of it for musl's own frame); the guarded build's exec once took 10.8
+KiB of it and overwrote the parent's frame (make lost its stdout). The
+deepest use must stay within 4 KiB, with and without --isolate."""
 import hashlib
 import json
 import subprocess
@@ -36,14 +39,20 @@ with tempfile.TemporaryDirectory(prefix='small-stack-', dir=build) as tmp:
             (work / f'd{count}' / name).symlink_to(previous)
             previous = f'/work/d{count}/{name}'
         chains.append(previous)
+    BUDGET = 4096
     for suffix in ('', '-guarded'):
         loader = lib.loader(suffix)
-        for chain in chains:
-            p = subprocess.run([str(loader), '--mode', 'container', '--root', str(alpine),
-                                '-v', f'{work}:/work', '-v', '/proc:/proc', '--', './bin/busybox', 'sh',
-                                '-c', f'exec /work/probe {chain}'], cwd=alpine, capture_output=True,
-                               text=True, timeout=60)
-            assert p.returncode == 0 and p.stdout.split() == ['child=0'] * 3, (
-                suffix, chain, p.returncode, p.stdout, p.stderr[-1500:])
-        print('PASS: vfork child on a 36 KiB stack walks 5 and 15 symlinks and reads /proc/self/fd:',
-              loader.name)
+        for isolate in ([], ['--isolate']):
+            deepest = 0
+            for chain in chains:
+                p = subprocess.run([str(loader), *isolate, '--mode', 'container', '--root', str(alpine),
+                                    '-v', f'{work}:/work', '-v', '/proc:/proc', '--', './bin/busybox', 'sh',
+                                    '-c', f'exec /work/probe {chain}'], cwd=alpine, capture_output=True,
+                                   text=True, timeout=60)
+                lines = p.stdout.split()
+                assert p.returncode == 0 and lines[:3] == ['child=0'] * 3, (
+                    suffix, isolate, chain, p.returncode, p.stdout, p.stderr[-1500:])
+                deepest = max(deepest, int(lines[3].split('=')[1]))
+            assert deepest <= BUDGET, (suffix, isolate, f'vfork child used {deepest} bytes of stack')
+            print('PASS: vfork child on a 36 KiB stack walks 5 and 15 symlinks and reads /proc/self/fd,'
+                  f' {deepest} bytes of stack:', loader.name, *isolate)

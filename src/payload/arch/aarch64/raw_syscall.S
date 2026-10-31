@@ -30,3 +30,23 @@ raw_syscall:
 
     svc #0
     ret
+
+    .align 4
+    .global call_on_stack
+
+/*
+ * long call_on_stack(long (*fn)(void *), void *arg, void *top)
+ *
+ * fn(arg) with sp at top (16-byte aligned), back on the caller's stack
+ * when it returns.
+ */
+call_on_stack:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov sp, x2
+    mov x16, x0
+    mov x0, x1
+    blr x16
+    mov sp, x29
+    ldp x29, x30, [sp], #16
+    ret

@@ -47,11 +47,15 @@ struct fd_runtime {
     /* Such changes that found no free closing slot; while nonzero every
      * number counts as in transition. */
     unsigned untracked;
+    /* The serialized table for exec handoff, kept off the guest stack: a
+     * vfork child may run on musl's posix_spawn stack (about 5 KiB). Used
+     * under the lock, or before the runtime is published. */
+#define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
+    unsigned char snapshot[STATE_BYTES];
 };
 static struct fd_runtime primary, vfork_child;
 static int vfork_active;
 static struct scratch_slot { void *address;size_t size;int used; } scratch[2];
-#define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
 #include "fd_receive.h"
 extern long raw_syscall(long,long,long,long,long,long,long);
 static int start(struct fd_runtime *s);
@@ -299,10 +303,9 @@ static int start(struct fd_runtime *s)
     fd_registry_create(&s->registry,&s->owner);
     fd_registry_publish(&s->registry,s->owner,tid);
     if(g_payload_config.fd_state>=0) {
-        unsigned char snapshot[STATE_BYTES];
         struct fd_table *table=fd_registry_table(&s->registry,s->owner);
         int transport=g_payload_config.fd_state;
-        int rc=fd_handoff_restore(table,transport,snapshot,sizeof(snapshot));
+        int rc=fd_handoff_restore(table,transport,s->snapshot,sizeof(s->snapshot));
         if(!rc)for(size_t i=0;i<table->capacity;i++) {
             struct fd_record *record=&table->slots[i];
             if(record->fd<0)continue;
@@ -344,10 +347,9 @@ static int start(struct fd_runtime *s)
 long fd_runtime_export(void)
 {
     struct fd_runtime *s=current();
-    unsigned char snapshot[STATE_BYTES];
     /* FDs other threads create after this snapshot restore as unknown. */
     lock(s);
-    long rc=fd_handoff_create(fd_registry_table(&s->registry,s->owner),snapshot,sizeof(snapshot));
+    long rc=fd_handoff_create(fd_registry_table(&s->registry,s->owner),s->snapshot,sizeof(s->snapshot));
     unlock(s);
     return rc;
 }
@@ -575,6 +577,9 @@ static int mapping_range(long address, long length, uintptr_t *end)
 /* All admitted shared file mappings require mutation rights even when first
  * mapped read-only; later mprotect cannot introduce an unchecked file writer.
  * Private/COW and anonymous mappings cannot write back to a file. */
+/* Not inlined: its guard copy (about 2 KiB) must not sit in every call's
+ * dispatch frame on a small spawn stack. */
+__attribute__((noinline))
 static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, long a[6])
 {
     /* vfork shares VM but uses a private FD arena. Do not publish divergent
