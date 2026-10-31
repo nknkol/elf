@@ -145,6 +145,26 @@ small_stack 验收按 glibc 的 36 KiB 栈测试，没有发现。现在慢路�
 认领；vfork 父进程在返回时收回子进程占用的，fork 子进程清空认领），guest 栈只用 1.2–1.6 KiB；small_stack 验收
 改为测量用量，上限 4 KiB。
 
-另记两点（不是缺陷）：HarmonyOS 上能执行不代表能查看，`/bin/ls`（/system/bin）原生可执行但 stat 返回 EACCES，
-隔离模式下 exec 必须经 broker 打开程序，因此不能运行，同一 toybox 经 `/usr/bin/ls` 可以；loader 自身的 TMPDIR 是
-glue 基目录，broker 只开放其中的 `proot-glue-*`，工作目录放在里面会被拒绝。
+另记两点：HarmonyOS 上能执行不代表能查看，`/bin/ls`（/system/bin）原生可执行但 stat 返回 EACCES，当时在隔离模式下
+不能运行；它其实是 lstat 被拒、readlink 可用的链接，2026-10-31 起 payload 与 broker 用 readlink 识别这类链接，各模式都能运行
+（见下文“能打开或执行但不能 stat”）。loader 自身的 TMPDIR 是 glue 基目录，broker 只开放其中的 `proot-glue-*`，
+工作目录放在里面会被拒绝。
+
+## 能打开或执行但不能 stat（2026-11-01）
+
+Linux 上 stat 只要求路径各级目录的搜索权限，不检查对象本身，所以这种情况只能来自 LSM（SELinux 把 `getattr` 与
+`open`/`read`/`execute`/`search` 分开授予），或 HarmonyOS 自己的访问控制。
+
+- **HarmonyOS**（应用沙箱）：大量系统链接（`/system/lib64/platformsdk/*.so`、`/bin/<applet>`）lstat 返回 EACCES，
+  readlink 可用，目标可以打开或执行。原先 payload 与 broker 的逐级解析因此失败（系统 Vulkan 驱动加载失败，
+  `/bin/ls` 在隔离模式下不能运行）。现在 lstat 被拒时用 readlink 区分链接与其他对象。
+- **Android 14**（adb 设备，GSI，内核 5.10，SELinux enforcing），探针对 /system、/vendor、/apex、/dev、/mnt 等
+  约 2500 个名字逐个比较 lstat、stat、readlink、open、access(X_OK)，分别在 shell 域（runcon 经 sh 入口）以及
+  untrusted_app、isolated_app 域（uid 10099，dyntransition）下运行：
+  - stat 被拒的文件，open 与执行**也都被拒**（shell 域约 1400 个，app 域约 1900 个，多为 /vendor/lib64、
+    /system/bin 中的守护进程）；没有 HarmonyOS 那种 lstat 被拒、readlink 可用的链接。
+  - 唯一的例外是**目录**：`/dev/cgroup_info`（三个域）与 `/mnt/media_rw`、`/linkerconfig`（shell 域）可以穿过、
+    不能 stat。`/dev/cgroup_info/cgroup.rc` 是每个进程的 libprocessgroup 都会读的文件。
+  - shell 域经 loader 读 `/dev/cgroup_info/cgroup.rc`：修复前常规与 `--isolate` 都是 EACCES，bionic 链接器还报
+    找不到 `/linkerconfig/ld.config.txt`；修复后两种模式的内容与原生一致，链接器警告消失。broker 对这种目录用
+    `O_PATH|O_DIRECTORY|O_NOFOLLOW` 打开（O_PATH 不经 LSM 打开检查），之后的相对查找只需要搜索权限。

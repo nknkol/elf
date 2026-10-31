@@ -6,9 +6,8 @@
 The programs are the host's own (harmonybrew: clang, make, git, python3,
 node, coreutils, tar; the system sh), which run natively on HarmonyOS.
 Executing a name does not require being able to look it up there: /bin/ls
-(/system/bin) runs natively but stat on it is refused, so under --isolate,
-where exec opens the program through the broker, it cannot run. The same
-toybox through /usr/bin/ls can; PATH here has no such names.
+(/system/bin) is a link whose lstat is refused while readlink works; the
+loader tells such links by readlink, so it runs in every mode.
 The loader's own TMPDIR is its glue base, where the broker serves only
 proot-glue-* names: the guest's TMPDIR is set with -e instead. Under
 the loader the host's / is the root, so every path is the same in all three
