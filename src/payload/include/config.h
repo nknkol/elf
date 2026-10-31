@@ -38,6 +38,8 @@
 /* fexecve: a descriptor of the program itself; the loader opens it through
  * /proc/self/fd and closes it. */
 #define CONFIG_CHILD_EXEC_FD "--exec-fd"
+/* Isolation mode: the inherited control socket of the broker. */
+#define CONFIG_CHILD_ISOLATE_FD "--isolate-fd"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -77,6 +79,10 @@ typedef struct payload_config {
     int32_t link_copy;
     /* --seccomp-backstop: unhooked syscalls trap to the payload. */
     int32_t seccomp_backstop;
+    /* --isolate: host path calls go to the broker (isolate_fd: its control
+     * socket, inherited by every guest process). */
+    int32_t isolate;
+    int32_t isolate_fd;
     /* Loader image and the stub islands the loader created: guest memory
      * calls may not unmap, remap or reprotect them. */
     uint32_t protected_count;

@@ -391,6 +391,13 @@ fexecve 带 AT_SYMLINK_NOFOLLOW 时不再把内部 /proc/self/fd/N 魔链接当�
 2026-10-31 兜底模式放宽 W^X：依据上面的更正，兜底模式不再拒绝同时可写可执行的映射，loader 也不再拒绝这样的
 初始段。测试改为从 RWX 内存发出打开宿主绝对路径的调用：有无兜底均返回 ENOENT、不会触达宿主；`--omagic`
 程序在两种模式下都能运行。四套回归通过（246 / 171 / 18 / 18）。
+2026-10-31 隔离模式第一阶段（[设计](ISOLATION.md)）：`--isolate` 启动独立的 broker 进程（脱离父子关系，guest 看不到），
+payload 的宿主路径调用（openat、stat/statx、readlink、access、mkdir/mknod/unlink、symlink/link/rename、chmod/chown/utimens、
+truncate、statfs、chdir、xattr、inotify 监视、fchmod/fchown/fsetxattr/fremovexattr）全部改由 broker 执行：每线程一条
+SEQPACKET 通道，FD 经 SCM_RIGHTS 传递；broker 只认 root、bind 源、glue 目录与 loader 五类目录树及其 d/r/w 权限，
+从树根逐级不跟随符号链接打开，按 dev/ino 识别嵌套树，`/proc/self` 改写为请求者 pid。尚未安装 guest 过滤器
+（第二阶段），因此目前只证明路由完整：同一工作负载有无 broker 输出一致（两种构建），Alpine/Ubuntu 验收在
+`ELF_LOADER_OPTIONS=--isolate` 下各 18/18；常规四套回归不变（246 / 171 / 18 / 18）。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

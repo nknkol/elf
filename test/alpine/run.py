@@ -90,7 +90,7 @@ def main():
         script=root/'tmp/accept-script'
         script.write_text('#!/bin/sh\nprintf "SCRIPT:%s:%s\\n" "$1" "$TEST_TOKEN"\n')
         script.chmod(0o755)
-        prefix=[str(loader),'--mode','container','--root',str(root),'-v',f'{bound}:/workspace','-v','/dev/null:/dev/null','--','./bin/busybox']
+        prefix=[str(loader),*lib.EXTRA,'--mode','container','--root',str(root),'-v',f'{bound}:/workspace','-v','/dev/null:/dev/null','--','./bin/busybox']
         def check(name,argv,expected,rc=0):
             p=subprocess.run(prefix+argv,capture_output=True,text=True,timeout=20)
             item=dict(name=name,returncode=p.returncode,stdout=p.stdout,stderr=p.stderr)

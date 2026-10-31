@@ -4,7 +4,7 @@ TARGET := payload.bin
 ARCH_DIR := arch/aarch64
 PROOT_SRC := ../../vendor/proot
 
-SRC := $(addprefix logic/, config.c dispatch.c integrity.c platform.c libc_shim.c hook_runtime.c fake_ids.c \
+SRC := $(addprefix logic/, config.c dispatch.c integrity.c platform.c libc_shim.c broker_client.c hook_runtime.c fake_ids.c \
 	clone_notify.c proot_bridge.c proot_exec.c proot_auxv.c) \
 	$(addprefix $(ARCH_DIR)/, entry.S raw_syscall.S syscall_disp.c mini_libc.c \
 	reentry_guard.c stub.c clone_entry.S)

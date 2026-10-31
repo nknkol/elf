@@ -30,6 +30,9 @@
 #define S_IFREG 0100000
 #define S_IFLNK 0120000
 extern long raw_syscall(long, long, long, long, long, long, long);
+/* Host path calls go through the broker in isolation mode. */
+#include "host_syscall.h"
+#define raw_syscall host_syscall
 
 typedef struct {
     char guest[CONFIG_MAX_PATH], host[CONFIG_MAX_PATH];
@@ -41,6 +44,7 @@ typedef struct {
     char fake_ids[8 * 11];
     char fake_groups[32 * 11 + 2];
     char exec_fd[16];
+    char isolate_fd[16];
 #ifdef GUARDED
     char fd_state[24];
     /* PT_INTERP as stored in the target, then its policy-checked resolution. */
@@ -368,6 +372,11 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     }
     if (cfg->link_copy) s->argv[pos++] = "--link-copy";
     if (cfg->seccomp_backstop) s->argv[pos++] = "--seccomp-backstop";
+    if (cfg->isolate) {
+        fd_name(s->isolate_fd, "", cfg->isolate_fd);
+        s->argv[pos++] = CONFIG_CHILD_ISOLATE_FD;
+        s->argv[pos++] = s->isolate_fd;
+    }
     uint32_t groups[32];
     int group_count = fake_ids_groups(groups);
     if (group_count != 1 || groups[0]) {

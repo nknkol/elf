@@ -49,6 +49,7 @@ struct loader_options {
 	const char *exec_exe;    /* guest path of the program (/proc/self/exe) */
 	const char *exec_name;   /* basename for the kernel comm */
 	int exec_fd;             /* fexecve: a copy of the program's descriptor */
+	int isolate;             /* --isolate: start the broker (initial loader) */
 };
 
 /* options.c */
@@ -86,6 +87,9 @@ typedef void (*signal_handler_t)(int, siginfo_t *, void *);
 int signal_install(int sig, signal_handler_t handler, unsigned long flags);
 void die_of_signal(int sig);
 void debugger_install(void);
+
+/* broker.c (isolation mode) */
+void broker_start(payload_config_t *cfg);
 
 /* backstop.c */
 void backstop_install(unsigned long payload_entry, int with_filter);

@@ -181,6 +181,11 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			cfg->link_copy = 1;
 		} else if (is(arg, "--seccomp-backstop")) {
 			cfg->seccomp_backstop = 1;
+		} else if (is(arg, "--isolate")) {
+			opt->isolate = 1;
+		} else if (is(arg, CONFIG_CHILD_ISOLATE_FD)) {
+			cfg->isolate = 1;
+			cfg->isolate_fd = (int32_t)number(value(argc, argv, &i), 2147483647ul, "isolate fd");
 		} else if (is(arg, "--kernel-release") || is(arg, "--kernel-sysname")) {
 			char *field = arg[9] == 'r' ? cfg->kernel_release : cfg->kernel_sysname;
 			const char *v = value(argc, argv, &i);

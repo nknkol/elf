@@ -38,6 +38,7 @@ check: build
 	$(PYTHON) test/fs_policy/elf_layout.py
 	$(PYTHON) test/fs_policy/guest_signals.py
 	$(PYTHON) test/fs_policy/backstop.py
+	$(PYTHON) test/fs_policy/isolate.py
 	$(PYTHON) test/fs_policy/glue.py
 	$(PYTHON) test/fs_policy/interp_links.py
 	$(PYTHON) test/proot/test_inotify.py

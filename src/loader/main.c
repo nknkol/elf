@@ -251,6 +251,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		z_errx(1, "target is not ELF: %s", file);
 	}
 	choose_exec_exe(&cfg, &opt, file);
+	/* The broker starts before anything of the guest is loaded. */
+	if (opt.isolate && !cfg.isolate)
+		broker_start(&cfg);
 	int envc;
 	char **env = environment(&cfg, &opt, host_env, &envc);
 

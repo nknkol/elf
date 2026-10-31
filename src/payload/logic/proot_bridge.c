@@ -28,6 +28,9 @@
 #define S_IFREG 0100000
 #define S_IFLNK 0120000
 extern long raw_syscall(long, long, long, long, long, long, long);
+/* Host path calls go through the broker in isolation mode. */
+#include "host_syscall.h"
+#define raw_syscall host_syscall
 _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 16,
                "Adapter requires Linux AArch64 kernel stat ABI");
 /* AArch64 user msghdr; only the name fields are rewritten, in a private copy. */
@@ -1377,7 +1380,8 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     /* Socket names keep their spelling (bind records it); exec resolves
      * through proot_resolve_exec_path. Everything dispatched here is safe
      * to issue through the walked parent directory. */
-    b->secure = g_payload_config.guard >= GUARD_PATHS;
+    /* In isolation mode the broker walks every path itself. */
+    b->secure = g_payload_config.guard >= GUARD_PATHS && !g_payload_config.isolate;
 #endif
     long ret;
     switch (number) {

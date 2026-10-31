@@ -6,6 +6,7 @@ Tests import it after `sys.path.insert(0, <repo>/test)`:
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ BUILD = REPO / 'build'
 ALPINE = BUILD / 'alpine-test-root'
 UBUNTU = BUILD / 'ubuntu-test-root'
 SUFFIXES = ('', '-guarded')
+# Extra loader options for whole test runs, e.g. ELF_LOADER_OPTIONS=--isolate.
+EXTRA = os.environ.get('ELF_LOADER_OPTIONS', '').split()
 sys.path.insert(0, str(REPO / 'tools'))
 import elf_abi  # noqa: E402  (tools/elf_abi.py)
 ABI = elf_abi
@@ -55,7 +58,7 @@ def build_probe(source, output, *flags):
 def guest(loader, command, root=ALPINE, volumes=(), options=(), mode='container', cwd=None,
           timeout=60, **kwargs):
     """Runs command under the loader with root and host:guest volumes."""
-    argv = [str(loader), '--mode', mode, '--root', str(root)]
+    argv = [str(loader), *EXTRA, '--mode', mode, '--root', str(root)]
     for host, guest_path in volumes:
         argv += ['-v', f'{host}:{guest_path}']
     argv += [*options, '--', *command]

@@ -32,7 +32,7 @@ def main():
         (root/'workspace').mkdir(exist_ok=True);(bound/'input').write_text('BOUND\n')
         script=root/'tmp/accept-script';script.write_text('#!/bin/sh\nprintf "SCRIPT:%s:%s\\n" "$1" "$TEST_TOKEN"\n');script.chmod(0o755)
         report['os_release']=(root/'usr/lib/os-release').read_text()
-        prefix=[str(loader),'--mode','container','--root',str(root),'-v',f'{bound}:/workspace','-v','/dev/null:/dev/null','--','./usr/bin/dash','-c']
+        prefix=[str(loader),*lib.EXTRA,'--mode','container','--root',str(root),'-v',f'{bound}:/workspace','-v','/dev/null:/dev/null','--','./usr/bin/dash','-c']
         cases=[
             ('dash startup','printf GLIBC_OK','GLIBC_OK'),
             ('glibc version','getconf GNU_LIBC_VERSION',None),
