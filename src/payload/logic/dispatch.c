@@ -18,6 +18,8 @@
 #define PROT_WRITE    0x2
 #define PROT_EXEC     0x4
 #define MAP_ANONYMOUS 0x20
+#define MAP_TYPE      0x0f
+#define MAP_PRIVATE   0x02
 
 extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6);
 extern void _start(void);
@@ -76,6 +78,14 @@ static long map_exec_copy(const long a[6])
 static long map_exec(long number, long a[6])
 {
     a[2] |= PROT_READ;
+    /* A file's executable mapping becomes a hooked private copy, frozen at
+     * this point: for a shared mapping, code written later through another
+     * mapping of the same object (a JIT's dual mapping of a memfd) would
+     * never show, and the copy would run stale bytes. Refused, as HarmonyOS
+     * refuses it natively, so the program falls back to anonymous memory. */
+    if (number == __NR_mmap && !(a[3] & MAP_ANONYMOUS) && (int)a[4] >= 0 &&
+        (a[3] & MAP_TYPE) != MAP_PRIVATE)
+        return -EACCES;
     if (number == __NR_mmap && !(a[3] & MAP_ANONYMOUS) && (int)a[4] >= 0)
         return map_exec_copy(a);
     long ret = number == __NR_mmap ? passthrough(number, a) :

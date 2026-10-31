@@ -44,6 +44,7 @@ check: build
 	$(PYTHON) test/proot/test_inotify.py
 	$(PYTHON) test/proot/test_exec.py
 	$(PYTHON) test/proot/test_auxv.py
+	$(PYTHON) test/proot/test_jit.py
 	$(PYTHON) test/syscalls/check_dispatch.py
 	$(PYTHON) test/syscalls/newer_paths.py
 	$(PYTHON) test/syscalls/check_guard.py
