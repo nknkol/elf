@@ -122,3 +122,29 @@ stat 是一次 broker 往返，只多耗 CPU。常规与隔离同时运行五对
 只有直接使用命名或抽象名数据报套接字的程序受影响。guest 持有的数据报套接字可以用 sendmsg 的 msg_name 向任意路径
 发送，过滤器检查不到内存中的地址，因此安全的支持只能是 broker 代理收发（guest 拿顺序包的一端，broker 持有真正的
 数据报套接字并按树检查目标）。出现具体需求前不做。
+
+## 2026-10-31，第五轮（原生对比基准中发现）
+
+`test/isolation/native_bench.py` 用宿主自带的原生程序（宿主 / 作 root）对比原生、常规与隔离，发现两个缺陷，都已修复：
+
+### 缺陷 4：隔离模式下 /proc/self/exe 是 loader
+
+broker 把 /proc/self、/proc/thread-self 改写成请求者的 pid 再解析，payload 的完整解析因此见不到 self 这个链接，
+不会把它规范成 /proc/<pid>；/proc 链接模拟只认数字 pid，于是 exe 交给内核，返回 loader 的宿主路径（Alpine rootfs
+里也一样，泄露 loader 位置）。按 `$ORIGIN` 找库的程序（ohos-sdk 的 lld 依赖 `$ORIGIN/../lib/libxml2.so.16`）因此
+加载失败。现在 self/thread-self 下的 exe 直接取 guest 程序。新增验收 G selfexe：readlink 两种写法都是 /iso-probe，
+打开 /proc/self/exe 得到的是同一个文件。
+
+### 缺陷 5：musl posix_spawn 的子进程栈被 payload 用穿
+
+musl 的 posix_spawn 让子进程运行在父进程栈帧里的一个约 5 KiB 的数组上（1024 + PATH_MAX），紧挨着的是父进程回收子进程
+状态用的管道 FD。payload 在子进程里处理 exec 用了 3.7 KiB（guarded 构建 10.8 KiB：交接快照 6 KiB 在栈上，
+`guarded_mapping` 的 2 KiB 守卫副本被内联进每个调用的分发帧），溢出改写了这两个 FD 号，父进程随后关错 FD：
+`make -s` 的 stdout 被关（“write error: stdout: Bad file descriptor”），guarded 下每次 spawn 泄漏两个 FD。原有的
+small_stack 验收按 glibc 的 36 KiB 栈测试，没有发现。现在慢路径调用在 payload 自己的栈上运行（8 个 64 KiB，按线程
+认领；vfork 父进程在返回时收回子进程占用的，fork 子进程清空认领），guest 栈只用 1.2–1.6 KiB；small_stack 验收
+改为测量用量，上限 4 KiB。
+
+另记两点（不是缺陷）：HarmonyOS 上能执行不代表能查看，`/bin/ls`（/system/bin）原生可执行但 stat 返回 EACCES，
+隔离模式下 exec 必须经 broker 打开程序，因此不能运行，同一 toybox 经 `/usr/bin/ls` 可以；loader 自身的 TMPDIR 是
+glue 基目录，broker 只开放其中的 `proot-glue-*`，工作目录放在里面会被拒绝。

@@ -178,3 +178,29 @@ the same time, two rounds, ns per op:
 An isolated `stat` is now cheaper than the in-process default: one lexical
 mapping and one request, where the default walks the path itself. Calls
 that bring an FD back (open) still pay for SCM_RIGHTS on the socket.
+
+## HarmonyOS, 2026-10-31: whole workloads against native
+
+`python3 test/isolation/native_bench.py --runs 3 [--loader elfloader-guarded]`:
+the host's own programs (harmonybrew clang, make, git, python3, node,
+coreutils, tar and the system sh) run natively, under the loader with the
+host's / as root, and the same with `--isolate`; the modes take turns,
+medians of three, stdout identical in all. Load average 21-25.
+
+| workload | native s | plain | isolate | plain/native | isolate/native |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| clang+make (17 files, -j4) | 1.97 | 3.59 | 6.39 | 1.83 | 3.25 |
+| git init/add/commit/log | 0.73 | 1.45 | 2.92 | 2.00 | 4.02 |
+| python stdlib imports | 0.23 | 0.29 | 0.53 | 1.29 | 2.32 |
+| python venv + pip --version | 5.19 | 6.15 | 8.84 | 1.19 | 1.70 |
+| node fs + npm --version | 0.30 | 0.82 | 1.06 | 2.70 | 3.51 |
+| tar czf python stdlib | 2.32 | 2.29 | 3.47 | 0.99 | 1.49 |
+| du -a python stdlib | 0.10 | 0.38 | 0.68 | 3.96 | 7.17 |
+| shell: 500 files write/read | 0.17 | 0.25 | 0.65 | 1.50 | 3.87 |
+| total | 11.00 | 15.23 | 24.54 | 1.38 | 2.23 |
+
+The guarded build: 1.52x plain, 2.47x isolated (total 11.08 / 16.85 /
+27.36 s). Workloads that start many processes (make, git, the shell loop)
+and walk many paths (du) pay most; one long computation (venv, tar) least.
+`make bench` the same hour: native stat 10.0 us, isolate 19.3 us (1.9x),
+open_close 17.2 vs 42.7 us (2.5x), getpid unchanged.

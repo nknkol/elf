@@ -425,6 +425,15 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-10-31 隔离模式通道槽位：每个线程的 broker 通道槽位（64 个）在线程退出后从不回收，进程累计创建第 64 个线程起所有路径调用返回 EACCES；现在槽位用满时回收已退出线程的槽位。vfork 子进程原先会在共享内存里清掉父进程的槽位，现在改由 clone 通知处理（fork 子进程关掉继承的通道，vfork 父进程在返回后释放子进程的槽位）。procfs FD 列表不再显示保留 FD 898–900。验收新增 K channels（200 个先后创建的线程、vfork 之后、/proc/self/fd 列表），119 项通过；四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18），实际工作负载输出一致。
 2026-10-31 大小写别名隔离验收（`test/isolation/case_alias.py`，并入 `make check-isolation`，38 项通过）：在大小写不敏感的 /storage/Users 上，隐藏树与只读树的每种大小写拼写（经 payload 和直接伪造给 broker 的请求）都按对象所在树处理，可写树中的大小写变体照常可用；未发现缺陷。apt 对比（`test/isolation/apt_install.py`，需联网）：两种构建在 `--isolate` 下 update/install/remove 与常规模式输出一致；耗时随镜像波动（镜像断开连接时 apt 重试并在等待期间反复 stat，两种模式都有），同时运行的五对中四对隔离不慢于常规。数据报 UNIX 套接字的兼容代价已评估，暂不改。
 2026-10-31 隔离模式性能第二轮：每次请求的成本几乎全是进程睡眠与唤醒的调度延迟（SEQPACKET 往返 15–26 µs）。通道改为 broker 建的封印 memfd 共享区，双方先自旋再睡在套接字上（套接字仍传 FD、唤醒与 EOF）：空请求往返 25–40→1–2 µs，guest stat 46–73→9–13 µs（rtt 探针，新旧版本同时测），`make bench` 的 isolate stat 17 µs、open_close 38 µs、readdir_64 91 µs（之前 67 / 92 / 163 µs）。payload ABI 20。验收 157 项通过，四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18），实际工作负载输出一致。探针的 rtt 模式修正了 pingpong 子进程不退出的问题，伪造通道改用新协议。
+2026-10-31 原生对比基准（`test/isolation/native_bench.py`，harmonybrew 的 clang/make/git/python3/node/coreutils 与系统 sh，
+宿主 / 作 root，三种方式交替各 3 次取中位数）：普通构建常规 1.38×、`--isolate` 2.23× 原生；guarded 构建 1.52× / 2.47×
+（[BENCHMARKS](BENCHMARKS.md)）。期间发现并修复两个缺陷：(1) 隔离模式下 `/proc/self/exe` 返回 loader 本身：broker 先把
+/proc/self 改写成请求者的 pid，payload 解析时见不到 self 链接，未改写 exe；现在 /proc/self、/proc/thread-self 下的 exe
+直接取 guest 程序（依赖 `$ORIGIN` 的 lld 因此找错 libxml2）。验收新增 G selfexe。(2) musl 的 posix_spawn 只给子进程约
+5 KiB 栈，payload 在 vfork 子进程里 exec 用了 3.7 KiB（guarded 10.8 KiB），溢出改写了父进程栈帧中 posix_spawn 的管道 FD 号，
+父进程关错 FD（make 丢失 stdout、guarded 下每次 spawn 泄漏两个 FD）。现在慢路径调用在 payload 自己的栈上运行（8 个 64 KiB，
+按线程认领，vfork 父进程在返回时收回子进程占用的），guest 栈只用约 1.2–1.6 KiB；FD 运行时的交接快照移出栈、
+`guarded_mapping` 不再内联。`small_stack.py` 改为测量用量，上限 4 KiB，两种构建、加不加 `--isolate`。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -452,11 +461,11 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 | 入口 | 结果 | 范围 |
 | --- | --- | --- |
-| `make check` | 250 项通过 | 路径、exec/auxv、模型与 clone、ABI/路由、重入、运行时 guard、隔离工作负载对照 |
+| `make check` | 252 项通过 | 路径、exec/auxv、模型与 clone、ABI/路由、重入、运行时 guard、隔离工作负载对照 |
 | `make check-guarded` | 171 项通过 | FD 运行时、修改保护、默认拒绝读取、socket 与 transport |
 | `make check-alpine` / `make check-ubuntu` | 各 18/18 | 离线 rootfs 验收；Ubuntu 归档硬链接按副本展开 |
 | 以上四套加 `ELF_LOADER_OPTIONS=--isolate` | 同上 | 只作用于经 `test/lib.py` 启动 loader 的测试 |
-| `make check-isolation` | 119 + 38 项通过 | 隔离验收目标 A–L，两种构建；大小写别名（大小写不敏感的存储上，否则 SKIP） |
+| `make check-isolation` | 121 + 38 项通过 | 隔离验收目标 A–L，两种构建；大小写别名（大小写不敏感的存储上，否则 SKIP） |
 | `make bench` | 只记录 | 原生与各配置的微基准（[BENCHMARKS](BENCHMARKS.md)） |
 
 宿主原生创建硬链接被拒绝的 fixture 记为 SKIP，不算成功；ENOSYS 不算功能实现。
@@ -469,7 +478,10 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2. **隔离模式的兼容代价**（2026-10-31 评估，见 ISOLATION_RESULTS.md 第四轮）：不能创建数据报 UNIX 套接字，
    sendto/sendmsg 带 UNIX 路径名返回 EPERM。syslog()、SysLogHandler、logger、数据报 socketpair 与常规模式表现相同；
    只有直接使用命名或抽象名数据报套接字的程序受影响。安全支持需要 broker 代理收发（guest 持有的数据报套接字
-   可用 sendmsg 向任意路径发送，过滤器看不到地址），出现具体需求前不做。
+   可用 sendmsg 向任意路径发送，过滤器看不到地址），出现具体需求前不做（HarmonyOS 原生程序的 HiLog 因此连不上，
+   只是一条警告）。另外：exec 经 broker 打开程序，宿主上能执行却查不到的名字（HarmonyOS 的 `/bin/ls` 等，
+   stat 返回 EACCES）不能运行，同一 toybox 经 `/usr/bin/ls` 可以；`/proc/<其他 pid>` 不可达；loader 自身的
+   TMPDIR 是 glue 基目录，其中只开放 `proot-glue-*`，guest 的 TMPDIR 应另设。
 3. **剩余风险**（ISOLATION.md）：内核漏洞、资源耗尽、侧信道、同 uid 的信号/网络/系统服务、`execveat`
    带非空路径、宿主已有的跨区硬链接、继承的数据报 UNIX 套接字。
 4. **进程内模式的来源与竞争**：未知 cwd/目录 FD 的来源仍为 UNKNOWN，首个目标的 PT_INTERP 不经读策略，
