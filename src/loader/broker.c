@@ -40,7 +40,7 @@ struct tree {
 	size_t length;
 	int fd;
 	unsigned long dev, ino;
-	char access; /* 'd', 'r' or 'w' */
+	char access; /* 'd', 'r', 'w', or 'g' (glue base: only proot-glue-* inside) */
 };
 static struct tree trees[TREES];
 static int tree_count;
@@ -221,6 +221,15 @@ static int resolve(const char *input, int follow, struct target *t)
 			}
 			z_memcpy(name, rest, n);
 			name[n] = 0;
+			/* The glue base is the host TMPDIR: only the payload's glue
+			 * trees in it are reachable (writable), nothing else. */
+			if (access == 'g') {
+				if (z_strncmp(name, "proot-glue-", 11)) {
+					sys(__NR_close, fd, 0, 0, 0, 0, 0);
+					return -EACCES_;
+				}
+				access = 'w';
+			}
 			const char *next = end;
 			while (*next == '/')
 				next++;
@@ -293,7 +302,7 @@ static int resolve(const char *input, int follow, struct target *t)
 
 static int check(const struct target *t, int write)
 {
-	if (t->access == 'd')
+	if (t->access == 'd' || t->access == 'g')
 		return -ENOENT_;
 	if (write && t->access != 'w')
 		return -EROFS_;
@@ -875,7 +884,7 @@ static void broker_run(int control, const payload_config_t *cfg)
 	add_tree(cfg->root[0] ? cfg->root : "/", access[0] ? access[0] : 'w');
 	for (int i = 0; i < cfg->bind_count; i++)
 		add_tree(cfg->binds[i].dst, access[0] ? access[i + 1] : 'w');
-	add_tree(cfg->glue_dir, 'w');
+	add_tree(cfg->glue_dir, 'g');
 	add_tree(cfg->loader_path, 'r');
 	/* Handlers are reaped by the kernel. */
 	signal_install(SIGCHLD, (signal_handler_t)1 /* SIG_IGN */, 0);

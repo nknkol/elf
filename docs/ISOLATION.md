@@ -93,6 +93,9 @@ payload 的 exec（proot_exec）：
   按树检查（bind 要求父目录 `w`，connect 要求可见），broker 在目标目录内用相对名完成，因此不受 `sun_path`
   长度限制；其他地址族与抽象名原样执行。数据报 socketpair 改为顺序包（保留消息边界）；sendto/sendmsg
   带 UNIX 路径名返回 EPERM（guest 没有可命名的数据报套接字）。
+- **glue 目录**：glue 基目录是宿主的 TMPDIR（或 PROOT_TMP_DIR、/tmp），broker 只开放其中
+  `proot-glue-*` 名下的内容（可写），基目录本身与其中其他名字一律不可达。最初整棵 TMPDIR 都是可写树，
+  伪造请求可以读写其中任意文件，这是验收时发现的缺陷（见 ISOLATION_RESULTS.md）。
 - **保留 FD**：控制套接字、loader FD 与各线程通道不允许被 guest 破坏：close 假装成功，作为 dup3 目标返回
   EBUSY，F_SETFD/FIOCLEX 被忽略；close_range 返回 ENOSYS（调用者退回逐个关闭）。
 - **过滤器补充**（相对上表）：bind、connect、acct、swapon/swapoff、quotactl、process_madvise 也被拒绝；
