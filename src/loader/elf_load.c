@@ -47,7 +47,8 @@ unsigned long g_payload_lo, g_payload_hi;
 static unsigned long file_size(int fd, const char *file)
 {
 	struct stat st;
-	if (z_newfstatat(fd, "", &st, AT_EMPTY_PATH) < 0)
+	/* fstat, not fstatat: the guest filter refuses path calls. */
+	if (z_syscall(__NR_fstat, fd, &st) < 0)
 		z_errx(1, "can't stat %s", file);
 	return (unsigned long)st.st_size;
 }

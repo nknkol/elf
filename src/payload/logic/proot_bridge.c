@@ -30,6 +30,7 @@
 extern long raw_syscall(long, long, long, long, long, long, long);
 /* Host path calls go through the broker in isolation mode. */
 #include "host_syscall.h"
+#include "broker_proto.h"
 #define raw_syscall host_syscall
 _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 16,
                "Adapter requires Linux AArch64 kernel stat ABI");
@@ -1309,6 +1310,13 @@ static long socket_address(Bridge *b, long number, long a[6])
     path[size] = 0;
     long ret = resolve(b, AT_FDCWD, path, number != __NR_bind);
     if (ret < 0) return ret;
+    /* Isolation mode: the broker binds or connects the socket to the host
+     * path (any length); the guest has no datagram socket to name. */
+    if (g_payload_config.isolate) {
+        if (sending || message) return -EPERM;
+        return raw_syscall(number == __NR_bind ? BROKER_BIND_PATH : BROKER_CONNECT_PATH,
+                           a[0], (long)b->host, 0, 0, 0, 0);
+    }
     long directory = -1;
     size_t host = strlen(b->host);
     memset(&b->address, 0, sizeof(b->address));

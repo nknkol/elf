@@ -77,11 +77,34 @@ payload 的 exec（proot_exec）：
 3. 子 loader 不做任何按路径的调用：用 fstat 代替 newfstatat，程序与解释器只从 FD 读取，
    loader 路径与大小写别名标记从参数继承。
 
+## 第二阶段的实现要点
+
+- **子 loader 的参数**：`--exec-fd`（要加载的 ELF，脚本时为最终解释器）、`--exec-interp-fd`（PT_INTERP）、
+  `--loader-fd`（初始 loader 装过滤器前打开的自身，FD 898）、`--loader-path`、`--case-folds`（各 bind 的
+  大小写别名标记）、`--isolate-fd`（控制套接字，FD 899）。子 loader 只用 fstat/pread/mmap 读这两个 FD。
+- **PT_INTERP**：隔离模式下两个构建都由 payload 读出 PT_INTERP，按 guest 视图（符号链接、bind）解析后
+  经 broker 打开；程序与解释器先打开、再对 FD 做 fstat 检查，避免检查与使用之间被替换。
+- **按 FD 的元数据**：`newfstatat(fd, "", AT_EMPTY_PATH)`（glibc 的 fstat）在 payload 内改为 fstat；
+  `statx` 的空路径与 `/proc/self/fd/N` 由 broker 直接对收到的 FD 执行（读取已持有对象的元数据，无需检查）；
+  fchmod、fchown、fsetxattr、fremovexattr、utimensat(fd, NULL) 由 broker 按对象所在树检查。
+- **`/proc/self/fd/N` 重新打开**：对象在某棵树内时按该树权限；不在任何树内（终端、继承的设备）时，
+  至多保持原 FD 的访问方式，O_PATH FD 不能重开，也不能带 O_CREAT/O_TMPFILE。
+- **套接字**：`socket(AF_UNIX)` 由 broker 创建（只给流与顺序包）；bind/connect 一律经 broker，UNIX 路径
+  按树检查（bind 要求父目录 `w`，connect 要求可见），broker 在目标目录内用相对名完成，因此不受 `sun_path`
+  长度限制；其他地址族与抽象名原样执行。数据报 socketpair 改为顺序包（保留消息边界）；sendto/sendmsg
+  带 UNIX 路径名返回 EPERM（guest 没有可命名的数据报套接字）。
+- **保留 FD**：控制套接字、loader FD 与各线程通道不允许被 guest 破坏：close 假装成功，作为 dup3 目标返回
+  EBUSY，F_SETFD/FIOCLEX 被忽略；close_range 返回 ENOSYS（调用者退回逐个关闭）。
+- **过滤器补充**（相对上表）：bind、connect、acct、swapon/swapoff、quotactl、process_madvise 也被拒绝；
+  `prlimit64` 只允许 pid 0（payload 把自身 pid 改写为 0）。
+
+验收目标与判定标准见 [ISOLATION_TESTING.md](ISOLATION_TESTING.md)。
+
 ## 分阶段实施
 
-1. **broker 与请求路由（不装过滤器）**：broker 进程、协议与参数表、目录树策略与安全解析；
+1. **broker 与请求路由（不装过滤器）**（已完成）：broker 进程、协议与参数表、目录树策略与安全解析；
    payload 的宿主路径调用改走 broker。功能回归应全部通过，证明路由完整。
-2. **过滤器与 exec**：装过滤器；按 FD 的元数据操作、`/proc/self/fd` 与 exec 流程改造；
+2. **过滤器与 exec**（已完成，见上节）：装过滤器；按 FD 的元数据操作、`/proc/self/fd` 与 exec 流程改造；
    AF_UNIX 套接字按上表处理。对抗测试：跳进 payload 的 `svc` 打开隐藏文件、改写 payload 配置
    后访问只读区、硬链接只读文件、大小写别名、`/proc/<其他 pid>`、`process_vm_writev` 写 broker，
    均必须失败。
@@ -95,4 +118,5 @@ payload 的 exec（proot_exec）：
 - 侧信道；
 - 与宿主应用同一 uid：kill 其他同 uid 进程、网络、经 binder 等访问系统服务；
 - `execveat` 带非空路径时可执行任意可执行文件（不能读写文件，但可读取其映像内容）；
-- 宿主上已有的跨区硬链接（同一 inode 在只读与可写区都可见）。
+- 宿主上已有的跨区硬链接（同一 inode 在只读与可写区都可见）；
+- 从宿主继承来的数据报 UNIX 套接字（可向任意路径名发送）。

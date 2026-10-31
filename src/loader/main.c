@@ -101,15 +101,32 @@ struct image {
 	unsigned long bias, entry;
 };
 
-static void load(struct image *img, const char *path, unsigned long payload_entry)
+/* From a path, or (fd >= 0) from a descriptor opened by the broker. */
+static void load(struct image *img, const char *path, int fd, unsigned long payload_entry)
 {
-	int fd = z_openat(AT_FDCWD, path, O_RDONLY);
+	if (fd < 0)
+		fd = z_openat(AT_FDCWD, path, O_RDONLY);
 	if (fd < 0)
 		z_errx(1, "can't open %s", path);
 	elf_read_headers(fd, &img->ehdr, img->phdr, path);
 	img->bias = elf_load_image(fd, &img->ehdr, img->phdr, payload_entry, path);
 	img->entry = img->bias + img->ehdr.e_entry;
 	z_close(fd);
+}
+
+/* Isolation mode: the case-alias marks the initial loader computed. */
+static void set_case_folds(payload_config_t *cfg, const char *folds)
+{
+	for (int i = 0; i < cfg->bind_count && *folds; i++) {
+		unsigned long v = 0;
+		while (*folds >= '0' && *folds <= '9' && v < CONFIG_MAX_PATH)
+			v = v * 10 + (unsigned long)(*folds++ - '0');
+		if (*folds && *folds != ',')
+			z_errx(1, "invalid value for " CONFIG_CHILD_CASE_FOLDS);
+		if (*folds)
+			folds++;
+		cfg->binds[i].fold = (uint32_t)v;
+	}
 }
 
 /* PT_INTERP of the program, as a host path: the payload resolved it for a
@@ -125,6 +142,11 @@ static const char *interpreter(const struct image *prog, const char *file,
 			continue;
 		if (opt->exec_interp)
 			return opt->exec_interp;
+		/* Isolation mode: the payload sent it as an FD (no path calls here). */
+		if (opt->exec_interp_fd >= 0)
+			return "(interpreter)";
+		if (opt->child && cfg->isolate)
+			z_errx(1, "interpreter not opened by the payload");
 #ifdef GUARDED
 		/* A target swapped after the payload's check must not fall back to
 		 * lexical mapping and bypass the read policy. */
@@ -231,8 +253,18 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	normalize_host_path(cfg.root, CONFIG_MAX_PATH);
 	for (int i = 0; i < cfg.bind_count; i++)
 		normalize_host_path(cfg.binds[i].dst, CONFIG_MAX_PATH);
-	mark_case_aliases(&cfg);
-	resolve_self_path(cfg.loader_path, CONFIG_MAX_PATH);
+	/* An isolated child cannot name files: what the initial loader looked
+	 * up comes in its arguments. */
+	int isolated_child = opt.child && cfg.isolate;
+	if (isolated_child) {
+		if (cfg.loader_fd < 0 || !cfg.loader_path[0] || opt.exec_fd < 0)
+			z_errx(1, "isolated child loader needs its loader and program FDs");
+		if (opt.case_folds)
+			set_case_folds(&cfg, opt.case_folds);
+	} else {
+		mark_case_aliases(&cfg);
+		resolve_self_path(cfg.loader_path, CONFIG_MAX_PATH);
+	}
 
 	/* A guest exec names the program with --exec-target (its argv may be
 	 * empty); otherwise the program is the first argument. */
@@ -247,23 +279,35 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "chdir to root %s failed", cfg.root);
 		if (!cfg.glue_dir[0])
 			choose_glue_dir(&cfg, host_env);
-	} else if (!is_elf_file_at(AT_FDCWD, file)) {
+	} else if (!isolated_child && !is_elf_file_at(AT_FDCWD, file)) {
 		z_errx(1, "target is not ELF: %s", file);
 	}
 	choose_exec_exe(&cfg, &opt, file);
 	/* The broker starts before anything of the guest is loaded. */
-	if (opt.isolate && !cfg.isolate)
+	if (opt.isolate && !cfg.isolate) {
 		broker_start(&cfg);
+		/* Every guest exec re-executes this binary through an FD. */
+		int self = z_openat(AT_FDCWD, cfg.loader_path, O_RDONLY);
+		long high = self < 0 ? self : z_syscall(__NR_fcntl, self, 0 /* F_DUPFD */, 898, 0, 0, 0);
+		if (high < 0)
+			z_errx(1, "isolate: cannot open the loader binary");
+		z_close(self);
+		cfg.loader_fd = (int32_t)high;
+	}
 	int envc;
 	char **env = environment(&cfg, &opt, host_env, &envc);
 
 	unsigned long payload_entry = payload_load(opt.payload);
-	load(&prog, file, payload_entry);
+	/* An isolated child reads the program and interpreter from the FDs the
+	 * broker opened (and closes them); otherwise they are opened here. */
+	load(&prog, file, isolated_child ? opt.exec_fd : -1, payload_entry);
 	const char *interp_path = interpreter(&prog, file, &cfg, &opt, interp_buf, sizeof(interp_buf));
 	if (interp_path)
-		load(&interp, interp_path, payload_entry);
+		load(&interp, interp_path, isolated_child ? opt.exec_interp_fd : -1, payload_entry);
+	else if (opt.exec_interp_fd > 2)
+		z_close(opt.exec_interp_fd);
 	/* fexecve: the program is loaded; this descriptor copy is not the guest's. */
-	if (opt.exec_fd > 2)
+	if (!isolated_child && opt.exec_fd > 2)
 		z_close(opt.exec_fd);
 
 	set_auxv(auxv, &prog, interp_path ? &interp : NULL,
@@ -275,6 +319,10 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		debugger_install();
 	if (cfg.seccomp_backstop)
 		backstop_install(payload_entry, !opt.child);
+	/* Last of the initial loader's own work: from here on no guest process
+	 * names a file except through the broker. */
+	if (cfg.isolate && !opt.child)
+		guest_filter_install();
 	/* /proc/<pid>/{comm,stat,status} name the guest program, not the loader. */
 	const char *name = opt.exec_name ? opt.exec_name : cfg.exec_exe;
 	for (const char *c = name; *c; c++)

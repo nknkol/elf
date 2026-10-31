@@ -398,6 +398,16 @@ SEQPACKET 通道，FD 经 SCM_RIGHTS 传递；broker 只认 root、bind 源、gl
 从树根逐级不跟随符号链接打开，按 dev/ino 识别嵌套树，`/proc/self` 改写为请求者 pid。尚未安装 guest 过滤器
 （第二阶段），因此目前只证明路由完整：同一工作负载有无 broker 输出一致（两种构建），Alpine/Ubuntu 验收在
 `ELF_LOADER_OPTIONS=--isolate` 下各 18/18；常规四套回归不变（246 / 171 / 18 / 18）。
+2026-10-31 隔离模式第二阶段（[设计](ISOLATION.md)，[验收](ISOLATION_TESTING.md)）：初始 loader 在跳到程序前安装 guest
+过滤器（跨 fork/exec 继承，broker 在其外）：按路径的文件调用、按 FD 改元数据、bind/connect、`socket(AF_UNIX)`、
+数据报 socketpair、execve、io_uring、process_vm_*、ptrace、挂载等一律 EPERM，不论从哪个地址发出；exec 改为
+broker 打开程序与解释器（两种构建都由 payload 按 guest 视图解析 PT_INTERP），`execveat(loader_fd, "", AT_EMPTY_PATH)`
+重新执行 loader，子 loader 只从 FD 读取、不做按路径的调用。fstat 形式的 newfstatat 在 payload 内改为 fstat，
+statx 空路径与 `/proc/self/fd/N` 的元数据由 broker 直接对 FD 执行；树外对象经 `/proc/self/fd` 重开至多保持原访问方式；
+UNIX 套接字由 broker 创建、bind/connect 由 broker 在目标目录内完成（不受 sun_path 长度限制）；guest 不能关闭或替换
+控制套接字、loader FD 与通道。设备验证：从 payload 自身的 svc 发出的 openat 在隔离模式下返回 EPERM（无隔离时可打开）；
+只读 bind 的写、删、链接、创建在有无 broker 时结果一致。四套回归在常规与 `ELF_LOADER_OPTIONS=--isolate` 下均通过
+（248 / 171 / 18 / 18）；isolate 下 Ubuntu rootfs 中 python subprocess 与 gcc 正常。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

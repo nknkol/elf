@@ -156,7 +156,8 @@ static long broker_call(const struct broker_spec *spec, long nr, const long a[6]
     memset(request, 0, sizeof(*request));
     request->nr = (int32_t)nr;
     int directory = AT_FDCWD;
-    int cloexec = nr == __NR_chdir || (nr == __NR_openat && (a[2] & O_CLOEXEC_));
+    int cloexec = nr == __NR_chdir || (nr == __NR_openat && (a[2] & O_CLOEXEC_)) ||
+                  (nr == __NR_socket && (a[1] & O_CLOEXEC_));
     for (int i = 0; i < 6; i++) {
         const struct broker_arg *arg = &spec->arg[i];
         size_t length = arg->len_arg >= 0 ? (size_t)a[arg->len_arg] : arg->len_fixed;
@@ -272,6 +273,89 @@ long host_syscall(long nr, long a0, long a1, long a2, long a3, long a4, long a5)
     const struct broker_spec *spec;
     if (!g_payload_config.isolate || !(spec = broker_spec(nr)))
         return raw_syscall(nr, a0, a1, a2, a3, a4, a5);
+    /* fstat spelled as fstatat (glibc): the FD's own metadata, no path. */
+    if (nr == __NR_newfstatat && (int)a0 != AT_FDCWD && a1 && !*(const char *)a1 &&
+        (a3 & 0x1000 /* AT_EMPTY_PATH */))
+        return raw_syscall(__NR_fstat, a0, a2, 0, 0, 0, 0);
     long a[6] = {a0, a1, a2, a3, a4, a5};
     return broker_call(spec, nr, a);
+}
+
+/* The control socket, the loader binary and the channels stay open and
+ * keep their flags whatever the guest closes (closefrom loops, dup2 over
+ * them): without them no file can be reached. */
+static int reserved(long fd)
+{
+    if (fd < 0)
+        return 0;
+    if (fd == g_payload_config.isolate_fd || fd == g_payload_config.loader_fd)
+        return 1;
+    for (int i = 0; i < CHANNELS; i++)
+        if (__atomic_load_n(&channels[i].fd, __ATOMIC_RELAXED) == fd && fd > 0)
+            return 1;
+    return 0;
+}
+
+int broker_fd_guard(long nr, const long a[6], long *result)
+{
+    if (!g_payload_config.isolate)
+        return 0;
+    switch (nr) {
+    case __NR_close:
+        if (!reserved((int)a[0]))
+            return 0;
+        *result = 0;
+        return 1;
+    case __NR_dup3:
+        if (!reserved((int)a[1]))
+            return 0;
+        *result = -EBUSY;
+        return 1;
+    case __NR_fcntl:
+        if (a[1] != 2 /* F_SETFD */ || !reserved((int)a[0]))
+            return 0;
+        *result = 0;
+        return 1;
+    case __NR_ioctl:
+        if ((unsigned)a[1] != 0x5451 /* FIOCLEX */ || !reserved((int)a[0]))
+            return 0;
+        *result = 0;
+        return 1;
+    case __NR_close_range:
+        /* Callers fall back to closing one by one. */
+        *result = -ENOSYS;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int broker_route(long nr, long a[6], long *result)
+{
+    if (!g_payload_config.isolate)
+        return 0;
+    switch (nr) {
+    case __NR_socket:
+        if (a[0] != AF_UNIX)
+            return 0;
+        break;
+    case __NR_socketpair:
+        /* A datagram may be sent to any name; a connected pair of sequenced
+         * packets keeps the message boundaries. */
+        if (a[0] == AF_UNIX && (a[1] & 0xf) == SOCK_DGRAM)
+            a[1] = (a[1] & ~0xfl) | SOCK_SEQPACKET;
+        return 0;
+    case __NR_prlimit64:
+        /* The filter allows only pid 0 (the caller). */
+        if (a[0] && a[0] == raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0))
+            a[0] = 0;
+        return 0;
+    case __NR_fsetxattr:
+    case __NR_fremovexattr:
+        break;
+    default:
+        return 0;
+    }
+    *result = broker_call(broker_spec(nr), nr, a);
+    return 1;
 }

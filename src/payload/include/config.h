@@ -40,6 +40,13 @@
 #define CONFIG_CHILD_EXEC_FD "--exec-fd"
 /* Isolation mode: the inherited control socket of the broker. */
 #define CONFIG_CHILD_ISOLATE_FD "--isolate-fd"
+/* Isolation mode: the guest cannot name files, so a child loader gets its
+ * own binary as an inherited FD (re-executed with execveat), its host path,
+ * the case-alias marks of the binds and the interpreter as an FD. */
+#define CONFIG_CHILD_LOADER_FD "--loader-fd"
+#define CONFIG_CHILD_LOADER_PATH "--loader-path"
+#define CONFIG_CHILD_CASE_FOLDS "--case-folds"
+#define CONFIG_CHILD_EXEC_INTERP_FD "--exec-interp-fd"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -83,6 +90,7 @@ typedef struct payload_config {
      * socket, inherited by every guest process). */
     int32_t isolate;
     int32_t isolate_fd;
+    int32_t loader_fd; /* the loader binary, not close-on-exec */
     /* Loader image and the stub islands the loader created: guest memory
      * calls may not unmap, remap or reprotect them. */
     uint32_t protected_count;

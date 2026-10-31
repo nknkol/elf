@@ -10,6 +10,7 @@
 #include "elf_abi.h"
 #include "fake_ids.h"
 #include "hook_runtime.h"
+#include "host_syscall.h"
 #include "platform.h"
 #include "proot_bridge.h"
 
@@ -101,6 +102,9 @@ long dispatch_syscall(long number, long a[6])
         return proot_execve(number, a);
     if (proot_handles_syscall(number))
         return proot_syscall(number, a);
+    long routed;
+    if (broker_route(number, a, &routed))
+        return routed;
     long faked;
     if (fake_ids_syscall(number, a, &faked))
         return faked;

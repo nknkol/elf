@@ -32,6 +32,11 @@ struct broker_spec {
     struct broker_arg arg[6];
 };
 
+/* Socket names that are host paths: bind/connect of the attached socket to
+ * the path argument (raw __NR_bind/__NR_connect carry other addresses). */
+#define BROKER_BIND_PATH    (-1)
+#define BROKER_CONNECT_PATH (-2)
+
 /* Request flags: path argument i was /proc/self/fd/N, so the request acts
  * on the attached FD N itself. */
 #define BROKER_MAGIC(i) (1u << (i))
@@ -93,6 +98,12 @@ static const struct broker_spec broker_specs[] = {
     {__NR_fchown,        {A_F, A_V, A_V}},
     {__NR_fsetxattr,     {A_F, A_S, A_INA(3), A_V, A_V}},
     {__NR_fremovexattr,  {A_F, A_S}},
+    /* Phase 2: the guest filter refuses these to the guest itself. */
+    {__NR_socket,        {A_V, A_V, A_V}},
+    {__NR_bind,          {A_F, A_INA(2), A_V}},
+    {__NR_connect,       {A_F, A_INA(2), A_V}},
+    {BROKER_BIND_PATH,   {A_F, A_P}},
+    {BROKER_CONNECT_PATH, {A_F, A_P}},
 };
 
 static inline const struct broker_spec *broker_spec(long nr)

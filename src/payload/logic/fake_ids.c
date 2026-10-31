@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "config.h"
 #include "fake_ids.h"
+#include "host_syscall.h"
 
 extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6);
 
@@ -189,7 +190,7 @@ static void collect_owners(void)
     for (int i = -1; i < g_payload_config.bind_count && i < CONFIG_MAX_BINDS; i++) {
         const char *host = i < 0 ? g_payload_config.root : g_payload_config.binds[i].dst;
         struct { unsigned char data[128]; } st;
-        if (!host[0] || raw_syscall(__NR_newfstatat, -100, (long)host, (long)&st, 0, 0, 0) < 0)
+        if (!host[0] || host_syscall(__NR_newfstatat, -100, (long)host, (long)&st, 0, 0, 0) < 0)
             continue;
         if ((*(unsigned *)(st.data + 16) & 0170000) != 0040000) continue;
         owner_uid[n] = *(unsigned *)(st.data + 24);

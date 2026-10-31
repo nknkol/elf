@@ -45,13 +45,16 @@ typedef struct {
     char fake_groups[32 * 11 + 2];
     char exec_fd[16];
     char isolate_fd[16];
+    char interp_fd[16], loader_fd[16];
+    char case_folds[CONFIG_MAX_BINDS * 11];
 #ifdef GUARDED
     char fd_state[24];
-    /* PT_INTERP as stored in the target, then its policy-checked resolution. */
+#endif
+    /* PT_INTERP as stored in the target, then its resolution in guest terms
+     * (file access guard, isolation mode). */
     char elf_interp[CONFIG_MAX_PATH];
     char elf_interp_guest[CONFIG_MAX_PATH], elf_interp_host[CONFIG_MAX_PATH];
     Elf64_Phdr phdrs[64];
-#endif
 } ExecScratch;
 
 size_t proot_exec_scratch_size(void) { return sizeof(ExecScratch); }
@@ -68,8 +71,35 @@ static void fd_name(char *out, const char *prefix, int fd)
     *out = 0;
 }
 
-static int read_executable(const char *path, int nofollow, char header[256])
+/* Isolation mode (keep): the file is opened first, checked and read through
+ * that FD, which is kept for the child loader (not close-on-exec). */
+static int read_open_executable(const char *path, int nofollow, char header[256], long *keep)
 {
+    struct stat st;
+    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | (nofollow ? O_NOFOLLOW : 0),
+                          0, 0, 0);
+    if (fd < 0)
+        return (int)fd;
+    long ret = raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0);
+    if (!ret && ((st.st_mode & S_IFMT) != S_IFREG || !(st.st_mode & 0111)))
+        ret = -EACCES;
+    if (!ret)
+        ret = raw_syscall(__NR_faccessat, AT_FDCWD, (long)path, 1, 0, 0, 0);
+    if (!ret)
+        ret = raw_syscall(__NR_pread64, fd, (long)header, 255, 0, 0, 0);
+    if (ret < 0) {
+        raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+        return (int)ret;
+    }
+    header[ret] = 0;
+    *keep = fd;
+    return (int)ret;
+}
+
+static int read_executable(const char *path, int nofollow, char header[256], long *keep)
+{
+    if (g_payload_config.isolate)
+        return read_open_executable(path, nofollow, header, keep);
     struct stat st;
     /* Resolved host paths are final; /proc/self/fd/N (fexecve) is followed. */
     long ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st,
@@ -111,12 +141,14 @@ static int elf_magic(const char *p, int n)
         h.e_phentsize == sizeof(Elf64_Phdr) && h.e_phnum > 0;
 }
 
-#ifdef GUARDED
-/* Read the target's PT_INTERP string. 0: static, 1: found, <0: refused.
- * Bounded like the loader: a non-empty pathname ending in NUL. */
-static int elf_interpreter(const char *path, ExecScratch *s)
+/* Read the target's PT_INTERP string (from fd, else opening path).
+ * 0: static, 1: found, <0: refused. Bounded like the loader: a non-empty
+ * pathname ending in NUL. */
+static int elf_interpreter(const char *path, long fd, ExecScratch *s)
 {
-    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    int own = fd < 0;
+    if (own)
+        fd = raw_syscall(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
     if (fd < 0) return (int)fd;
     Elf64_Ehdr h;
     long ret = raw_syscall(__NR_pread64, fd, (long)&h, sizeof(h), 0, 0, 0);
@@ -137,10 +169,9 @@ static int elf_interpreter(const char *path, ExecScratch *s)
             !s->elf_interp[0]) { ret = -ENOEXEC; break; }
         ret = 1;
     }
-    raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+    if (own) raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
     return (int)ret;
 }
-#endif
 
 long proot_execve_context(long number, long a[6], const struct proot_path_context *context)
 {
@@ -218,10 +249,15 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
 #endif
     long ret;
     long fd_copy = -1;
+    /* Isolation mode: the program (the final ELF) and its interpreter as
+     * FDs the broker opened; the child loader reads only those. */
+    long target_fd = -1, interp_fd = -1;
     if (exec_fd >= 0) {
         /* The guest's FD may be close-on-exec: the chain gets its own copy,
-         * which the child loader closes once it has opened the program. */
-        fd_copy = raw_syscall(__NR_fcntl, exec_fd, F_DUPFD, 3, 0, 0, 0);
+         * which the child loader closes once it has opened the program. In
+         * isolation mode the broker reopens it, so the copy stays here. */
+        fd_copy = raw_syscall(__NR_fcntl, exec_fd, cfg->isolate ? F_DUPFD_CLOEXEC : F_DUPFD, 3,
+                              0, 0, 0);
         if (fd_copy < 0) { ret = fd_copy; goto done; }
         fd_name(s->host, "/proc/self/fd/", (int)fd_copy);
         strcpy(s->guest, named);
@@ -238,7 +274,8 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     /* fexecve already checked the FD's own object (fstat above); its
      * internal /proc/self/fd/N name is a magic link that must be followed,
      * whatever AT_SYMLINK_NOFOLLOW asked of the (empty) path. */
-    int n = read_executable(s->host, exec_fd < 0 && (flags & AT_SYMLINK_NOFOLLOW), s->header[0]);
+    int n = read_executable(s->host, exec_fd < 0 && (flags & AT_SYMLINK_NOFOLLOW), s->header[0],
+                            &target_fd);
     if (n < 0) { ret = n; goto done; }
     char *target = s->host;
     /* Like the kernel, an interpreter may itself be a script: level i's
@@ -278,17 +315,24 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
                                       s->interpreter_guest, s->interpreter_host,
                                       sizeof(s->interpreter_host), context);
         if (ret < 0) goto done;
-        n = read_executable(s->interpreter_host, 0, s->header[depth]);
+        long previous = target_fd;
+        target_fd = -1;
+        n = read_executable(s->interpreter_host, 0, s->header[depth], &target_fd);
+        if (previous >= 0) raw_syscall(__NR_close, previous, 0, 0, 0, 0, 0);
         if (n < 0) { ret = n; goto done; }
         target = s->interpreter_host;
     }
     int script = depth > 0;
-#ifdef GUARDED
     int dynamic = 0;
-    if (cfg->guard == GUARD_READS) {
+    int resolve_interp = cfg->isolate;
+#ifdef GUARDED
+    resolve_interp |= cfg->guard == GUARD_READS;
+#endif
+    if (resolve_interp) {
         /* The dynamic linker is loaded content too: resolve it with guest
-         * symlinks and the read policy instead of lexical host mapping. */
-        dynamic = elf_interpreter(target, s);
+         * symlinks and the read policy instead of lexical host mapping (an
+         * isolated child loader cannot open it at all). */
+        dynamic = elf_interpreter(target, target_fd, s);
         if (dynamic < 0) { ret = dynamic; goto done; }
         if (dynamic) {
             ret = proot_resolve_exec_path(AT_FDCWD, s->elf_interp, true,
@@ -296,12 +340,11 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
                                           sizeof(s->elf_interp_host), context);
             if (ret < 0) goto done;
             char magic[256];
-            n = read_executable(s->elf_interp_host, 0, magic);
+            n = read_executable(s->elf_interp_host, 0, magic, &interp_fd);
             if (n < 0) { ret = n; goto done; }
             if (!elf_magic(magic, n)) { ret = -ELIBBAD; goto done; }
         }
     }
-#endif
     size_t pos = 0;
     s->argv[pos++] = cfg->loader_path;
     s->argv[pos++] = "--child-loader";
@@ -327,7 +370,33 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     s->argv[pos++] = target;
     s->argv[pos++] = "--exec-path";
     s->argv[pos++] = exec_fd >= 0 ? fd_guest : s->guest;
-    if (exec_fd >= 0) {
+    if (cfg->isolate) {
+        fd_name(s->exec_fd, "", (int)target_fd);
+        s->argv[pos++] = CONFIG_CHILD_EXEC_FD;
+        s->argv[pos++] = s->exec_fd;
+        if (interp_fd >= 0) {
+            fd_name(s->interp_fd, "", (int)interp_fd);
+            s->argv[pos++] = CONFIG_CHILD_EXEC_INTERP_FD;
+            s->argv[pos++] = s->interp_fd;
+        }
+        fd_name(s->loader_fd, "", cfg->loader_fd);
+        s->argv[pos++] = CONFIG_CHILD_LOADER_FD;
+        s->argv[pos++] = s->loader_fd;
+        s->argv[pos++] = CONFIG_CHILD_LOADER_PATH;
+        s->argv[pos++] = cfg->loader_path;
+        char *out = s->case_folds;
+        int folded = 0;
+        for (int i = 0; i < cfg->bind_count; i++) {
+            if (i) *out++ = ',';
+            fd_name(out, "", (int)cfg->binds[i].fold);
+            out += strlen(out);
+            folded |= cfg->binds[i].fold != 0;
+        }
+        if (folded) {
+            s->argv[pos++] = CONFIG_CHILD_CASE_FOLDS;
+            s->argv[pos++] = s->case_folds;
+        }
+    } else if (exec_fd >= 0) {
         fd_name(s->exec_fd, "", (int)fd_copy);
         s->argv[pos++] = CONFIG_CHILD_EXEC_FD;
         s->argv[pos++] = s->exec_fd;
@@ -349,7 +418,8 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
      * runs with its reported owner as effective, saved and fs id, like
      * PRoot's fake_id0; only the new image gets them. */
     struct stat program;
-    if (!raw_syscall(__NR_newfstatat, AT_FDCWD, (long)target, (long)&program, 0, 0, 0)) {
+    if (!(target_fd >= 0 ? raw_syscall(__NR_fstat, target_fd, (long)&program, 0, 0, 0, 0) :
+          raw_syscall(__NR_newfstatat, AT_FDCWD, (long)target, (long)&program, 0, 0, 0))) {
         for (int group = 0; group < 2; group++) {
             if (!(program.st_mode & (group ? 02000 : 04000))) continue;
             uint32_t owner = fake_ids_reported_owner(group ? program.st_gid : program.st_uid, group);
@@ -407,7 +477,7 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         s->argv[pos++] = (char *)cfg->glue_dir;
     }
 #ifdef GUARDED
-    if (dynamic) {
+    if (dynamic && !cfg->isolate) {
         s->argv[pos++] = CONFIG_CHILD_EXEC_INTERP;
         s->argv[pos++] = s->elf_interp_host;
     }
@@ -457,14 +527,21 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     if (ret < 0) goto done;
 #endif
     struct reentry_slot *lease = reentry_exec_release();
-    ret = raw_syscall(__NR_execve, (long)cfg->loader_path, (long)s->argv,
-                      (long)env, 0, 0, 0);
+    /* Isolation mode: the guest filter only lets an FD run. */
+    if (cfg->isolate)
+        ret = raw_syscall(__NR_execveat, cfg->loader_fd, (long)"", (long)s->argv,
+                          (long)env, AT_EMPTY_PATH, 0);
+    else
+        ret = raw_syscall(__NR_execve, (long)cfg->loader_path, (long)s->argv,
+                          (long)env, 0, 0, 0);
     reentry_exec_restore(lease);
  done:
 #ifdef GUARDED
     if (transport >= 0) raw_syscall(__NR_close, transport, 0, 0, 0, 0, 0);
 #endif
     if (fd_copy >= 0) raw_syscall(__NR_close, fd_copy, 0, 0, 0, 0, 0);
+    if (target_fd >= 0) raw_syscall(__NR_close, target_fd, 0, 0, 0, 0, 0);
+    if (interp_fd >= 0) raw_syscall(__NR_close, interp_fd, 0, 0, 0, 0, 0);
     if (argv_bytes) raw_syscall(__NR_munmap, (long)s->argv, (long)argv_bytes, 0, 0, 0, 0);
     proot_scratch_free((void *)mem,sizeof(ExecScratch));
     return ret;

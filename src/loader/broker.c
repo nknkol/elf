@@ -363,6 +363,7 @@ struct call {
 	int fd[BROKER_FDS_MAX];
 	int fds;
 	unsigned magic;        /* BROKER_MAGIC bits */
+	uint32_t in_len[6];    /* bytes of PATH, STR and IN data */
 	unsigned char *out[6];
 	uint32_t out_len[6];
 	int answer_fd;
@@ -424,6 +425,54 @@ static long on_object(const struct target *t, long nr, long a1, long a2, long a3
 	return rc;
 }
 
+/* Reopening an FD the guest holds (/proc/self/fd/N) whose object lies in
+ * no tree (a terminal, a pipe's peer device): at most the access the FD
+ * itself has. */
+static long held_access(int fd, int flags)
+{
+	long held = sys(__NR_fcntl, fd, 3 /* F_GETFL */, 0, 0, 0, 0);
+	if (held < 0)
+		return held;
+	if (flags & O_PATH_)
+		return 0;
+	if ((held & O_PATH_) || (flags & (O_CREAT_ | O_TMPFILE_)))
+		return -EACCES_;
+	int want = flags & O_ACCMODE_, have = (int)(held & O_ACCMODE_);
+	if (have == 2 || want == have)
+		return 0;
+	return -EACCES_;
+}
+
+/* bind/connect of a UNIX socket to a host path: the name is used relative
+ * to its directory (this process's cwd), so its length does not matter. */
+static long socket_name(struct call *c, long nr)
+{
+	struct target t = {.dir = -1};
+	int next = 1, binding = nr == BROKER_BIND_PATH;
+	if (!c->fds || !c->path[1] || c->path[1][0] != '/')
+		return -EINVAL_;
+	long rc = target_of(c, 1, &next, !binding, &t);
+	if (rc >= 0 && !t.name[0])
+		rc = binding ? -98 /* EADDRINUSE */ : -111 /* ECONNREFUSED */;
+	if (rc >= 0)
+		rc = binding ? (t.parent == 'w' ? 0 : t.parent == 'd' ? -ENOENT_ : -EROFS_) : check(&t, 0);
+	struct { unsigned short family; char path[108]; } address;
+	size_t n = z_strlen(t.name);
+	if (rc >= 0 && n >= sizeof(address.path))
+		rc = -ENAMETOOLONG_;
+	if (rc >= 0)
+		rc = sys(__NR_fchdir, t.dir, 0, 0, 0, 0, 0);
+	if (rc >= 0) {
+		z_memset(&address, 0, sizeof(address));
+		address.family = AF_UNIX;
+		z_memcpy(address.path, t.name, n);
+		rc = sys(binding ? __NR_bind : __NR_connect, c->fd[0], (long)&address,
+			 (long)(sizeof(address.family) + n + 1), 0, 0, 0);
+	}
+	release(&t);
+	return rc;
+}
+
 static long execute(struct call *c, long nr)
 {
 	long *a = c->a;
@@ -440,6 +489,8 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(flags & O_NOFOLLOW) && !((flags & O_CREAT_) && (flags & 0200)), &t);
 		if (rc >= 0)
 			rc = check(&t, write);
+		else if (rc == -EACCES_ && (c->magic & BROKER_MAGIC(1)))
+			rc = held_access(c->fd[0], flags);
 		if (rc < 0)
 			break;
 		if ((c->magic & BROKER_MAGIC(1)) || !t.name[0]) {
@@ -460,6 +511,16 @@ static long execute(struct call *c, long nr)
 	case __NR_newfstatat:
 	case __NR_statx: {
 		int flags = (int)(nr == __NR_statx ? a[2] : a[3]);
+		/* The metadata of an FD the guest holds: nothing to check. */
+		if ((c->magic & BROKER_MAGIC(1)) || (c->has_dir[1] && c->path[1] && !c->path[1][0])) {
+			if (!c->fds)
+				return -EINVAL_;
+			if (c->magic & BROKER_MAGIC(1))
+				flags = (flags & ~AT_SYMLINK_NOFOLLOW) | AT_EMPTY_PATH;
+			rc = nr == __NR_statx ? sys(nr, c->fd[0], (long)"", flags, a[3], (long)c->out[4], 0)
+					      : sys(nr, c->fd[0], (long)"", (long)c->out[2], flags, 0, 0);
+			break;
+		}
 		rc = target_of(c, 1, &next, !(flags & AT_SYMLINK_NOFOLLOW) || (c->magic & BROKER_MAGIC(1)), &t);
 		if (rc >= 0)
 			rc = check(&t, 0);
@@ -654,6 +715,36 @@ static long execute(struct call *c, long nr)
 				 (long)c->path[1] : a[1], nr == __NR_fsetxattr ? (long)c->path[2] : a[2],
 				 a[3], a[4], 0);
 		break;
+	case __NR_socket:
+		/* UNIX sockets only, never datagrams (they may name any path). */
+		if (a[0] != AF_UNIX || ((a[1] & 0xf) != SOCK_STREAM && (a[1] & 0xf) != SOCK_SEQPACKET)) {
+			rc = -1 /* EPERM */;
+			break;
+		}
+		rc = sys(nr, a[0], a[1], a[2], 0, 0, 0);
+		if (rc >= 0) {
+			c->answer_fd = (int)rc;
+			rc = 0;
+		}
+		break;
+	case __NR_bind:
+	case __NR_connect: {
+		/* Any address except a UNIX path (BROKER_*_PATH checks those). */
+		const unsigned char *address = (const unsigned char *)c->path[1];
+		uint32_t length = c->in_len[1] < (uint32_t)a[2] ? c->in_len[1] : (uint32_t)a[2];
+		if (!c->fds)
+			return -EINVAL_;
+		if (address && length > 2 && (address[0] | address[1] << 8) == AF_UNIX && address[2]) {
+			rc = -1 /* EPERM */;
+			break;
+		}
+		rc = sys(nr, c->fd[0], (long)address, length, 0, 0, 0);
+		break;
+	}
+	case BROKER_BIND_PATH:
+	case BROKER_CONNECT_PATH:
+		rc = socket_name(c, nr);
+		break;
 	default:
 		rc = -EACCES_;
 	}
@@ -683,6 +774,7 @@ static int parse(const struct broker_request *r, size_t size, const struct broke
 			if (arg->kind != BK_IN && data[r->len[i] - 1])
 				return -EINVAL_;
 			c->path[i] = (const char *)data;
+			c->in_len[i] = r->len[i];
 			data += r->len[i];
 		} else if (arg->kind == BK_OUT) {
 			if (r->len[i] > BROKER_DATA_MAX - total)

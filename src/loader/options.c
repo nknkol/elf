@@ -134,11 +134,13 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 	int mode_explicit = 0;
 	z_memset(opt, 0, sizeof(*opt));
 	opt->exec_fd = -1;
+	opt->exec_interp_fd = -1;
 	opt->target = argc;
 	z_memset(cfg, 0, sizeof(*cfg));
 	cfg->mode = CONFIG_MODE_COMPAT;
 	cfg->fake_group_count = -1;
 	cfg->fd_state = -1;
+	cfg->loader_fd = -1;
 
 	for (int i = 1; i < argc; i++) {
 		const char *arg = argv[i];
@@ -186,6 +188,17 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 		} else if (is(arg, CONFIG_CHILD_ISOLATE_FD)) {
 			cfg->isolate = 1;
 			cfg->isolate_fd = (int32_t)number(value(argc, argv, &i), 2147483647ul, "isolate fd");
+		} else if (is(arg, CONFIG_CHILD_LOADER_FD)) {
+			cfg->loader_fd = (int32_t)number(value(argc, argv, &i), 2147483647ul, "loader fd");
+		} else if (is(arg, CONFIG_CHILD_EXEC_INTERP_FD)) {
+			opt->exec_interp_fd = (int)number(value(argc, argv, &i), 2147483647ul, "interpreter fd");
+		} else if (is(arg, CONFIG_CHILD_LOADER_PATH)) {
+			const char *v = value(argc, argv, &i);
+			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
+				z_errx(1, "invalid value for %s", arg);
+			copy_cstr(cfg->loader_path, CONFIG_MAX_PATH, v);
+		} else if (is(arg, CONFIG_CHILD_CASE_FOLDS)) {
+			opt->case_folds = value(argc, argv, &i);
 		} else if (is(arg, "--kernel-release") || is(arg, "--kernel-sysname")) {
 			char *field = arg[9] == 'r' ? cfg->kernel_release : cfg->kernel_sysname;
 			const char *v = value(argc, argv, &i);

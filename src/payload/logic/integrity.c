@@ -4,6 +4,7 @@
 #include <string.h>
 #include "config.h"
 #include "hook_runtime.h"
+#include "host_syscall.h"
 #include "integrity.h"
 
 #define MAP_FIXED              0x10
@@ -69,6 +70,8 @@ int integrity_check(long number, const long a[6], long *result)
         *result = -EPERM;
         return 1;
     }
+    if (broker_fd_guard(number, a, result))
+        return 1;
     if (g_payload_config.seccomp_backstop && number == __NR_rt_sigaction && (int)a[0] == SIGSYS) {
         *result = sigsys_action(a);
         return 1;

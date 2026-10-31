@@ -50,6 +50,8 @@ struct loader_options {
 	const char *exec_name;   /* basename for the kernel comm */
 	int exec_fd;             /* fexecve: a copy of the program's descriptor */
 	int isolate;             /* --isolate: start the broker (initial loader) */
+	int exec_interp_fd;      /* isolation: the interpreter, opened by the broker */
+	const char *case_folds;  /* isolation: bind fold marks, comma separated */
 };
 
 /* options.c */
@@ -90,6 +92,7 @@ void debugger_install(void);
 
 /* broker.c (isolation mode) */
 void broker_start(payload_config_t *cfg);
+void guest_filter_install(void);
 
 /* backstop.c */
 void backstop_install(unsigned long payload_entry, int with_filter);

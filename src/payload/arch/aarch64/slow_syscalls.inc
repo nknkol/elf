@@ -321,6 +321,16 @@ SLOW_SYSCALL(__NR_bind)
 #ifdef __NR_connect
 SLOW_SYSCALL(__NR_connect)
 #endif
+#ifdef __NR_socket
+/* Isolation mode: UNIX sockets come from the broker. */
+SLOW_SYSCALL(__NR_socket)
+#endif
+#ifdef __NR_socketpair
+SLOW_SYSCALL(__NR_socketpair)
+#endif
+#ifdef __NR_prlimit64
+SLOW_SYSCALL(__NR_prlimit64)
+#endif
 #ifdef __NR_accept
 /* Socket names are reported back to the guest in guest terms. */
 SLOW_SYSCALL(__NR_accept)
