@@ -4,7 +4,7 @@
 PYTHON ?= python3
 ALPINE_ARCHIVE ?=
 UBUNTU_ARCHIVE ?=
-.PHONY: check-isolation help build check check-alpine check-ubuntu check-guarded bench
+.PHONY: check-oci check-isolation help build check check-alpine check-ubuntu check-guarded bench
 help:
 	@echo 'make build          Build build/elfloader and build/elfloader-guarded'
 	@echo 'make check          Core regressions (both builds)'
@@ -12,6 +12,7 @@ help:
 	@echo 'make check-alpine ALPINE_ARCHIVE=/path/to/rootfs.tar.gz'
 	@echo 'make check-ubuntu UBUNTU_ARCHIVE=/path/to/rootfs.tar.gz'
 	@echo 'make bench          Native vs loader micro benchmarks (both builds)'
+	@echo 'make check-oci      docker command acceptance (docs/OCI.md); needs build/alpine-test-root'
 build:
 	$(PYTHON) tools/build.py
 	$(PYTHON) tools/build.py --guarded
@@ -61,6 +62,10 @@ check-ubuntu:
 	@test -n "$(UBUNTU_ARCHIVE)" && test -f "$(UBUNTU_ARCHIVE)" || { echo 'Set UBUNTU_ARCHIVE to an existing rootfs archive' >&2; exit 2; }
 	$(MAKE) build
 	$(PYTHON) test/ubuntu/run.py "$(UBUNTU_ARCHIVE)"
+
+# docker command acceptance (docs/OCI.md R1-R3); real images: test/oci/images.py.
+check-oci: build
+	$(PYTHON) test/oci/run.py
 
 # Isolation acceptance (docs/ISOLATION_TESTING.md); HarmonyOS device.
 check-isolation: build

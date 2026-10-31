@@ -437,6 +437,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-10-31 GPU（Maleoon 916，系统 Vulkan/EGL）：原生可用，loader 下原先任何模式都不行。(1) HarmonyOS 上大量系统库链接（`/system/lib64/platformsdk/*.so`、`/bin/ls`）lstat 返回 EACCES 而 readlink 可用，payload 与 broker 的逐级解析因此失败（vkCreateInstance -9，`/bin/ls` 在 `--isolate` 下不能运行）；现在 lstat 被拒时用 readlink 判断是否为链接，broker 对查不到元数据的中间目录以 `O_NOFOLLOW|O_DIRECTORY` 打开（无法核对 dev/ino，被换成链接时其后的相对查找为 ENOTDIR）。常规与 guarded 下 Vulkan 能枚举并使用 GPU。(2) 加载 GPU 库后退出崩溃：libhicollie 的分离线程由 musl `__unmapself` 卸载自己的栈后退出，而 payload 入口把寄存器存在那段栈上；现在卸载覆盖入口寄存器的 munmap 直接接 exit，payload 栈槽位回收已退出（tgkill 返回 ESRCH）的持有者。(3) `--isolate` 下仍不可用：实测 GPU 上下文绑定到打开者的地址空间（broker 代开、fork 前打开、exec 前打开都失败），设计见 [ISOLATION](ISOLATION.md)“GPU 设备”，未实现。四套回归在常规与 `--isolate` 下通过（252 / 171 / 18 / 18），check-isolation 159 项通过。
 2026-11-01 隔离模式下的 GPU 设备（`--isolate-device /dev/hvgr0`）：过滤器只放行 openat 指向 loader 常量页中选中的设备路径常量（固定地址），并守住该页（与之相交的 munmap/mprotect/madvise/MAP_FIXED/mremap 等）、FD 898（只有它能 execveat，且路径须是该页的空串）；broker 拒绝写 loader 文件（按 dev/ino，打开后再核对）、`/proc/<pid>/mem`、删除或替换设备路径各级目录中的名字。不加选项时过滤器逐条不变。payload ABI 21。Vulkan 在初始进程、fork、exec 之后、多线程中可用；验收 `test/isolation/device.py` 38 项通过；四套回归与 check-isolation 在常规、`--isolate`、`--isolate --isolate-device /dev/hvgr0` 下均通过（[设计与结果](ISOLATION.md)）。
 2026-11-01 可执行内存：终端环境里匿名页 RW→RX、直接 RWX、执行后改写再 RX 都不需要 `prctl(PR_HM_JIT)`（该 prctl 只在打包成 hap 时需要），原生与 loader 下一致；memfd 的可执行共享映射原生被拒（EACCES）。loader 原先把它复制成私有快照（为绕开代码签名，带文件的可执行映射都复制一份并装钩），双映射 JIT 之后写入的代码看不到、执行旧内容（SIGILL）；现在带文件的非私有可执行映射返回 EACCES，与原生一致，程序退回匿名内存。新增 `test/proot/test_jit.py`（并入 `make check`）。
+2026-11-01 Docker/OCI 镜像 R1–R3（[OCI](OCI.md)）：`tools/oci/docker` 是与 Docker 命令兼容的 Python 工具，无守护进程、无命名空间，容器就是 elfloader 进程（可加 `--isolate`）。R1：pull（bearer 认证、多平台索引选 linux/arm64、断点续传、blob 与 diff_id 校验）、load/save（docker-archive 与 OCI layout）、images、rmi、tag、history、inspect、create/run/start、ps、rm；层展开逐级 `O_NOFOLLOW` 打开父目录，处理 whiteout、不透明目录、文件目录互换，设备节点跳过，指向可执行文件的硬链接改为符号链接（busybox 镜像 490→4.2 MB）、其余复制。loader 新增 `--cwd`、`--user UID[:GID]`、`--hostname`，`-e` 上限 16→512，bind 上限 16→64（payload ABI 22），exec helper 按 guest PATH 查找命令。R2：`run -d` 由每容器的监视进程负责日志、退出码与重启策略，exec、cp、stop/kill/restart/wait（信号只发主进程，主进程退出后清掉进程组）、logs、rename、命名卷、`--read-only`（guarded 构建的路径修改保护，加可写 /tmp 等）、`--in-place`、`--format`、prune。R3：build（多阶段与 `--target`、ARG/ENV 替换、`.dockerignore` 含例外、缓存且全命中时镜像 id 不变、`RUN --mount` cache/bind/secret/tmpfs、heredoc、ONBUILD、ADD 本地 tar 与 URL）、commit、diff、push、login/logout。验收 `make check-oci` 73 项（合成层的展开正确性与安全、篡改与 diff_id、测试 registry 的 token 与续传、配置映射与生命周期在常规与 `--isolate` 下、构建与导出再导入）全部通过；真实镜像（`test/oci/images.py`）busybox、alpine apk、debian apt、python venv+pip、node npm 在常规与 `--isolate` 下都通过。四套回归 258 / 171 与 check-isolation 在常规与 `--isolate` 下通过。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -464,11 +465,12 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 | 入口 | 结果 | 范围 |
 | --- | --- | --- |
-| `make check` | 252 项通过 | 路径、exec/auxv、模型与 clone、ABI/路由、重入、运行时 guard、隔离工作负载对照 |
+| `make check` | 258 项通过 | 路径、exec/auxv、模型与 clone、ABI/路由、重入、运行时 guard、隔离工作负载对照 |
 | `make check-guarded` | 171 项通过 | FD 运行时、修改保护、默认拒绝读取、socket 与 transport |
 | `make check-alpine` / `make check-ubuntu` | 各 18/18 | 离线 rootfs 验收；Ubuntu 归档硬链接按副本展开 |
 | 以上四套加 `ELF_LOADER_OPTIONS=--isolate` | 同上 | 只作用于经 `test/lib.py` 启动 loader 的测试 |
 | `make check-isolation` | 121 + 38 + 38 项通过 | 隔离验收目标 A–L，两种构建；大小写别名（大小写不敏感的存储上，否则 SKIP）；GPU 设备（`device.py`，需 /dev/hvgr0） |
+| `make check-oci` | 73 项通过 | docker 命令 R1–R3 验收（[OCI](OCI.md)），常规与 `--isolate`；真实镜像另见 `test/oci/images.py` |
 | `make bench` | 只记录 | 原生与各配置的微基准（[BENCHMARKS](BENCHMARKS.md)） |
 
 宿主原生创建硬链接被拒绝的 fixture 记为 SKIP，不算成功；ENOSYS 不算功能实现。
@@ -495,4 +497,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 1. 实际 agent/brew 工具链在 `--isolate` 下的端到端验证（第 6 项）。
 2. 带回 FD 的隔离调用（open）是否值得再优化（第 1 项）。
-3. Docker/OCI 镜像支持（设计见 [OCI](OCI.md)）。
+3. Docker/OCI：R1–R3 已完成；下一版 R4 容器内 mount（设计见 [OCI](OCI.md)）。

@@ -1,0 +1,1207 @@
+#!/usr/bin/env python3
+"""Docker-compatible command for OCI images on the ELF loader (docs/OCI.md).
+
+Images are unpacked rootfs trees; containers run under elfloader (PRoot
+semantics, optionally --isolate). No daemon, no namespaces: see docs/OCI.md
+for what is and is not supported. Exit codes: 125 for errors of this
+command, 126/127 when the container command cannot run or is missing,
+otherwise the container's own status."""
+import argparse
+import json
+import os
+import shlex
+import signal
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.modules.setdefault('docker_cli', sys.modules[__name__])   # For build.py.
+import fmt  # noqa: E402
+import images  # noqa: E402
+import registry  # noqa: E402
+import runspec  # noqa: E402
+import runtime  # noqa: E402
+import store as store_mod  # noqa: E402
+import unpack  # noqa: E402
+
+ERRORS = (store_mod.StoreError, registry.RegistryError, unpack.UnpackError,
+          runspec.SpecError, OSError, ValueError)
+
+
+class Fail(Exception):
+    def __init__(self, message, code=125):
+        super().__init__(message)
+        self.code = code
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Fail(f'{self.prog}: {message}\nSee \'{self.prog} --help\'.')
+
+
+def parser(prog, description=None, add_help=True):
+    p = Parser(prog=f'docker {prog}', description=description, allow_abbrev=False, add_help=add_help)
+    if not add_help:
+        p.add_argument('--help', action='help')
+    return p
+
+
+# ---------------------------------------------------------------- images
+def image_names(st, image_id):
+    out = []
+    for name in st.image_names(image_id):
+        repo, _, tag = name.rpartition(':')
+        out.append((registry.short_name(repo), tag))
+    return out
+
+
+def image_inspect(st, image_id):
+    info = st.image_info(image_id)
+    config = info['config']
+    return {
+        'Id': 'sha256:' + image_id,
+        'RepoTags': [f'{r}:{t}' for r, t in image_names(st, image_id)],
+        'RepoDigests': [registry.short_name(d.split('@')[0]) + '@' + d.split('@')[1]
+                        for d in info['info'].get('repo_digests', [])],
+        'Created': config.get('created', ''),
+        'Author': config.get('author', ''),
+        'Config': config.get('config', {}),
+        'Architecture': config.get('architecture'),
+        'Variant': config.get('variant', ''),
+        'Os': config.get('os'),
+        'Size': info['info'].get('size', 0),
+        'GraphDriver': {'Name': 'elf-unpacked',
+                        'Data': {'Rootfs': str(st.image_dir(image_id) / 'rootfs')}},
+        'RootFS': {'Type': 'layers', 'Layers': config.get('rootfs', {}).get('diff_ids', [])},
+        'Metadata': {'LastTagTime': info['info'].get('created', ''),
+                     'Dirty': bool(info['info'].get('dirty'))},
+    }
+
+
+def ensure_image(st, text, pull_policy='missing', quiet=False):
+    if pull_policy != 'always':
+        try:
+            return st.resolve_image(text)
+        except store_mod.StoreError:
+            if pull_policy == 'never':
+                raise
+    if not quiet:
+        print(f"Unable to find image '{text}' locally", file=sys.stderr)
+    return images.pull(st, text, mirror=os.environ.get('ELF_OCI_MIRROR'), quiet=quiet)
+
+
+def cmd_pull(st, args):
+    p = parser('pull', 'Download an image from a registry')
+    p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('--platform')
+    p.add_argument('--registry-mirror', default=os.environ.get('ELF_OCI_MIRROR'))
+    p.add_argument('-a', '--all-tags', action='store_true')
+    p.add_argument('name')
+    a = p.parse_args(args)
+    if a.platform and a.platform not in ('linux/arm64', 'linux/arm64/v8'):
+        raise Fail(f'only linux/arm64 images can run here, not {a.platform}')
+    if a.all_tags:
+        raise Fail('--all-tags is not supported')
+    images.pull(st, a.name, mirror=a.registry_mirror, quiet=a.quiet)
+    print(registry.Reference(a.name).full)
+
+
+def cmd_load(st, args):
+    p = parser('load', 'Load an image from a tar archive or STDIN')
+    p.add_argument('-i', '--input')
+    p.add_argument('-q', '--quiet', action='store_true')
+    a = p.parse_args(args)
+    source = a.input
+    if not source:
+        if sys.stdin.isatty():
+            raise Fail('requested load from stdin, but stdin is empty')
+        tmp = st.home / 'tmp' / f'stdin-{os.getpid()}.tar'
+        with open(tmp, 'wb') as f:
+            import shutil
+            shutil.copyfileobj(sys.stdin.buffer, f)
+        source = tmp
+    try:
+        for image_id, names in images.load(st, source, quiet=True):
+            for name in names:
+                repo, _, tag = name.rpartition(':')
+                print(f'Loaded image: {registry.short_name(repo)}:{tag}')
+            if not names:
+                print(f'Loaded image ID: sha256:{image_id}')
+    finally:
+        if not a.input:
+            Path(source).unlink(missing_ok=True)
+
+
+def cmd_save(st, args):
+    p = parser('save', 'Save one or more images to a tar archive')
+    p.add_argument('-o', '--output')
+    p.add_argument('image', nargs='+')
+    a = p.parse_args(args)
+    chosen = []
+    for text in a.image:
+        image_id = st.resolve_image(text)
+        try:
+            ref = registry.Reference(text)
+            names = [ref.full] if ref.full in st.refs() else []
+        except registry.RegistryError:
+            names = []
+        chosen.append((image_id, names))
+    if a.output:
+        with open(a.output, 'wb') as out:
+            images.save(st, chosen, out)
+    else:
+        if sys.stdout.isatty():
+            raise Fail('cowardly refusing to save to a terminal. Use the -o flag or redirect')
+        images.save(st, chosen, sys.stdout.buffer)
+
+
+def cmd_images(st, args):
+    p = parser('images', 'List images')
+    p.add_argument('-a', '--all', action='store_true')
+    p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('--digests', action='store_true')
+    p.add_argument('--no-trunc', action='store_true')
+    p.add_argument('--format')
+    p.add_argument('-f', '--filter', action='append', default=[])
+    p.add_argument('repository', nargs='?')
+    a = p.parse_args(args)
+    filters = dict(f.split('=', 1) for f in a.filter)
+    rows = []
+    for image_id in st.images():
+        info = st.image_info(image_id)
+        names = image_names(st, image_id) or [('<none>', '<none>')]
+        if filters.get('dangling') == 'true' and names[0][0] != '<none>':
+            continue
+        if filters.get('dangling') == 'false' and names[0][0] == '<none>':
+            continue
+        for repo, tag in names:
+            if a.repository:
+                want_repo, _, want_tag = a.repository.partition(':')
+                if repo != want_repo or (want_tag and tag != want_tag):
+                    continue
+            digests = info['info'].get('repo_digests', [])
+            rows.append({
+                'Repository': repo, 'Tag': tag,
+                'ID': ('sha256:' + image_id) if a.no_trunc else image_id[:12],
+                'Digest': digests[0].split('@')[1] if digests else '<none>',
+                'CreatedAt': info['config'].get('created', ''),
+                'CreatedSince': fmt.ago(info['config'].get('created', '')),
+                'Size': images.human_size(info['info'].get('size', 0)),
+                'Dirty': 'yes' if info['info'].get('dirty') else ''})
+    if a.quiet:
+        for r in dict.fromkeys(r['ID'] for r in rows):
+            print(r)
+        return
+    if a.format and fmt.print_formatted(a.format, rows):
+        return
+    cols = ['REPOSITORY', 'TAG'] + (['DIGEST'] if a.digests else []) + ['IMAGE ID', 'CREATED', 'SIZE']
+    out = []
+    for r in rows:
+        line = [r['Repository'], r['Tag']] + ([r['Digest']] if a.digests else [])
+        size = r['Size'] + (' (modified in place)' if r['Dirty'] else '')
+        out.append(line + [r['ID'], r['CreatedSince'], size])
+    print(fmt.table(out, cols))
+
+
+def cmd_rmi(st, args):
+    p = parser('rmi', 'Remove one or more images')
+    p.add_argument('-f', '--force', action='store_true')
+    p.add_argument('--no-prune', action='store_true')
+    p.add_argument('image', nargs='+')
+    a = p.parse_args(args)
+    status = 0
+    for text in a.image:
+        try:
+            remove_image(st, text, a.force)
+        except ERRORS as e:
+            print(f'Error response from daemon: {e}', file=sys.stderr)
+            status = 1
+    return status
+
+
+def remove_image(st, text, force=False):
+    image_id = st.resolve_image(text)
+    names = st.image_names(image_id)
+    by_name = None
+    try:
+        ref = registry.Reference(text)
+        if ref.full in names:
+            by_name = ref.full
+    except registry.RegistryError:
+        pass
+    if by_name and len(names) > 1:
+        st.drop_ref(by_name)
+        print(f'Untagged: {text}')
+        return
+    if not by_name and len(names) > 1 and not force:
+        raise store_mod.StoreError(f'conflict: unable to delete {image_id[:12]} (must be forced) - '
+                                   'image is referenced in multiple repositories')
+    users = [c for c in st.containers() if c['Image'] == image_id]
+    if users and not force:
+        raise store_mod.StoreError(f'conflict: unable to remove repository reference "{text}" '
+                                   f'(must force) - container {users[0]["Id"][:12]} is using its '
+                                   'referenced image')
+    for name in names:
+        st.drop_ref(name)
+        repo, _, tag = name.rpartition(':')
+        print(f'Untagged: {registry.short_name(repo)}:{tag}')
+    if users:
+        return  # Forced with containers: only the names go (as Docker).
+    target = st.image_dir(image_id)
+    trash = st.home / 'tmp' / f'rmi-{image_id}'
+    with st.lock():
+        target.rename(trash)
+    store_mod.remove(trash)
+    print(f'Deleted: sha256:{image_id}')
+
+
+def cmd_tag(st, args):
+    p = parser('tag', 'Create a tag TARGET_IMAGE that refers to SOURCE_IMAGE')
+    p.add_argument('source')
+    p.add_argument('target')
+    a = p.parse_args(args)
+    image_id = st.resolve_image(a.source)
+    ref = registry.Reference(a.target)
+    if ref.digest:
+        raise Fail('refusing to create a tag with a digest reference')
+    st.set_ref(ref.full, image_id)
+
+
+def cmd_history(st, args):
+    p = parser('history', 'Show the history of an image')
+    p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('--no-trunc', action='store_true')
+    p.add_argument('-H', '--human', default='true')
+    p.add_argument('--format')
+    p.add_argument('image')
+    a = p.parse_args(args)
+    image_id = st.resolve_image(a.image)
+    info = st.image_info(image_id)
+    history = info['config'].get('history', [])
+    rows = []
+    for i, h in enumerate(reversed(history)):
+        created_by = h.get('created_by', '')
+        if not a.no_trunc and len(created_by) > 45:
+            created_by = created_by[:44] + '…'
+        rows.append({'ID': (image_id[:12] if i == 0 else '<missing>'),
+                     'CreatedSince': fmt.ago(h.get('created', '')), 'CreatedAt': h.get('created', ''),
+                     'CreatedBy': created_by, 'Size': '0B' if h.get('empty_layer') else '-',
+                     'Comment': h.get('comment', '')})
+    if a.quiet:
+        print(image_id[:12])
+        return
+    if a.format and fmt.print_formatted(a.format, rows):
+        return
+    print(fmt.table([[r['ID'], r['CreatedSince'], r['CreatedBy'], r['Size'], r['Comment']]
+                     for r in rows], ['IMAGE', 'CREATED', 'CREATED BY', 'SIZE', 'COMMENT']))
+
+
+# ---------------------------------------------------------------- containers
+def parse_volume(text, anonymous_ok=True):
+    """-v HOST:GUEST[:ro|rw], NAME:GUEST[:opts], or GUEST (anonymous)."""
+    parts = text.split(':')
+    mode = 'rw'
+    if len(parts) == 3:
+        opts = parts[2].split(',')
+        mode = 'ro' if 'ro' in opts or 'readonly' in opts else 'rw'
+        parts = parts[:2]
+    if len(parts) == 1:
+        if not anonymous_ok:
+            raise Fail(f'invalid volume specification: {text}')
+        return None, parts[0], mode
+    src, dst = parts
+    if not dst.startswith('/'):
+        raise Fail(f'invalid volume specification: {text}: the container path must be absolute')
+    if src.startswith(('/', '~', '.')):
+        src = os.path.abspath(os.path.expanduser(src))
+        if not os.path.exists(src):
+            os.makedirs(src)   # Docker creates a missing bind source directory.
+    elif not all(c.isalnum() or c in '_.-' for c in src):
+        raise Fail(f'invalid volume name {src}')
+    return src, dst, mode
+
+
+def parse_mount(text):
+    fields = {}
+    for item in text.split(','):
+        key, _, value = item.partition('=')
+        fields[key] = value if value else 'true'
+    kind = fields.get('type', 'volume')
+    src = fields.get('source') or fields.get('src')
+    dst = fields.get('target') or fields.get('destination') or fields.get('dst')
+    readonly = fields.get('readonly', fields.get('ro', 'false')) in ('true', '1')
+    if not dst:
+        raise Fail(f'invalid mount {text}: no target')
+    if kind == 'bind':
+        if not src or not os.path.exists(src):
+            raise Fail(f'invalid mount config for type "bind": bind source path does not exist: {src}')
+        return ('bind', os.path.abspath(src), dst, 'ro' if readonly else 'rw')
+    if kind == 'volume':
+        return ('volume', src, dst, 'ro' if readonly else 'rw')
+    if kind == 'tmpfs':
+        return ('tmpfs', None, dst, 'rw')
+    raise Fail(f'mount type {kind} is not supported')
+
+
+def parse_env_file(path):
+    """Docker's rules: '#' lines and blank lines skipped; KEY alone takes the
+    host value (dropped if unset); no quote or shell processing."""
+    out = []
+    for line in Path(path).read_text().splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if '=' in stripped:
+            key, _, value = stripped.partition('=')
+            if not key or any(c.isspace() for c in key):
+                raise Fail(f'invalid environment variable: {line}')
+            out.append(f'{key}={value}')
+        elif stripped in os.environ:
+            out.append(f'{stripped}={os.environ[stripped]}')
+    return out
+
+
+def env_entries(items):
+    out = []
+    for item in items:
+        if '=' in item:
+            out.append(item)
+        elif item in os.environ:
+            out.append(f'{item}={os.environ[item]}')
+    return out
+
+
+UNSUPPORTED = {
+    '--privileged': 'privileged containers need kernel privileges an app does not have',
+    '--cap-add': 'capabilities are not available without namespaces',
+    '--cap-drop': 'capabilities are not available without namespaces',
+    '--security-opt': 'security options are not available here',
+    '-m': 'no cgroups: memory limits are not available', '--memory': 'no cgroups: memory limits are not available',
+    '--memory-swap': 'no cgroups', '--cpus': 'no cgroups: CPU limits are not available',
+    '--cpu-shares': 'no cgroups', '-c': 'no cgroups', '--cpuset-cpus': 'no cgroups',
+    '--pids-limit': 'no cgroups', '--device': 'use --isolate-device for the supported GPU devices',
+    '--pid': 'no PID namespaces', '--ipc': 'no IPC namespaces', '--uts': 'no UTS namespaces',
+    '--userns': 'no user namespaces', '--gpus': 'use --isolate-device', '--runtime': 'only the ELF runtime exists',
+    '--sysctl': 'sysctls need privileges', '--ulimit': 'not supported', '--oom-kill-disable': 'no cgroups',
+    '--init': 'no PID namespace: an init cannot adopt the container\'s orphans',
+    '--cgroupns': 'no cgroups', '--cgroup-parent': 'no cgroups', '--link': 'shared host network: use localhost',
+    '--ip': 'shared host network', '--mac-address': 'shared host network',
+}
+
+
+def run_parser(prog):
+    p = parser(prog, 'Create and run a new container from an image', add_help=False)
+    p.add_argument('-d', '--detach', action='store_true')
+    p.add_argument('-i', '--interactive', action='store_true')
+    p.add_argument('-t', '--tty', action='store_true')
+    p.add_argument('--rm', action='store_true')
+    p.add_argument('--name')
+    p.add_argument('-e', '--env', action='append', default=[])
+    p.add_argument('--env-file', action='append', default=[])
+    p.add_argument('-v', '--volume', action='append', default=[])
+    p.add_argument('--mount', action='append', default=[])
+    p.add_argument('--tmpfs', action='append', default=[])
+    p.add_argument('-w', '--workdir')
+    p.add_argument('-u', '--user')
+    p.add_argument('-h', '--hostname')
+    p.add_argument('--entrypoint')
+    p.add_argument('-p', '--publish', action='append', default=[])
+    p.add_argument('-P', '--publish-all', action='store_true')
+    p.add_argument('--expose', action='append', default=[])
+    p.add_argument('--network', '--net', default='host')
+    p.add_argument('--add-host', action='append', default=[])
+    p.add_argument('--dns', action='append', default=[])
+    p.add_argument('-l', '--label', action='append', default=[])
+    p.add_argument('--restart', default='no')
+    p.add_argument('--read-only', action='store_true')
+    p.add_argument('--in-place', action='store_true', help='run directly in the image rootfs (ELF)')
+    p.add_argument('--stop-signal')
+    p.add_argument('--stop-timeout', type=int)
+    p.add_argument('--pull', default='missing', choices=['missing', 'always', 'never'])
+    p.add_argument('--platform')
+    p.add_argument('--isolate', action='store_true', help='run under the isolation broker (ELF)')
+    p.add_argument('--isolate-device', action='append', default=[])
+    p.add_argument('-a', '--attach', action='append', default=[])
+    p.add_argument('--sig-proxy', default='true')
+    p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('--log-driver')
+    p.add_argument('--cidfile')
+    p.add_argument('image')
+    return p
+
+
+def check_unsupported(args):
+    for arg in args:
+        if not arg.startswith('-'):
+            break
+        name = arg.split('=', 1)[0]
+        if name in UNSUPPORTED:
+            raise Fail(f'{name} is not supported: {UNSUPPORTED[name]}')
+
+
+def split_options(args, takes_value=None):
+    """(options, image or container, command): options end at the first
+    non-option; everything after the image belongs to the command."""
+    takes_value = takes_value or {'--name', '-e', '--env', '--env-file', '-v', '--volume', '--mount', '--tmpfs',
+                   '-w', '--workdir', '-u', '--user', '-h', '--hostname', '--entrypoint', '-p',
+                   '--publish', '--expose', '--network', '--net', '--add-host', '--dns', '-l',
+                   '--label', '--restart', '--stop-signal', '--stop-timeout', '--pull',
+                   '--platform', '--isolate-device', '-a', '--attach', '--sig-proxy',
+                   '--log-driver', '--cidfile'}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--' or not a.startswith('-') or a == '-':
+            break
+        if a in takes_value:
+            i += 1
+        i += 1
+    options, rest = args[:i], args[i:]
+    if rest and rest[0] == '--':
+        rest = rest[1:]
+    if not rest:
+        return options, None, []
+    return options, rest[0], rest[1:]
+
+
+def new_record(st, a, image_id, image_text):
+    config = st.image_info(image_id)['config'].get('config', {})
+    if a.platform and a.platform not in ('linux/arm64', 'linux/arm64/v8'):
+        raise Fail(f'only linux/arm64 images can run here, not {a.platform}')
+    if a.network not in ('host', 'default', 'bridge'):
+        raise Fail(f'--network {a.network} is not supported: containers share the host network')
+    if a.read_only and a.in_place:
+        raise Fail('--read-only and --in-place exclude each other')
+    for spec in a.publish:
+        ports = spec.split('/')[0].split(':')
+        if len(ports) < 2 or ports[-1] != ports[-2]:
+            raise Fail(f'-p {spec} is not supported: containers share the host network, a port is '
+                       'published only as itself (-p N:N: the program listens on host port N)')
+    if a.publish_all and config.get('ExposedPorts'):
+        raise Fail('-P is not supported: containers share the host network')
+    cid = st.new_id()
+    entrypoint = config.get('Entrypoint')
+    cmd = config.get('Cmd')
+    if a.entrypoint is not None:
+        entrypoint = shlex.split(a.entrypoint) if a.entrypoint else []
+        cmd = None
+    if a.command:
+        cmd = a.command
+    env = list(config.get('Env') or [])
+    for path in a.env_file:
+        env += parse_env_file(path)
+    env += env_entries(a.env)
+    binds = []
+    tmpfs = list(a.tmpfs)
+    for v in a.volume:
+        src, dst, mode = parse_volume(v)
+        if src is None:
+            src = f'anon-{cid[:12]}-{len(binds)}'
+        binds.append([src, dst, mode])
+    for m in a.mount:
+        kind, src, dst, mode = parse_mount(m)
+        if kind == 'tmpfs':
+            tmpfs.append(dst)
+        else:
+            binds.append([src or f'anon-{cid[:12]}-{len(binds)}', dst, mode])
+    if (a.read_only or any(b[2] == 'ro' for b in binds)) and not Path(runspec.BUILD / 'elfloader-guarded').exists() \
+            and not os.environ.get('ELF_LOADER_GUARDED'):
+        raise Fail('read-only volumes need the guarded loader build (make build)')
+    restart = {'Name': 'no', 'MaximumRetryCount': 0}
+    if a.restart:
+        name, _, count = a.restart.partition(':')
+        if name not in ('no', 'always', 'unless-stopped', 'on-failure'):
+            raise Fail(f'invalid restart policy {a.restart}')
+        restart = {'Name': name, 'MaximumRetryCount': int(count or 0)}
+        if a.rm and name != 'no':
+            raise Fail('conflicting options: --restart and --rm')
+    hosts = []
+    for item in a.add_host:
+        name, _, ip = item.partition(':') if '=' not in item else item.partition('=')
+        hosts.append([name, '127.0.0.1' if ip == 'host-gateway' else ip])
+    labels = dict(config.get('Labels') or {})
+    for item in a.label:
+        key, _, value = item.partition('=')
+        labels[key] = value
+    name = a.name or random_name(st)
+    if not all(c.isalnum() or c in '_.-' for c in name):
+        raise Fail(f'Invalid container name ({name}), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed')
+    return {
+        'Id': cid, 'Name': name, 'Created': store_mod.now(), 'Image': image_id, 'ImageName': image_text,
+        'Config': {'Hostname': a.hostname or cid[:12], 'User': a.user if a.user is not None else config.get('User', ''),
+                   'Env': env, 'Entrypoint': entrypoint, 'Cmd': cmd,
+                   'WorkingDir': a.workdir or config.get('WorkingDir') or '',
+                   'Labels': labels, 'Tty': a.tty, 'OpenStdin': a.interactive,
+                   'StopSignal': a.stop_signal or config.get('StopSignal') or 'SIGTERM',
+                   'StopTimeout': a.stop_timeout, 'ExposedPorts': config.get('ExposedPorts') or {},
+                   'Volumes': config.get('Volumes') or {}},
+        'HostConfig': {'Binds': binds, 'AutoRemove': a.rm, 'ReadonlyRootfs': a.read_only,
+                       'InPlace': a.in_place, 'Isolate': a.isolate, 'IsolateDevices': a.isolate_device,
+                       'RestartPolicy': restart, 'Tmpfs': tmpfs, 'ExtraHosts': hosts, 'Dns': a.dns,
+                       'PortBindings': a.publish},
+        'State': {'Status': 'created', 'Running': False, 'Pid': 0, 'ExitCode': 0,
+                  'StartedAt': None, 'FinishedAt': None, 'RestartCount': 0},
+    }
+
+
+ADJECTIVES = 'brave calm eager fancy gentle happy jolly keen lucid merry nifty proud quirky sharp tender vivid witty zen'.split()
+NOUNS = 'archimedes babbage curie darwin euler fermat galois hopper johnson kepler lovelace noether pascal ritchie shannon turing wozniak yalow'.split()
+
+
+def random_name(st):
+    import secrets
+    taken = {c['Name'] for c in st.containers()}
+    while True:
+        name = f'{secrets.choice(ADJECTIVES)}_{secrets.choice(NOUNS)}'
+        if name not in taken:
+            return name
+
+
+def create_from_args(st, prog, args):
+    check_unsupported(args)
+    options, image, command = split_options(args)
+    a = run_parser(prog).parse_args(options + ([image] if image is not None else []))
+    a.command = command
+    image_id = ensure_image(st, a.image, a.pull, quiet=a.quiet)
+    record = new_record(st, a, image_id, a.image)
+    runtime.create(st, record)
+    if a.cidfile:
+        Path(a.cidfile).write_text(record['Id'])
+    return a, record
+
+
+def cmd_create(st, args):
+    a, record = create_from_args(st, 'create', args)
+    print(record['Id'])
+
+
+def cmd_run(st, args):
+    a, record = create_from_args(st, 'run', args)
+    if a.detach:
+        record = runtime.start_detached(st, record)
+        print(record['Id'])
+        return 0
+    return runtime.start_foreground(st, record, a.interactive, a.tty)
+
+
+def cmd_start(st, args):
+    p = parser('start', 'Start one or more stopped containers')
+    p.add_argument('-a', '--attach', action='store_true')
+    p.add_argument('-i', '--interactive', action='store_true')
+    p.add_argument('container', nargs='+')
+    a = p.parse_args(args)
+    if (a.attach or a.interactive) and len(a.container) > 1:
+        raise Fail('you cannot start and attach multiple containers at once')
+    for text in a.container:
+        record = runtime.refresh(st, st.resolve_container(text))
+        if record['State']['Status'] in ('running', 'restarting'):
+            if not a.attach:
+                print(text)
+            continue
+        if a.attach or a.interactive:
+            return runtime.start_foreground(st, record, a.interactive, record['Config'].get('Tty'))
+        runtime.start_detached(st, record)
+        print(text)
+    return 0
+
+
+def cmd_stop(st, args, restart=False):
+    p = parser('restart' if restart else 'stop', 'Stop one or more running containers')
+    p.add_argument('-t', '--time', '--timeout', type=int)
+    p.add_argument('-s', '--signal')
+    p.add_argument('container', nargs='+')
+    a = p.parse_args(args)
+    status = 0
+    for text in a.container:
+        try:
+            record = st.resolve_container(text)
+            runtime.stop(st, record, a.time, runtime.parse_signal(a.signal) if a.signal else None)
+            if restart:
+                runtime.start_detached(st, st.load_container(record['Id']))
+            print(text)
+        except ERRORS as e:
+            print(f'Error response from daemon: {e}', file=sys.stderr)
+            status = 1
+    return status
+
+
+def cmd_kill(st, args):
+    p = parser('kill', 'Kill one or more running containers')
+    p.add_argument('-s', '--signal', default='KILL')
+    p.add_argument('container', nargs='+')
+    a = p.parse_args(args)
+    sig = runtime.parse_signal(a.signal)
+    status = 0
+    for text in a.container:
+        try:
+            runtime.kill(st, st.resolve_container(text), sig)
+            print(text)
+        except ERRORS as e:
+            print(f'Error response from daemon: {e}', file=sys.stderr)
+            status = 1
+    return status
+
+
+def cmd_wait(st, args):
+    p = parser('wait', 'Block until containers stop, then print their exit codes')
+    p.add_argument('container', nargs='+')
+    a = p.parse_args(args)
+    for text in a.container:
+        print(runtime.wait(st, st.resolve_container(text)))
+
+
+def cmd_rm(st, args):
+    p = parser('rm', 'Remove one or more containers')
+    p.add_argument('-f', '--force', action='store_true')
+    p.add_argument('-v', '--volumes', action='store_true')
+    p.add_argument('-l', '--link', action='store_true')
+    p.add_argument('container', nargs='+')
+    a = p.parse_args(args)
+    status = 0
+    for text in a.container:
+        try:
+            record = st.resolve_container(text)
+            runtime.remove(st, record, a.force)
+            if a.volumes:
+                for src, _, _ in record['HostConfig']['Binds']:
+                    if src.startswith(f'anon-{record["Id"][:12]}-'):
+                        store_mod.remove(st.volume_dir(src))
+            print(text)
+        except ERRORS as e:
+            print(f'Error response from daemon: {e}', file=sys.stderr)
+            status = 1
+    return status
+
+
+def status_text(record):
+    state = record['State']
+    s = state['Status']
+    if s == 'running':
+        return 'Up ' + fmt.human_duration(__import__('time').time() - fmt.parse_time(state['StartedAt']))
+    if s == 'restarting':
+        return f'Restarting ({state.get("ExitCode") or 0}) {fmt.ago(state.get("FinishedAt"))}'
+    if s == 'exited':
+        return f'Exited ({state.get("ExitCode")}) {fmt.ago(state.get("FinishedAt"))}'
+    return 'Created'
+
+
+def container_row(st, record, no_trunc=False):
+    cfg = record['Config']
+    command = ' '.join(shlex.quote(c) for c in (cfg.get('Entrypoint') or []) + (cfg.get('Cmd') or []))
+    if not no_trunc and len(command) > 20:
+        command = command[:19] + '…'
+    image = record['ImageName']
+    return {'ID': record['Id'] if no_trunc else record['Id'][:12], 'Image': image,
+            'Command': f'"{command}"', 'CreatedAt': record['Created'],
+            'RunningFor': fmt.ago(record['Created']), 'Status': status_text(record),
+            'State': record['State']['Status'], 'Ports': ', '.join(record['HostConfig'].get('PortBindings') or []),
+            'Names': record['Name'], 'Labels': ','.join(f'{k}={v}' for k, v in (cfg.get('Labels') or {}).items()),
+            'Mounts': ','.join(b[1] for b in record['HostConfig']['Binds'])}
+
+
+def cmd_ps(st, args):
+    p = parser('ps', 'List containers')
+    p.add_argument('-a', '--all', action='store_true')
+    p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('-l', '--latest', action='store_true')
+    p.add_argument('-n', '--last', type=int)
+    p.add_argument('-s', '--size', action='store_true')
+    p.add_argument('--no-trunc', action='store_true')
+    p.add_argument('--format')
+    p.add_argument('-f', '--filter', action='append', default=[])
+    a = p.parse_args(args)
+    records = [runtime.refresh(st, r) for r in st.containers()]
+    if a.latest:
+        records = records[:1]
+    elif a.last:
+        records = records[:a.last]
+    elif not a.all:
+        records = [r for r in records if r['State']['Status'] in ('running', 'restarting')]
+    for f in a.filter:
+        key, _, value = f.partition('=')
+        if key == 'status':
+            records = [r for r in records if r['State']['Status'] == value]
+        elif key == 'name':
+            records = [r for r in records if value in r['Name']]
+        elif key == 'id':
+            records = [r for r in records if r['Id'].startswith(value)]
+        elif key == 'label':
+            k, _, v = value.partition('=')
+            records = [r for r in records if k in (r['Config'].get('Labels') or {}) and
+                       (not v or r['Config']['Labels'][k] == v)]
+        elif key == 'ancestor':
+            try:
+                image_id = st.resolve_image(value)
+            except store_mod.StoreError:
+                image_id = None
+            records = [r for r in records if r['Image'] == image_id]
+        elif key == 'exited':
+            records = [r for r in records if r['State']['Status'] == 'exited' and
+                       str(r['State'].get('ExitCode')) == value]
+        else:
+            raise Fail(f'invalid filter {key}')
+    rows = [container_row(st, r, a.no_trunc) for r in records]
+    if a.quiet:
+        for r in rows:
+            print(r['ID'])
+        return
+    if a.format and fmt.print_formatted(a.format, rows):
+        return
+    print(fmt.table([[r['ID'], r['Image'], r['Command'], r['RunningFor'], r['Status'], r['Ports'],
+                      r['Names']] for r in rows],
+                    ['CONTAINER ID', 'IMAGE', 'COMMAND', 'CREATED', 'STATUS', 'PORTS', 'NAMES']))
+
+
+def container_inspect(st, record):
+    record = runtime.refresh(st, record)
+    cfg, host, state = record['Config'], record['HostConfig'], record['State']
+    command = (cfg.get('Entrypoint') or []) + (cfg.get('Cmd') or [])
+    return {
+        'Id': record['Id'], 'Created': record['Created'],
+        'Path': command[0] if command else '', 'Args': command[1:],
+        'State': {'Status': state['Status'], 'Running': state['Status'] == 'running',
+                  'Paused': False, 'Restarting': state['Status'] == 'restarting', 'OOMKilled': False,
+                  'Dead': False, 'Pid': state.get('Pid') or 0, 'ExitCode': state.get('ExitCode') or 0,
+                  'Error': '', 'StartedAt': state.get('StartedAt') or '0001-01-01T00:00:00Z',
+                  'FinishedAt': state.get('FinishedAt') or '0001-01-01T00:00:00Z'},
+        'Image': 'sha256:' + record['Image'], 'Name': '/' + record['Name'],
+        'RestartCount': state.get('RestartCount', 0),
+        'Driver': 'elf-copy' if not (host.get('ReadonlyRootfs') or host.get('InPlace')) else 'elf-image',
+        'Platform': 'linux',
+        'HostConfig': {'Binds': [f'{s}:{d}' + (':ro' if m == 'ro' else '') for s, d, m in host['Binds']],
+                       'AutoRemove': host.get('AutoRemove', False), 'NetworkMode': 'host',
+                       'ReadonlyRootfs': host.get('ReadonlyRootfs', False),
+                       'RestartPolicy': host.get('RestartPolicy'), 'Tmpfs': {t: '' for t in host.get('Tmpfs') or []},
+                       'ExtraHosts': [f'{n}:{i}' for n, i in host.get('ExtraHosts') or []],
+                       'Dns': host.get('Dns') or [], 'Isolate': host.get('Isolate', False)},
+        'GraphDriver': {'Name': 'elf', 'Data': {'Rootfs': str(runtime.rootfs_of(st, record))}},
+        'Mounts': [{'Type': 'bind' if s.startswith('/') else 'volume', 'Source': s if s.startswith('/') else
+                    str(st.volume_dir(s) / 'data'), 'Name': '' if s.startswith('/') else s,
+                    'Destination': d, 'Mode': m, 'RW': m != 'ro'} for s, d, m in host['Binds']],
+        'Config': {'Hostname': cfg['Hostname'], 'User': cfg.get('User', ''), 'Tty': cfg.get('Tty', False),
+                   'OpenStdin': cfg.get('OpenStdin', False), 'Env': cfg.get('Env', []),
+                   'Cmd': cfg.get('Cmd'), 'Image': record['ImageName'], 'WorkingDir': cfg.get('WorkingDir', ''),
+                   'Entrypoint': cfg.get('Entrypoint'), 'Labels': cfg.get('Labels', {}),
+                   'StopSignal': cfg.get('StopSignal'), 'ExposedPorts': cfg.get('ExposedPorts', {}),
+                   'Volumes': cfg.get('Volumes', {})},
+        'NetworkSettings': {'Networks': {'host': {}}},
+    }
+
+
+def cmd_inspect(st, args, kind=None):
+    p = parser('inspect', 'Return low-level information on Docker objects')
+    p.add_argument('-f', '--format')
+    p.add_argument('--type', default=kind)
+    p.add_argument('-s', '--size', action='store_true')
+    p.add_argument('name', nargs='+')
+    a = p.parse_args(args)
+    out, status = [], 0
+    for name in a.name:
+        obj = None
+        if a.type in (None, 'container'):
+            try:
+                obj = container_inspect(st, st.resolve_container(name))
+            except store_mod.StoreError:
+                pass
+        if obj is None and a.type in (None, 'image'):
+            try:
+                obj = image_inspect(st, st.resolve_image(name))
+            except store_mod.StoreError:
+                pass
+        if obj is None and a.type == 'volume':
+            obj = volume_inspect(st, name)
+        if obj is None:
+            print(f'Error: No such object: {name}', file=sys.stderr)
+            status = 1
+            continue
+        out.append(obj)
+    if a.format:
+        for obj in out:
+            print(fmt.render(a.format, obj))
+    else:
+        print(json.dumps(out, indent=4))
+    return status
+
+
+def cmd_exec(st, args):
+    p = parser('exec', 'Execute a command in a running container')
+    p.add_argument('-d', '--detach', action='store_true')
+    p.add_argument('-i', '--interactive', action='store_true')
+    p.add_argument('-t', '--tty', action='store_true')
+    p.add_argument('-e', '--env', action='append', default=[])
+    p.add_argument('--env-file', action='append', default=[])
+    p.add_argument('-w', '--workdir')
+    p.add_argument('-u', '--user')
+    p.add_argument('--privileged', action='store_true')
+    p.add_argument('container')
+    options, container, command = split_options(
+        args, {'-e', '--env', '--env-file', '-w', '--workdir', '-u', '--user'})
+    a = p.parse_args(options + ([container] if container is not None else []))
+    a.command = command
+    if a.privileged:
+        raise Fail('--privileged is not supported')
+    if not a.command:
+        raise Fail('docker exec requires at least 2 arguments')
+    env = []
+    for path in a.env_file:
+        env += parse_env_file(path)
+    env += env_entries(a.env)
+    record = st.resolve_container(a.container)
+    return runtime.exec_in(st, record, a.command, a.interactive, a.tty, a.detach, env, a.workdir, a.user)
+
+
+def cmd_cp(st, args):
+    p = parser('cp', 'Copy files between a container and the local filesystem')
+    p.add_argument('-a', '--archive', action='store_true')
+    p.add_argument('-L', '--follow-link', action='store_true')
+    p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('src')
+    p.add_argument('dest')
+    a = p.parse_args(args)
+    runtime.cp(st, a.src, a.dest)
+
+
+def cmd_logs(st, args):
+    p = parser('logs', 'Fetch the logs of a container')
+    p.add_argument('-f', '--follow', action='store_true')
+    p.add_argument('-n', '--tail')
+    p.add_argument('-t', '--timestamps', action='store_true')
+    p.add_argument('container')
+    a = p.parse_args(args)
+    if a.timestamps:
+        raise Fail('--timestamps is not supported: the log keeps the raw output')
+    tail = None if a.tail in (None, 'all') else int(a.tail)
+    runtime.logs(st, st.resolve_container(a.container), a.follow, tail)
+
+
+def cmd_rename(st, args):
+    p = parser('rename', 'Rename a container')
+    p.add_argument('container')
+    p.add_argument('name')
+    a = p.parse_args(args)
+    with st.lock():
+        if any(c['Name'] == a.name for c in st.containers()):
+            raise Fail(f'Conflict. The container name "/{a.name}" is already in use')
+        record = st.resolve_container(a.container)
+        record['Name'] = a.name
+        st.save_container(record)
+
+
+# ---------------------------------------------------------------- volumes
+def volume_inspect(st, name):
+    d = st.volume_dir(name)
+    if not (d / 'data').is_dir():
+        return None
+    meta = store_mod.read_json(d / 'volume.json', {'Name': name})
+    return {'Name': name, 'Driver': 'local', 'Mountpoint': str(d / 'data'), 'Scope': 'local',
+            'CreatedAt': meta.get('CreatedAt', ''), 'Labels': meta.get('Labels') or {}, 'Options': {}}
+
+
+def volume_users(st, name):
+    return [c for c in st.containers() if any(b[0] == name for b in c['HostConfig']['Binds'])]
+
+
+def cmd_volume(st, args):
+    if not args:
+        raise Fail('Usage: docker volume COMMAND (create, inspect, ls, prune, rm)')
+    sub, rest = args[0], args[1:]
+    if sub == 'create':
+        p = parser('volume create')
+        p.add_argument('-d', '--driver', default='local')
+        p.add_argument('-l', '--label', action='append', default=[])
+        p.add_argument('-o', '--opt', action='append', default=[])
+        p.add_argument('name', nargs='?')
+        a = p.parse_args(rest)
+        if a.driver != 'local' or a.opt:
+            raise Fail('only the local driver without options is supported')
+        import secrets
+        name = a.name or secrets.token_hex(32)
+        st.create_volume(name, dict(l.partition('=')[::2] for l in a.label))
+        print(name)
+    elif sub in ('ls', 'list'):
+        p = parser('volume ls')
+        p.add_argument('-q', '--quiet', action='store_true')
+        p.add_argument('--format')
+        p.add_argument('-f', '--filter', action='append', default=[])
+        a = p.parse_args(rest)
+        rows = [{'Driver': 'local', 'Name': n, 'Mountpoint': str(st.volume_dir(n) / 'data')}
+                for n in st.volumes()]
+        if a.quiet:
+            for r in rows:
+                print(r['Name'])
+        elif not (a.format and fmt.print_formatted(a.format, rows)):
+            print(fmt.table([[r['Driver'], r['Name']] for r in rows], ['DRIVER', 'VOLUME NAME']))
+    elif sub == 'inspect':
+        p = parser('volume inspect')
+        p.add_argument('-f', '--format')
+        p.add_argument('name', nargs='+')
+        a = p.parse_args(rest)
+        out = []
+        for n in a.name:
+            v = volume_inspect(st, n)
+            if v is None:
+                raise Fail(f'get {n}: no such volume', 1)
+            out.append(v)
+        if a.format:
+            for v in out:
+                print(fmt.render(a.format, v))
+        else:
+            print(json.dumps(out, indent=4))
+    elif sub == 'rm':
+        p = parser('volume rm')
+        p.add_argument('-f', '--force', action='store_true')
+        p.add_argument('name', nargs='+')
+        a = p.parse_args(rest)
+        for n in a.name:
+            if volume_inspect(st, n) is None:
+                if a.force:
+                    continue
+                raise Fail(f'get {n}: no such volume', 1)
+            users = volume_users(st, n)
+            if users:
+                raise Fail(f'remove {n}: volume is in use - [{users[0]["Id"]}]', 1)
+            store_mod.remove(st.volume_dir(n))
+            print(n)
+    elif sub == 'prune':
+        p = parser('volume prune')
+        p.add_argument('-f', '--force', action='store_true')
+        p.add_argument('-a', '--all', action='store_true')
+        a = p.parse_args(rest)
+        confirm(a.force, 'This will remove all local volumes not used by at least one container.')
+        freed = 0
+        print('Deleted Volumes:')
+        for n in st.volumes():
+            if not volume_users(st, n) and (a.all or n.startswith('anon-')):
+                freed += store_mod.tree_size(st.volume_dir(n))
+                store_mod.remove(st.volume_dir(n))
+                print(n)
+        print(f'\nTotal reclaimed space: {images.human_size(freed)}')
+    else:
+        raise Fail(f'unknown volume command {sub}')
+
+
+# ---------------------------------------------------------------- prune
+def confirm(force, message):
+    if force:
+        return
+    print(f'WARNING! {message}\nAre you sure you want to continue? [y/N] ', end='', flush=True)
+    if sys.stdin.readline().strip().lower() not in ('y', 'yes'):
+        raise Fail('aborted', 1)
+
+
+def prune_containers(st):
+    freed, gone = 0, []
+    for record in st.containers():
+        record = runtime.refresh(st, record)
+        if record['State']['Status'] in ('exited', 'created'):
+            freed += store_mod.tree_size(st.container_dir(record['Id']))
+            runtime.remove(st, record)
+            gone.append(record['Id'])
+    return gone, freed
+
+
+def prune_images(st, everything):
+    used = {c['Image'] for c in st.containers()}
+    freed, gone = 0, []
+    for image_id in st.images():
+        if image_id in used:
+            continue
+        if st.image_names(image_id) and not everything:
+            continue
+        freed += st.image_info(image_id)['info'].get('size', 0)
+        for name in st.image_names(image_id):
+            st.drop_ref(name)
+        store_mod.remove(st.image_dir(image_id))
+        gone.append(image_id)
+    # Blobs no image refers to any more.
+    keep = set()
+    for image_id in st.images():
+        info = st.image_info(image_id)
+        keep.add(info['manifest'].get('config', {}).get('digest', '')[7:])
+        keep.update(d[7:] for d in info['info'].get('layer_digests', []))
+        keep.add(image_id)
+    for blob in (st.home / 'blobs' / 'sha256').iterdir():
+        if blob.name not in keep and len(blob.name) == 64:
+            try:
+                json.loads(blob.read_bytes()) if blob.stat().st_size < (1 << 20) else None
+            except ValueError:
+                pass
+            freed += blob.stat().st_size
+            blob.unlink()
+    return gone, freed
+
+
+def cmd_prune(st, kind, args):
+    p = parser(f'{kind} prune')
+    p.add_argument('-f', '--force', action='store_true')
+    p.add_argument('-a', '--all', action='store_true')
+    p.add_argument('--volumes', action='store_true')
+    p.add_argument('--filter', action='append', default=[])
+    a = p.parse_args(args)
+    if kind == 'container':
+        confirm(a.force, 'This will remove all stopped containers.')
+        gone, freed = prune_containers(st)
+        if gone:
+            print('Deleted Containers:\n' + '\n'.join(gone) + '\n')
+    elif kind == 'image':
+        confirm(a.force, 'This will remove all images without at least one container associated to them.'
+                if a.all else 'This will remove all dangling images.')
+        gone, freed = prune_images(st, a.all)
+        if gone:
+            print('Deleted Images:\n' + '\n'.join('deleted: sha256:' + g for g in gone) + '\n')
+    elif kind == 'builder':
+        confirm(a.force, 'This will remove all dangling build cache.')
+        freed = store_mod.tree_size(st.home / 'build-cache')
+        store_mod.remove(st.home / 'build-cache')
+        (st.home / 'build-cache').mkdir()
+    else:   # system
+        confirm(a.force, 'This will remove:\n  - all stopped containers\n  - all '
+                + ('images without at least one container associated to them' if a.all else 'dangling images')
+                + '\n  - all build cache')
+        _, f1 = prune_containers(st)
+        _, f2 = prune_images(st, a.all)
+        f3 = store_mod.tree_size(st.home / 'build-cache')
+        store_mod.remove(st.home / 'build-cache')
+        (st.home / 'build-cache').mkdir()
+        freed = f1 + f2 + f3
+        if a.volumes:
+            for n in st.volumes():
+                if not volume_users(st, n):
+                    freed += store_mod.tree_size(st.volume_dir(n))
+                    store_mod.remove(st.volume_dir(n))
+    print(f'Total reclaimed space: {images.human_size(freed)}')
+
+
+# ---------------------------------------------------------------- registry auth
+def cmd_login(st, args):
+    p = parser('login', 'Log in to a registry')
+    p.add_argument('-u', '--username')
+    p.add_argument('-p', '--password')
+    p.add_argument('--password-stdin', action='store_true')
+    p.add_argument('server', nargs='?', default=registry.DOCKER_HUB)
+    a = p.parse_args(args)
+    user = a.username or input('Username: ')
+    if a.password_stdin:
+        password = sys.stdin.read().strip()
+    else:
+        import getpass
+        password = a.password or getpass.getpass('Password: ')
+    server = a.server.replace('https://', '').rstrip('/')
+    if server in ('index.docker.io/v1', 'index.docker.io', 'registry-1.docker.io'):
+        server = registry.DOCKER_HUB
+    ref = registry.Reference(f'{server}/library/x' if server != registry.DOCKER_HUB else 'x')
+    client = registry.Client(ref, auth=(user, password))
+    client.ping()
+    registry.store_credentials(server, user, password)
+    print('Login Succeeded')
+
+
+def cmd_logout(st, args):
+    server = (args[0] if args else registry.DOCKER_HUB).replace('https://', '').rstrip('/')
+    if registry.remove_credentials(server):
+        print(f'Removing login credentials for {server}')
+    else:
+        print(f'Not logged in to {server}')
+
+
+def cmd_version(st, args):
+    print('Client: elf-oci (Docker-compatible CLI on the ELF loader)\n Version: R3\n'
+          ' API: none (no daemon)\n Platform: linux/arm64')
+
+
+def cmd_info(st, args):
+    print(f'Storage: {st.home}\nImages: {len(st.images())}\nContainers: {len(st.containers())}\n'
+          f'Runtime: elfloader ({runspec.BUILD})\nIsolation: --isolate (broker)\n'
+          'Networking: host only\nArchitecture: aarch64')
+
+
+def cmd_system(st, args):
+    if args and args[0] == 'prune':
+        return cmd_prune(st, 'system', args[1:])
+    if args and args[0] == 'df':
+        print(fmt.table([
+            ['Images', len(st.images()), images.human_size(sum(st.image_info(i)['info'].get('size', 0) for i in st.images()))],
+            ['Containers', len(st.containers()), images.human_size(store_mod.tree_size(st.home / 'containers'))],
+            ['Local Volumes', len(st.volumes()), images.human_size(store_mod.tree_size(st.home / 'volumes'))],
+            ['Build Cache', '', images.human_size(store_mod.tree_size(st.home / 'build-cache'))]],
+            ['TYPE', 'TOTAL', 'SIZE']))
+        return
+    if args and args[0] == 'info':
+        return cmd_info(st, args[1:])
+    raise Fail('Usage: docker system (df | info | prune)')
+
+
+def group(kind, table):
+    def handler(st, args):
+        if not args or args[0] not in table:
+            raise Fail(f'Usage: docker {kind} COMMAND ({", ".join(sorted(table))})')
+        return table[args[0]](st, args[1:])
+    return handler
+
+
+def build_commands(st, args, name):
+    import build
+    return getattr(build, 'cmd_' + name)(st, args)
+
+
+COMMANDS = {
+    'pull': cmd_pull, 'load': cmd_load, 'save': cmd_save, 'images': cmd_images, 'rmi': cmd_rmi,
+    'tag': cmd_tag, 'history': cmd_history, 'inspect': cmd_inspect, 'create': cmd_create,
+    'run': cmd_run, 'start': cmd_start, 'stop': cmd_stop,
+    'restart': lambda st, a: cmd_stop(st, a, restart=True), 'kill': cmd_kill, 'wait': cmd_wait,
+    'rm': cmd_rm, 'ps': cmd_ps, 'exec': cmd_exec, 'cp': cmd_cp, 'logs': cmd_logs, 'rename': cmd_rename,
+    'volume': cmd_volume, 'login': cmd_login, 'logout': cmd_logout, 'version': cmd_version,
+    'info': cmd_info, 'system': cmd_system,
+    'build': lambda st, a: build_commands(st, a, 'build'),
+    'commit': lambda st, a: build_commands(st, a, 'commit'),
+    'diff': lambda st, a: build_commands(st, a, 'diff'),
+    'push': lambda st, a: build_commands(st, a, 'push'),
+}
+COMMANDS['container'] = group('container', {
+    'ls': cmd_ps, 'list': cmd_ps, 'ps': cmd_ps, 'create': cmd_create, 'run': cmd_run, 'start': cmd_start,
+    'stop': cmd_stop, 'restart': COMMANDS['restart'], 'kill': cmd_kill, 'wait': cmd_wait, 'rm': cmd_rm,
+    'exec': cmd_exec, 'cp': cmd_cp, 'logs': cmd_logs, 'rename': cmd_rename,
+    'inspect': lambda st, a: cmd_inspect(st, a, 'container'),
+    'prune': lambda st, a: cmd_prune(st, 'container', a), 'commit': COMMANDS['commit'],
+    'diff': COMMANDS['diff']})
+COMMANDS['image'] = group('image', {
+    'ls': cmd_images, 'list': cmd_images, 'pull': cmd_pull, 'push': COMMANDS['push'], 'rm': cmd_rmi,
+    'tag': cmd_tag, 'history': cmd_history, 'save': cmd_save, 'load': cmd_load,
+    'inspect': lambda st, a: cmd_inspect(st, a, 'image'), 'build': COMMANDS['build'],
+    'prune': lambda st, a: cmd_prune(st, 'image', a)})
+COMMANDS['builder'] = group('builder', {'prune': lambda st, a: cmd_prune(st, 'builder', a),
+                                        'build': COMMANDS['build']})
+COMMANDS['buildx'] = group('buildx', {'build': COMMANDS['build']})
+
+
+def main(argv):
+    while argv and argv[0] in ('--debug', '-D'):
+        argv = argv[1:]
+    if not argv or argv[0] in ('-h', '--help', 'help'):
+        print(__doc__.strip() + '\n\nCommands:\n  ' + ' '.join(sorted(COMMANDS)))
+        return 0
+    if argv[0] in ('-v', '--version'):
+        argv = ['version']
+    name, rest = argv[0], argv[1:]
+    try:
+        st = store_mod.Store()
+        if name == '__monitor':
+            runtime.monitor(st, rest[0])
+            return 0
+        if name not in COMMANDS:
+            raise Fail(f"docker: '{name}' is not a docker command.\nSee 'docker --help'")
+        return COMMANDS[name](st, rest) or 0
+    except Fail as e:
+        print(f'docker: {e}' if not str(e).startswith('docker') else str(e), file=sys.stderr)
+        return e.code
+    except SystemExit as e:   # --help
+        return e.code or 0
+    except ERRORS as e:
+        print(f'docker: Error response from daemon: {e}', file=sys.stderr)
+        return 125
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

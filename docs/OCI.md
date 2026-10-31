@@ -1,4 +1,7 @@
-# Docker/OCI 镜像支持（设计，未实现）
+# Docker/OCI 镜像支持
+
+**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收
+（见文末“R1–R3 实现记录”）；R4–R7 仍是设计。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
 
 ## 目标
 
@@ -61,17 +64,40 @@ elfloader 命令行。
 - R6 改动最大，单独设计；之前各版本的复制式容器一直可用，R6 只是可选的省空间方式。
 - R7 只在确定要用某个具体工具时做，按它实际调用的接口实现。
 
+## 使用
+
+```
+make build                                   # build/elfloader[-guarded] 与 build/elf-exec-helper
+ln -s "$PWD/tools/oci/docker" ~/.local/bin/docker   # 或任意 PATH 中的名字
+docker pull alpine
+docker run --rm -it alpine sh
+docker run -d --name web --restart unless-stopped -v web-data:/data myapp
+docker logs -f web; docker exec -it web sh; docker stop web
+docker build -t myapp --build-arg VERSION=2 --secret id=npm,src=$HOME/.npmrc .
+docker save -o myapp.tar myapp; docker load -i myapp.tar
+```
+
+环境变量：`ELF_OCI_HOME`（存储根）、`ELF_OCI_MIRROR`（Docker Hub 镜像站，如 `https://mirror.example`）、
+`ELF_LOADER` / `ELF_LOADER_GUARDED` / `ELF_EXEC_HELPER`（不用仓库 build/ 下的二进制时）、
+`ELF_OCI_MAX_BYTES` / `ELF_OCI_MAX_ENTRIES`（展开上限）、`ELF_OCI_HARDLINKS=copy`（见“差异”）。
+ELF 自己的参数：`run --isolate`、`--isolate-device`、`--in-place`，`build --isolate`。
+
+网络慢时可在别处 `docker pull` 再 `docker save`，拷到设备 `docker load`（本机到 Docker Hub 实测约 40 KB/s）。
+
 ## 结构
 
 ```
 tools/oci/
-  docker        命令入口（Python）：按 Docker 的子命令与参数解析
-  registry.py   registry v2 客户端（token 认证、manifest、blob 下载上传与校验）
-  store.py      本地存储：blob、镜像、容器、卷的目录与元数据
-  unpack.py     按层展开（whiteout、安全检查、硬链接副本）
-  runspec.py    镜像配置 + 运行参数 → elfloader argv
-  daemon.py     R2：轻量守护进程（后台容器、日志、重启策略）
-  build.py      R3：Dockerfile 解析与执行、层计算、缓存
+  docker        命令入口（Python）：按 Docker 的子命令与参数解析，输出格式与退出码照 Docker
+  registry.py   registry v2 客户端（bearer/basic 认证、manifest、blob 下载续传与校验、上传）
+  store.py      本地存储：blob、镜像、引用、容器、卷的目录与元数据，flock 加锁
+  unpack.py     按层展开（whiteout、安全检查、硬链接）
+  images.py     pull、load（docker-archive 与 OCI layout）、save、镜像入库
+  runspec.py    镜像配置 + 运行参数 → elfloader argv；用户解析、容器内路径解析
+  runtime.py    容器生命周期：create/start/stop/kill/wait/rm、监视进程、exec、cp、logs
+  layers.py     快照、差异、层 tar（build/commit/diff 共用）
+  build.py      R3：Dockerfile 解析与执行、缓存、commit、diff、push
+  fmt.py        表格、时间、--format 模板子集
 ```
 
 存储根 `ELF_OCI_HOME`，默认 `/data/storage/el2/base/files/elf-oci`（启动时用 probe_storage 的方法
@@ -92,6 +118,29 @@ containers/<cid>/log               R2：后台容器的输出
 volumes/<name>/                    R2：命名卷
 build-cache/                       R3：构建缓存索引
 ```
+
+## 实现与设计的差异
+
+- **没有守护进程**：前台 `run`/`start -a` 由 docker 进程自己等待容器；`run -d`/`start` 为每个容器启动一个监视
+  进程（`docker __monitor <id>`，脱离会话），负责日志、退出码与重启策略。状态都在 `run.json`，进程号带
+  `/proc/<pid>/stat` 的启动时间，防止 pid 复用；等待者被杀时 `ps` 把容器记为已退出（255）。待定问题 2 因此不再需要。
+- **硬链接**：指向可执行文件的硬链接展开为指向目标（guest 绝对路径）的符号链接，其余仍复制。busybox 镜像
+  有约 400 个指向同一程序的硬链接，全部复制时 490 MB，现在 4.2 MB；exec 与 argv[0] 行为不变，内容仍共享；
+  不同之处是 lstat 看到符号链接、删除目标后其他名字失效。`ELF_OCI_HARDLINKS=copy` 恢复全部复制。meta.json 记录原关系。
+- **展开时的模式**：目录总是加上属主 rwx、文件加上属主 rw（fake root 在内核眼里是普通属主，没有这两位就写不了），
+  原模式记入 meta.json；setuid/setgid 被宿主拒绝时去掉并记录。
+- **首个程序**：loader 按 root 相对路径打开首个程序，不经 bind，所以 exec helper 复制在 rootfs 的 `/.elf-exec`
+  （容器内 `ls -a /` 可见；build、commit、diff、save 都排除它）。helper 负责按 guest 的 PATH 查找命令（127/126 与 Docker 一致）。
+- **`:ro` 卷与 `--read-only`**：使用 guarded 构建的 `--guard-path-mutations`（写方式 open、创建、删除、改名、元数据
+  修改按路径拒绝，EROFS），不用 `--guard-file-mutations`：后者要求 exec 之后继承的 FD 也有已知来源，shell
+  重定向后 exec 的程序就写不了标准输出。已打开的 FD 写入不受限制。加 `--isolate` 时由 broker 执行同一向量。
+- **信号**：stop/kill 与前台的信号转发只发给容器主进程（与 Docker 相同）；主进程退出后，同一进程组里剩下的进程被
+  SIGKILL（相当于 PID 命名空间的 init 退出）。主进程放在自己的进程组，`-it` 时设为终端前台进程组。
+- **`--init`、`-p` 映射不同端口、`-P`、`--network` 非 host、cgroup 类参数**：报错退出 125（见 docker 的 UNSUPPORTED 表）。
+- **R2 的运行中追加卷**：未实现，它依赖 R4 的共享翻译表。
+- **build**：输出为传统构建器格式（`Step n/m`、`Using cache`）；完全命中缓存时镜像 id 不变（config 的时间取自缓存的层）；
+  `COPY --chown` 被忽略（R5 之前文件都属于 root），`COPY --parents`、`--mount=type=ssh`、远程上下文与 git 源报错；
+  `RUN --mount=type=bind` 绑的是源的副本，写入被丢弃（与 BuildKit 默认只读的效果一致）；`--output` 支持 local/tar/docker。
 
 ## R1 运行
 
@@ -129,7 +178,7 @@ build-cache/                       R3：构建缓存索引
 | 目录、普通文件、符号链接 | 创建；模式取低 12 位（setuid/setgid 若被宿主拒绝则去掉并记入 meta） |
 | `.wh.<名字>` | 删除下层的 `<名字>`（递归），本身不创建 |
 | `.wh..wh..opq` | 清空所在目录中下层带来的内容 |
-| 硬链接 | 复制目标文件内容（宿主不允许硬链接），meta 记录链接关系 |
+| 硬链接 | 目标可执行：符号链接到目标；否则复制目标文件内容（宿主不允许硬链接）；meta 记录链接关系 |
 | 字符/块设备、FIFO | 跳过并记入 meta（运行时从宿主绑定 `/dev`） |
 | 属主 uid/gid | 不能 chown；记入 meta（R5 使用） |
 | xattr（含 `security.capability`） | 忽略，记入 meta |
@@ -162,7 +211,7 @@ R6 加共享镜像的写时复制。
 | Healthcheck、OnBuild、Shell、Labels | `run` 时忽略（Labels 在 `images`/`inspect` 中显示；OnBuild、Shell 在 R3 使用） |
 
 **`--env-file` 与 `.env`**：按 Docker 规则逐行解析：`#` 开头与空行跳过；只有 `KEY` 时取宿主环境中的同名值；
-值不做 shell 处理，引号原样保留。loader 的 `-e` 上限（现为 16）放大到足够容纳常见的环境文件。compose 的 `.env`
+值不做 shell 处理，引号原样保留。loader 的 `-e` 上限由 16 放大到 512，bind 上限由 16 放大到 64（payload ABI 22）。compose 的 `.env`
 （compose 文件中的 `${VAR}` 替换）属于 R7。
 
 **固定附加**：`--mode container --root <rootfs> --link-copy`；`-v /proc:/proc`；
@@ -345,6 +394,40 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 ## 待定问题
 
 1. R5 的属主数据库在不加 `--isolate` 时是否值得做（进程内可被篡改，但对兼容性仍有用）。
-2. 守护进程是否在 R1 就引入（统一状态管理），还是保持 R1 无常驻进程、R2 再引入（当前方案）。
+2. ~~守护进程何时引入~~：R1–R3 都不需要（每容器监视进程）；R7 的 Engine API 需要时再定。
 3. `docker` 命令名与真正的 Docker 冲突时的安装方式。
 4. R6 选 erofs 还是 squashfs：erofs 随机读更快、格式更简单，squashfs 工具更普及；需要各写一个读取器原型比较。
+
+## R1–R3 实现记录（2026-11-01，HarmonyOS 真机）
+
+**验收 `make check-oci`**（`test/oci/run.py`，独立存储 `/data/storage/el2/base/files/elf-oci-test`）73 项全部通过：
+- 展开：合成层覆盖 whiteout、不透明目录（同层新写入的保留）、文件与目录互换、硬链接（可执行文件为符号链接，其余复制）、
+  设备节点与 FIFO 跳过、setuid 模式、符号链接链、只读目录；meta.json 记录硬链接、属主、跳过的条目与原模式。
+- 展开安全：绝对路径、`..`、经同层与前一层符号链接写入、指向树外的硬链接、超过大小上限，全部拒绝或留在 rootfs 内，
+  哨兵目录前后一致，失败不留临时树。
+- 校验：篡改的 blob 与不符的 diff_id 使 pull/load 失败；测试 registry 上 bearer token、多平台索引选 arm64、断点续传；
+  login（错误密码拒绝、凭据文件 0600）、push 后删除本地镜像再 pull 回来。
+- 配置映射（常规与 `--isolate` 各一遍）：Entrypoint/Cmd、参数替换 Cmd、`--entrypoint`、Env/`-e`/`--env-file`（注释、
+  空行、只写名字取宿主值、引号原样）、WorkingDir/`-w`、User 名字与 `uid:gid`、`-h`、rw 与 `:ro` 卷、127 与退出码、
+  `--privileged`/`--memory`/`-p` 不同端口/`--network none` 以 125 拒绝。
+- 生命周期（同上两种）：`run -d`、ps、exec、cp 进出、stop 发镜像的 StopSignal 并保留日志、忽略信号时超时后 SIGKILL（137）、
+  `--restart on-failure:2` 与 wait、命名卷持久、`--read-only`（写 /etc 被拒、镜像 rootfs 不变、/tmp 可写、缺失的
+  WorkingDir 由私有目录代替）、`--in-place` 标记镜像已修改、system prune。
+- 构建：多阶段 Dockerfile 覆盖每条指令、ARG/`--build-arg`、ENV 续行与替换、`.dockerignore`、通配符、`COPY --from`、
+  heredoc（RUN 与 COPY）、`--chmod`、ADD 本地 tar、`RUN --mount` cache/bind/secret（bind 不写回上下文）、RUN 删除文件
+  产生 whiteout、配置中的 LABEL/EXPOSE/VOLUME/STOPSIGNAL/HEALTHCHECK/ONBUILD；全命中缓存镜像 id 不变；源变化使缓存失效、
+  cache 挂载保留；子构建执行 ONBUILD；失败的 RUN 报出退出码；save 再 load 的 diff_id 一致；diff 的 A/C/D 与 commit `-c`。
+
+**真实镜像**（`test/oci/images.py`；镜像在开发机 pull 后 save/load 到设备）：busybox、alpine `apk add curl` 后访问 HTTPS、
+debian `apt-get install tree`、python venv + `pip install requests`、node `npm install lodash`，常规与 `--isolate`
+下全部成功。联网的几项耗时取决于镜像站（同一命令在几分钟内 8 s 到 300 s 不等，常规与隔离都出现），不能用来比较运行时。
+离线负载（2000 次创建/stat/删除文件 + 50 MB sha256）：
+
+| 镜像 | `docker run` | `docker run --isolate` | elfloader 直接运行同一 rootfs |
+|---|---|---|---|
+| busybox | 0.8 s | 0.8 s | 0.0 s |
+| python:3.13-slim（离线负载） | 2.0 s | 2.0 s | 0.6 s |
+
+guest 执行时间相同；docker 自身的固定开销约 0.8 s（Python 启动与容器记录）加上复制 rootfs（python 镜像 144 MB 约 1.2 s），
+这正是 R6 写时复制要去掉的部分。交互 `-it` 已在 ssh 伪终端中验证（提示符、`tty` 显示 `/dev/pts/N`：宿主不允许列出
+/dev/pts，runspec 单独绑定继承的终端设备）。
