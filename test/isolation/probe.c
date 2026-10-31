@@ -627,6 +627,23 @@ static void channels(const char *path)
     report("listed-payload-fds", payload);
 }
 
+/* This process's exe is the guest program, never the loader. */
+static void selfexe(void)
+{
+    char buf[256];
+    const char *links[] = {"/proc/self/exe", "/proc/thread-self/exe"};
+    for (int i = 0; i < 2; i++) {
+        long n = hooked(__NR_readlinkat, AT_FDCWD, (long)links[i], (long)buf, sizeof(buf) - 1, 0, 0);
+        buf[n > 0 ? n : 0] = 0;
+        report(i ? "thread-self-is-probe" : "self-is-probe", !strcmp(buf, "/iso-probe"));
+    }
+    struct stat a, b;
+    long fd = hooked(__NR_openat, AT_FDCWD, (long)"/proc/self/exe", O_RDONLY, 0, 0, 0);
+    report("same-file", fd >= 0 && !hooked(__NR_fstat, fd, (long)&a, 0, 0, 0, 0) &&
+                        !hooked(__NR_newfstatat, AT_FDCWD, (long)"/iso-probe", (long)&b, 0, 0, 0) &&
+                        a.st_ino == b.st_ino && a.st_dev == b.st_dev);
+}
+
 static void procs(void)
 {
     pid_t parent = getppid();
@@ -683,6 +700,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "procs")) procs();
     else if (!strcmp(op, "closerange")) closerange(p);
     else if (!strcmp(op, "channels")) channels(p);
+    else if (!strcmp(op, "selfexe")) selfexe();
     else {
         long rc = path_op(op, p, q);
         if (rc == -9999) return 2;

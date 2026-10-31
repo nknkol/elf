@@ -633,7 +633,15 @@ static int proc_link(void *opaque, char *out, const char *path,
     if (comparison != PATH1_IS_PREFIX) return FS_LINK_DEFAULT;
     const char *cursor = path + strlen("/proc/");
     long pid = 0;
-    if (*cursor < '1' || *cursor > '9') return FS_LINK_DEFAULT;
+    /* Uncanonicalized self names: the broker resolves them to the caller,
+     * so a walk through it never meets them as links. */
+    if (!strncmp(cursor, "self", 4) && (!cursor[4] || cursor[4] == '/')) {
+        pid = current_id(__NR_getpid);
+        cursor += 4;
+    } else if (!strncmp(cursor, "thread-self", 11) && (!cursor[11] || cursor[11] == '/')) {
+        pid = current_id(__NR_getpid);
+        cursor += 11;
+    } else if (*cursor < '1' || *cursor > '9') return FS_LINK_DEFAULT;
     while (*cursor >= '0' && *cursor <= '9') pid = pid * 10 + (*cursor++ - '0');
     if (*cursor == '/' && !strncmp(cursor, "/task/", 6)) {
         cursor += 6;

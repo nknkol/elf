@@ -293,6 +293,9 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
             expect('K', ('h', 'channels', '/rw/file'),
                      {'thread-errors': zero, 'after-vfork': zero,
                       'listed-fds': lambda x: x is not None and x >= 3, 'listed-payload-fds': zero})
+            # G: /proc/self/exe names the guest program (the kernel link names the loader).
+            expect('G', ('h', 'selfexe'), {'self-is-probe': lambda x: x == 1,
+                                           'thread-self-is-probe': lambda x: x == 1, 'same-file': lambda x: x == 1})
             # L: UNIX sockets.
             expect('L', ('h', 'bind', '/rw/sock'), {'bind': zero})
             expect('L', ('d', 'connect', f'{o}/sock'), {'connect': eperm})
