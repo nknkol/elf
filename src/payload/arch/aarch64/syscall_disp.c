@@ -7,8 +7,12 @@
 #include "config.h"
 #include "proot_bridge.h"
 #include "fake_ids.h"
+#include "host_syscall.h"
 #ifdef GUARDED
 #include "fd_runtime.h"
+#define DISPATCH(n, args) fd_runtime_dispatch(n, args)
+#else
+#define DISPATCH(n, args) dispatch_syscall(n, args)
 #endif
 
 typedef struct {
@@ -33,11 +37,13 @@ long syscall_dispatcher(long sys_no, pt_regs *regs)
     int named = sys_no == __NR_accept || sys_no == __NR_accept4 ||
         sys_no == __NR_getsockname || sys_no == __NR_getpeername;
     unsigned capacity = named && a[1] && a[2] ? *(unsigned *)a[2] : 0;
-#ifdef GUARDED
-    ret = fd_runtime_dispatch(sys_no, args);
-#else
-    ret = dispatch_syscall(sys_no, args);
-#endif
+    ret = DISPATCH(sys_no, args);
+    /* A batch holding only the payload's FDs is read again: zero means the
+     * end of the directory. */
+    while (sys_no == __NR_getdents64 && ret > 0 && !(ret = broker_hide_fds((int)a[0], (void *)a[1], ret))) {
+        long again[6] = {a[0], a[1], a[2], a[3], a[4], a[5]};
+        ret = DISPATCH(sys_no, again);
+    }
     if (!ret) fake_ids_stat_owner(sys_no, a);
     /* struct utsname: six 65-byte fields; sysname first, release third. */
     if (!ret && sys_no == __NR_uname && a[0]) {

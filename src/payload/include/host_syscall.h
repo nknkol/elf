@@ -16,4 +16,10 @@ void broker_strict(int on);
 int broker_link_report(char *path, char *target);
 /* Isolation mode: the guest cannot close or replace the payload's FDs. */
 int broker_fd_guard(long nr, const long a[6], long *result);
+/* After a clone returned result (clone_notify): a fork child drops its
+ * copies of the parent's channels, a vfork parent frees its child's slot. */
+void broker_clone_finish(unsigned long flags, long result);
+/* getdents64 result in buffer: the payload's FDs removed from procfs FD
+ * listings. The new length; 0 when the batch held nothing else. */
+long broker_hide_fds(int fd, void *buffer, long length);
 #endif

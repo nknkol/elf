@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include "clone_notify.h"
+#include "host_syscall.h"
 extern long raw_syscall(long, long, long, long, long, long, long);
 
 /* A pin prevents reuse while a reaper inspects immutable fields. Completing
@@ -36,6 +37,9 @@ __attribute__((weak)) void clone_observer_finish(const struct clone_event *event
 
 __attribute__((weak)) void clone_observer_cleanup(const struct clone_event *event, unsigned reasons)
 { (void)event; (void)reasons; }
+/* The broker client's channel table (isolation mode); absent in unit tests. */
+__attribute__((weak)) void broker_clone_finish(unsigned long flags, long result)
+{ (void)flags; (void)result; }
 
 static struct clone_pool *get_pool(void)
 {
@@ -218,6 +222,7 @@ struct clone_return clone_notify_finish(void *transaction, long result)
         __atomic_compare_exchange_n(&t->child_tid, &unknown, child, 0,
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
+    broker_clone_finish(t->event.flags, result);
     clone_observer_finish(&t->event, result);
     release(t, result < 0 ? PARENT_DONE | CHILD_DONE :
                result ? PARENT_DONE : CHILD_DONE, 0);

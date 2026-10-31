@@ -86,3 +86,11 @@ Ubuntu rootfs，每项在常规与 `--isolate` 下各跑一次（`--runs 1`）�
 close_range 返回 ENOSYS，glibc 退回逐个关闭：列 /proc/self/fd，每轮只要关过 FD 就从头重读。保留 FD close 时假装
 成功但仍然打开，所以每轮都“关”它们，循环不会结束。现在 close_range 由 payload 代办并返回成功。新增验收 K
 closerange：close_range(3, ~0) 成功，普通 FD 已关闭，之后路径调用仍然可用。两种构建共 117 项通过。
+
+### 缺陷 3：线程通道槽位不回收（已修复）
+
+排查缺陷 2 时发现：每个线程的通道槽位（64 个）在线程退出后一直占着，进程累计创建第 64 个线程起，所有路径调用
+都返回 EACCES（Python 先后起 100 个线程即可复现）。另外 vfork 子进程会清掉共享内存里父进程的槽位（父进程之后
+重开通道，碰巧可用）。现在槽位用满时回收已退出线程的槽位，fork/vfork 由 clone 通知处理；procfs FD 列表不再显示
+保留 FD。新增验收 K channels：200 个先后创建的线程全部成功、vfork 子进程用过 broker 后父进程仍可用、
+/proc/self/fd 列表中没有保留 FD。两种构建共 119 项通过；四套回归在常规与 `--isolate` 下均通过。

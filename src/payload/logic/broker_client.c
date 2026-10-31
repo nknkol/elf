@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Isolation mode, payload side: host path syscalls become broker requests
  * (broker_proto.h). Every thread has its own channel to the broker, made on
- * first use and handed over through the inherited control socket; a forked
- * child notices the channel is its parent's and makes its own. */
+ * first use and handed over through the inherited control socket. A forked
+ * child drops its copies of its parent's channels (broker_clone_finish); a
+ * vfork child shares the table and takes a slot of its own. */
 #include <asm/unistd.h>
 #include <errno.h>
 #include <stddef.h>
@@ -83,6 +84,35 @@ static int open_channel(void)
     return (int)high;
 }
 
+static void release_slot(struct channel *c)
+{
+    c->tid = c->pid = 0;
+    c->fd = 0;
+}
+
+/* Under the lock, every slot taken: the slots of threads that have exited
+ * (their FDs are in this process's table and close here) and of processes
+ * that shared this memory and are gone (their FDs were in their own table). */
+static struct channel *reclaim(long pid)
+{
+    struct channel *found = 0;
+    for (int i = 0; i < CHANNELS; i++) {
+        struct channel *c = &channels[i];
+        if (c->fd <= 0) /* being opened */
+            continue;
+        if (c->pid == pid) {
+            if (raw_syscall(__NR_tgkill, pid, c->tid, 0, 0, 0, 0) != -ESRCH)
+                continue;
+            raw_syscall(__NR_close, c->fd, 0, 0, 0, 0, 0);
+        } else if (raw_syscall(__NR_kill, c->pid, 0, 0, 0, 0, 0) != -ESRCH)
+            continue;
+        release_slot(c);
+        if (!found)
+            found = c;
+    }
+    return found;
+}
+
 static struct channel *channel(void)
 {
     long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
@@ -95,16 +125,11 @@ static struct channel *channel(void)
             unlock();
             return c;
         }
-        /* Another process's entry (fork copied it): its FD is a copy of a
-         * channel this process must not use. */
-        if (c->pid && c->pid != pid && c->fd > 0) {
-            raw_syscall(__NR_close, c->fd, 0, 0, 0, 0, 0);
-            c->tid = c->pid = 0;
-            c->fd = 0;
-        }
         if (!c->tid && !free_slot)
             free_slot = c;
     }
+    if (!free_slot)
+        free_slot = reclaim(pid);
     if (free_slot) {
         free_slot->tid = tid;
         free_slot->pid = pid;
@@ -453,6 +478,60 @@ int broker_fd_guard(long nr, const long a[6], long *result)
     default:
         return 0;
     }
+}
+
+void broker_clone_finish(unsigned long flags, long result)
+{
+    if (!g_payload_config.isolate || result < 0)
+        return;
+    if (!result && !(flags & 0x100 /* CLONE_VM */)) {
+        /* A private copy: the FDs are copies of the parent's channels, and
+         * a lock another thread held is copied held. Buffers stay. */
+        for (int i = 0; i < CHANNELS; i++) {
+            if (channels[i].fd > 0)
+                raw_syscall(__NR_close, channels[i].fd, 0, 0, 0, 0, 0);
+            release_slot(&channels[i]);
+        }
+        unlock();
+    } else if (result && (flags & 0x4000 /* CLONE_VFORK */)) {
+        /* The child has exec'd or exited: its slot is free, its FD was in
+         * its own table. */
+        lock();
+        for (int i = 0; i < CHANNELS; i++)
+            if (channels[i].pid == result)
+                release_slot(&channels[i]);
+        unlock();
+    }
+}
+
+/* A procfs listing of FDs (fd: links, fdinfo: files) without the payload's
+ * own: glibc's closefrom fallback and FD-walking tools see only the guest's. */
+long broker_hide_fds(int fd, void *buffer, long length)
+{
+    if (!g_payload_config.isolate)
+        return length;
+    unsigned long fs[16]; /* struct statfs; f_type first */
+    if (raw_syscall(__NR_fstatfs, fd, (long)fs, 0, 0, 0, 0) || (unsigned)fs[0] != 0x9fa0 /* PROC_SUPER_MAGIC */)
+        return length;
+    unsigned char *bytes = buffer;
+    long kept = 0;
+    for (long at = 0; at < length;) {
+        unsigned short size; /* ino, offset, reclen, type, name */
+        memcpy(&size, bytes + at + 16, sizeof(size));
+        if (size < 20 || at + size > length)
+            return length;
+        unsigned char type = bytes[at + 18];
+        const char *name = (const char *)bytes + at + 19;
+        long number = *name ? 0 : -1;
+        for (const char *p = name; *p && number >= 0; p++)
+            number = *p >= '0' && *p <= '9' && number < 1 << 20 ? number * 10 + (*p - '0') : -1;
+        if (!((type == 10 /* DT_LNK */ || type == 8 /* DT_REG */) && reserved(number))) {
+            memmove(bytes + kept, bytes + at, size);
+            kept += size;
+        }
+        at += size;
+    }
+    return kept;
 }
 
 void broker_strict(int on)

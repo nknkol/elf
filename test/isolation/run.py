@@ -290,6 +290,9 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
             # K: closing every FD (closefrom) keeps the broker reachable.
             expect('K', ('h', 'closerange', '/rw/file'),
                      {'close_range': zero, 'closed': lambda x: x == 1, 'after-open': zero})
+            expect('K', ('h', 'channels', '/rw/file'),
+                     {'thread-errors': zero, 'after-vfork': zero,
+                      'listed-fds': lambda x: x is not None and x >= 3, 'listed-payload-fds': zero})
             # L: UNIX sockets.
             expect('L', ('h', 'bind', '/rw/sock'), {'bind': zero})
             expect('L', ('d', 'connect', f'{o}/sock'), {'connect': eperm})

@@ -20,6 +20,7 @@
  *   probe h   procs                  other processes' memory and FDs */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -518,6 +519,51 @@ static void closerange(const char *path)
     report("after-open", c < 0 ? c : 0);
 }
 
+/* Threads that come and go, each with its own channel: far more of them
+ * than there are channel slots. */
+static void *thread_stat(void *path)
+{
+    struct stat st;
+    return (void *)hooked(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, 0, 0, 0);
+}
+
+static void channels(const char *path)
+{
+    long errors = 0;
+    for (int i = 0; i < 200; i++) {
+        pthread_t t;
+        void *rc = (void *)-1;
+        if (pthread_create(&t, 0, thread_stat, (void *)path) || pthread_join(t, &rc) || rc)
+            errors++;
+    }
+    report("thread-errors", errors);
+    /* A vfork child's channel leaves the parent's alone. */
+    pid_t pid = vfork();
+    if (!pid) {
+        struct stat st;
+        hooked(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, 0, 0, 0);
+        _exit(0);
+    }
+    waitpid(pid, 0, 0);
+    struct stat st;
+    report("after-vfork", hooked(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, 0, 0, 0));
+    /* The listing holds the guest's FDs only. */
+    long dir = hooked(__NR_openat, AT_FDCWD, (long)"/proc/self/fd", O_RDONLY | O_DIRECTORY, 0, 0, 0);
+    long payload = 0, total = 0;
+    char buf[512];
+    long n;
+    while (dir >= 0 && (n = hooked(__NR_getdents64, dir, (long)buf, sizeof(buf), 0, 0, 0)) > 0)
+        for (long at = 0; at < n; at += *(unsigned short *)(buf + at + 16)) {
+            const char *name = buf + at + 19;
+            if (*name == '.')
+                continue;
+            total++;
+            payload += atoi(name) >= 898;
+        }
+    report("listed-fds", dir < 0 ? dir : total);
+    report("listed-payload-fds", payload);
+}
+
 static void procs(void)
 {
     pid_t parent = getppid();
@@ -573,6 +619,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "rtt")) rtt(p, q);
     else if (!strcmp(op, "procs")) procs();
     else if (!strcmp(op, "closerange")) closerange(p);
+    else if (!strcmp(op, "channels")) channels(p);
     else {
         long rc = path_op(op, p, q);
         if (rc == -9999) return 2;

@@ -422,6 +422,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 最后加入 guarded 列目录缓存后重跑：check、Alpine、Ubuntu 与验收不变；check-guarded 的 vfork 用例在设备上以 128 失败
 （负载均值约 20），已推送的 d3ccff7 在同一时间同样失败，未归因于本次改动，待设备空闲后复测。
 2026-10-31 隔离模式下 Python venv 卡住：Python 3.14 的 subprocess 走 glibc posix_spawn + closefrom(3)。glibc 先试 close_range，payload 原先返回 ENOSYS，glibc 退回逐个关闭：列 /proc/self/fd，每轮关过 FD 就回到开头重读。保留 FD （898–900）close 假装成功但仍在，于是 vfork 子进程永远循环。现在 close_range 由 payload 代办（跳过保留 FD，HarmonyOS 上经 broker 列 /proc/self/fd，guarded 构建逐个经 FD 运行时关闭以保持记录）。验收新增 K closerange （117 项通过）；check、check-guarded 在常规与 `--isolate` 下通过，check-guarded 的 vfork 用例也已通过；实际工作负载（goal N，`test/isolation/workloads.py`）两种构建在 `--isolate` 下输出与常规一致（[结果](ISOLATION_RESULTS.md)）。
+2026-10-31 隔离模式通道槽位：每个线程的 broker 通道槽位（64 个）在线程退出后从不回收，进程累计创建第 64 个线程起所有路径调用返回 EACCES；现在槽位用满时回收已退出线程的槽位。vfork 子进程原先会在共享内存里清掉父进程的槽位，现在改由 clone 通知处理（fork 子进程关掉继承的通道，vfork 父进程在返回后释放子进程的槽位）。procfs FD 列表不再显示保留 FD 898–900。验收新增 K channels（200 个先后创建的线程、vfork 之后、/proc/self/fd 列表），119 项通过；四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18），实际工作负载输出一致。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -453,7 +454,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 | `make check-guarded` | 171 项通过 | FD 运行时、修改保护、默认拒绝读取、socket 与 transport |
 | `make check-alpine` / `make check-ubuntu` | 各 18/18 | 离线 rootfs 验收；Ubuntu 归档硬链接按副本展开 |
 | 以上四套加 `ELF_LOADER_OPTIONS=--isolate` | 同上 | 只作用于经 `test/lib.py` 启动 loader 的测试 |
-| `make check-isolation` | 117 项通过 | 隔离验收目标 A–L，两种构建 |
+| `make check-isolation` | 119 项通过 | 隔离验收目标 A–L，两种构建 |
 | `make bench` | 只记录 | 原生与各配置的微基准（[BENCHMARKS](BENCHMARKS.md)） |
 
 宿主原生创建硬链接被拒绝的 fixture 记为 SKIP，不算成功；ENOSYS 不算功能实现。
@@ -465,7 +466,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
    往返本身的成本（共享内存通道等）。
 2. **隔离验收未覆盖**：大小写别名（需大小写不敏感的存储）；apt 安装在 `--isolate` 下的对比
    （gcc/make、git、venv+pip、node 已覆盖，见 ISOLATION_RESULTS.md）。
-3. **隔离模式的兼容代价**：保留 FD 898–900 出现在 guest 的 /proc/self/fd 列表里；不能创建数据报 UNIX 套接字
+3. **隔离模式的兼容代价**：不能创建数据报 UNIX 套接字
    （如 syslog）；sendto/sendmsg 带 UNIX 路径名返回 EPERM。
 4. **剩余风险**（ISOLATION.md）：内核漏洞、资源耗尽、侧信道、同 uid 的信号/网络/系统服务、`execveat`
    带非空路径、宿主已有的跨区硬链接、继承的数据报 UNIX 套接字。
