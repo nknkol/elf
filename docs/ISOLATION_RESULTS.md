@@ -61,3 +61,28 @@ TMPDIR 内）的伪造 openat 返回了 FD 并读出哨兵内容。修复：glue
 性能改动过程中发现：broker 逐级走查时用 `openat(O_PATH|O_DIRECTORY|O_NOFOLLOW)` 打开中间分量，本平台在 broker
 进程中对符号链接返回了成功（打开的是链接本身，之后的查找以 ENOTDIR 失败，因此是失败即关闭，未越界）。
 broker 现在先 lstat 判断类型、打开后核对 dev/ino。此前 payload 总是先自己解析符号链接，broker 很少走到这条路径。
+
+## 2026-10-31，第三轮（实际工作负载，目标 N）
+
+`python3 test/isolation/workloads.py /data/storage/el2/base/files/apt-root [--loader elfloader-guarded]`：
+Ubuntu rootfs，每项在常规与 `--isolate` 下各跑一次（`--runs 1`），只写绑定的 /w。
+
+| 工作负载 | elfloader 常规 s | `--isolate` s | 比值 | elfloader-guarded 常规 s | `--isolate` s | 比值 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| gcc+make（9 个文件，-j4） | 0.83 | 0.96 | 1.16 | 0.78 | 0.97 | 1.25 |
+| git init/add/commit/log | 0.80 | 1.03 | 1.29 | 0.68 | 0.99 | 1.44 |
+| python 标准库导入 | 0.25 | 0.25 | 0.98 | 0.20 | 0.28 | 1.39 |
+| python venv + pip list | 4.31 | 4.77 | 1.11 | 4.08 | 4.72 | 1.16 |
+| node + npm | 1.78 | 1.97 | 1.10 | 1.41 | 1.92 | 1.36 |
+| tar czf /usr/include | 1.14 | 1.55 | 1.36 | 0.94 | 1.42 | 1.51 |
+| find（python 库） | 0.11 | 0.12 | 1.09 | 0.09 | 0.14 | 1.52 |
+| dpkg-query | 0.05 | 0.07 | 1.36 | 0.06 | 0.10 | 1.68 |
+
+所有输出与常规模式一致。设备负载均值约 20，单次计时只作量级参考。
+
+### 缺陷 2：posix_spawn/closefrom 在隔离模式下永远循环（已修复）
+
+`python3 -m venv`（ensurepip 启动子进程）卡住。Python 3.14 用 glibc posix_spawn 加 closefrom(3)；payload 对
+close_range 返回 ENOSYS，glibc 退回逐个关闭：列 /proc/self/fd，每轮只要关过 FD 就从头重读。保留 FD close 时假装
+成功但仍然打开，所以每轮都“关”它们，循环不会结束。现在 close_range 由 payload 代办并返回成功。新增验收 K
+closerange：close_range(3, ~0) 成功，普通 FD 已关闭，之后路径调用仍然可用。两种构建共 117 项通过。

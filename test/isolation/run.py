@@ -287,6 +287,9 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
                         'fchmod': neg, 'fchown': neg, 'futimens': neg, 'fsetxattr': neg,
                         'ftruncate': neg, 'write': neg, 'fstat': zero, 'statx-fd': zero,
                         'd-fchmod': eperm, 'd-futimens': eperm, 'd-fsetxattr': eperm})
+            # K: closing every FD (closefrom) keeps the broker reachable.
+            expect('K', ('h', 'closerange', '/rw/file'),
+                     {'close_range': zero, 'closed': lambda x: x == 1, 'after-open': zero})
             # L: UNIX sockets.
             expect('L', ('h', 'bind', '/rw/sock'), {'bind': zero})
             expect('L', ('d', 'connect', f'{o}/sock'), {'connect': eperm})

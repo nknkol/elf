@@ -97,7 +97,7 @@ payload 的 exec（proot_exec）：
   `proot-glue-*` 名下的内容（可写），基目录本身与其中其他名字一律不可达。最初整棵 TMPDIR 都是可写树，
   伪造请求可以读写其中任意文件，这是验收时发现的缺陷（见 ISOLATION_RESULTS.md）。
 - **保留 FD**：控制套接字、loader FD 与各线程通道不允许被 guest 破坏：close 假装成功，作为 dup3 目标返回
-  EBUSY，F_SETFD/FIOCLEX 被忽略；close_range 返回 ENOSYS（调用者退回逐个关闭）。
+  EBUSY，F_SETFD/FIOCLEX 被忽略；close_range 由 payload 代办：跳过保留 FD、其余照常关闭（或设 close-on-exec）并返回成功。HarmonyOS 不提供该调用，打开的 FD 从 broker 打开的 /proc/self/fd 列出。不能返回 ENOSYS：glibc 的 closefrom 退回路径每轮关过 FD 就从头重读 /proc/self/fd，假装关闭成功的保留 FD 会让它永远循环（posix_spawn、Python subprocess 因此卡住）。
 - **过滤器补充**（相对上表）：bind、connect、acct、swapon/swapoff、quotactl、process_madvise 也被拒绝；
   `prlimit64` 只允许 pid 0（payload 把自身 pid 改写为 0）。
 

@@ -505,6 +505,19 @@ static void cutoff(const char *path)
     after_broker_gone(path);
 }
 
+/* closefrom as glibc does it first: close_range succeeds, ordinary FDs
+ * close, the payload's own stay (a path call still works). */
+static void closerange(const char *path)
+{
+    long a = hooked(__NR_openat, AT_FDCWD, (long)path, O_RDONLY, 0, 0, 0);
+    long b = hooked(__NR_dup, a, 0, 0, 0, 0, 0);
+    report("close_range", hooked(__NR_close_range, 3, ~0u, 0, 0, 0, 0));
+    report("closed", a >= 3 && b >= 3 && hooked(__NR_fcntl, a, F_GETFD, 0, 0, 0, 0) == -EBADF &&
+                     hooked(__NR_fcntl, b, F_GETFD, 0, 0, 0, 0) == -EBADF);
+    long c = hooked(__NR_openat, AT_FDCWD, (long)path, O_RDONLY, 0, 0, 0);
+    report("after-open", c < 0 ? c : 0);
+}
+
 static void procs(void)
 {
     pid_t parent = getppid();
@@ -559,6 +572,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "cutoff")) cutoff(p);
     else if (!strcmp(op, "rtt")) rtt(p, q);
     else if (!strcmp(op, "procs")) procs();
+    else if (!strcmp(op, "closerange")) closerange(p);
     else {
         long rc = path_op(op, p, q);
         if (rc == -9999) return 2;

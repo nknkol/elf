@@ -421,6 +421,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 验收增加目录链接（树内、指向树外）用例，共 115 项通过，四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18）。
 最后加入 guarded 列目录缓存后重跑：check、Alpine、Ubuntu 与验收不变；check-guarded 的 vfork 用例在设备上以 128 失败
 （负载均值约 20），已推送的 d3ccff7 在同一时间同样失败，未归因于本次改动，待设备空闲后复测。
+2026-10-31 隔离模式下 Python venv 卡住：Python 3.14 的 subprocess 走 glibc posix_spawn + closefrom(3)。glibc 先试 close_range，payload 原先返回 ENOSYS，glibc 退回逐个关闭：列 /proc/self/fd，每轮关过 FD 就回到开头重读。保留 FD （898–900）close 假装成功但仍在，于是 vfork 子进程永远循环。现在 close_range 由 payload 代办（跳过保留 FD，HarmonyOS 上经 broker 列 /proc/self/fd，guarded 构建逐个经 FD 运行时关闭以保持记录）。验收新增 K closerange （117 项通过）；check、check-guarded 在常规与 `--isolate` 下通过，check-guarded 的 vfork 用例也已通过；实际工作负载（goal N，`test/isolation/workloads.py`）两种构建在 `--isolate` 下输出与常规一致（[结果](ISOLATION_RESULTS.md)）。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -452,7 +453,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 | `make check-guarded` | 171 项通过 | FD 运行时、修改保护、默认拒绝读取、socket 与 transport |
 | `make check-alpine` / `make check-ubuntu` | 各 18/18 | 离线 rootfs 验收；Ubuntu 归档硬链接按副本展开 |
 | 以上四套加 `ELF_LOADER_OPTIONS=--isolate` | 同上 | 只作用于经 `test/lib.py` 启动 loader 的测试 |
-| `make check-isolation` | 115 项通过 | 隔离验收目标 A–L，两种构建 |
+| `make check-isolation` | 117 项通过 | 隔离验收目标 A–L，两种构建 |
 | `make bench` | 只记录 | 原生与各配置的微基准（[BENCHMARKS](BENCHMARKS.md)） |
 
 宿主原生创建硬链接被拒绝的 fixture 记为 SKIP，不算成功；ENOSYS 不算功能实现。
@@ -462,19 +463,18 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 1. **隔离模式性能**（第三阶段第一轮已完成）：乐观解析后每个路径调用通常一次进程间往返
    （HongMeng 上约 20–40 µs，带回 FD 再多约 17 µs），exec 3 次；见 BENCHMARKS.md。再降只能减少
    往返本身的成本（共享内存通道等）。
-2. **隔离验收未覆盖**：大小写别名（需大小写不敏感的存储）；实际工作负载（apt、gcc/make、git、pip、node）
-   在 `--isolate` 下的完整对比与耗时。
-3. **隔离模式的兼容代价**：`close_range` 返回 ENOSYS（调用者退回逐个关闭）；不能创建数据报 UNIX 套接字
+2. **隔离验收未覆盖**：大小写别名（需大小写不敏感的存储）；apt 安装在 `--isolate` 下的对比
+   （gcc/make、git、venv+pip、node 已覆盖，见 ISOLATION_RESULTS.md）。
+3. **隔离模式的兼容代价**：保留 FD 898–900 出现在 guest 的 /proc/self/fd 列表里；不能创建数据报 UNIX 套接字
    （如 syslog）；sendto/sendmsg 带 UNIX 路径名返回 EPERM。
 4. **剩余风险**（ISOLATION.md）：内核漏洞、资源耗尽、侧信道、同 uid 的信号/网络/系统服务、`execveat`
    带非空路径、宿主已有的跨区硬链接、继承的数据报 UNIX 套接字。
 5. **进程内模式的来源与竞争**：未知 cwd/目录 FD 的来源仍为 UNKNOWN，首个目标的 PT_INTERP 不经读策略，
    非保护模式的路径竞争与 PRoot 相同。隔离模式下这些由 broker 兜底；进程内模式不再作为边界追求。
-6. **FD 与线程语义**：通用 clone 与共享 VM/FD 的组合、`close_range` 的真正实现、更多带 FD 的 ioctl 与辅助消息。
+6. **FD 与线程语义**：通用 clone 与共享 VM/FD 的组合、更多带 FD 的 ioctl 与辅助消息。
 7. **应用兼容**：联网的包管理器安装、实际 agent/brew 工具链、端到端基准。
 
 ## 下一步顺序
 
-1. 实际工作负载在 `--isolate` 下的对比与耗时（同时作为性能基准），补入 ISOLATION_RESULTS.md。
-2. 大小写别名的隔离验收。
-3. 按实际 agent 工作流评估第 3 项兼容代价，必要时由 broker 代办。
+1. 大小写别名的隔离验收。
+2. 按实际 agent 工作流评估第 3 项兼容代价，必要时由 broker 代办。

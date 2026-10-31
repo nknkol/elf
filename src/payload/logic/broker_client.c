@@ -11,6 +11,10 @@
 #include "broker_proto.h"
 #include "config.h"
 #include "host_syscall.h"
+#include "platform.h"
+#ifdef GUARDED
+#include "fd_runtime.h"
+#endif
 
 extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6);
 
@@ -311,6 +315,113 @@ static int reserved(long fd)
     return 0;
 }
 
+#define CLOSE_RANGE_UNSHARE_ 2u
+#define CLOSE_RANGE_CLOEXEC_ 4u
+
+static void close_unreserved(unsigned long fd, unsigned flags)
+{
+    if (reserved((long)fd))
+        return;
+    long nr = flags & CLOSE_RANGE_CLOEXEC_ ? __NR_fcntl : __NR_close;
+    long a[6] = {(long)fd, 2 /* F_SETFD */, 1 /* FD_CLOEXEC */, 0, 0, 0};
+#ifdef GUARDED
+    fd_runtime_dispatch(nr, a); /* The FD runtime keeps its records. */
+#else
+    raw_syscall(nr, a[0], a[1], a[2], 0, 0, 0);
+#endif
+}
+
+#ifndef GUARDED
+/* The kernel call on the stretches between the reserved FDs. */
+static long close_range_between(unsigned first, unsigned last, unsigned flags)
+{
+    int held[CHANNELS + 2], count = 0;
+    held[count++] = g_payload_config.isolate_fd;
+    held[count++] = g_payload_config.loader_fd;
+    for (int i = 0; i < CHANNELS; i++) {
+        int fd = __atomic_load_n(&channels[i].fd, __ATOMIC_RELAXED);
+        if (fd > 0)
+            held[count++] = fd;
+    }
+    for (int i = 1; i < count; i++)
+        for (int j = i; j > 0 && held[j - 1] > held[j]; j--) {
+            int t = held[j];
+            held[j] = held[j - 1];
+            held[j - 1] = t;
+        }
+    unsigned long from = first;
+    for (int i = 0; i < count && from <= last; i++) {
+        if (held[i] < 0 || (unsigned long)held[i] < from)
+            continue;
+        if ((unsigned long)held[i] > from) {
+            unsigned long to = (unsigned long)held[i] - 1 < last ? (unsigned long)held[i] - 1 : last;
+            long rc = raw_syscall(__NR_close_range, (long)from, (long)to, flags, 0, 0, 0);
+            if (rc < 0)
+                return rc;
+        }
+        from = (unsigned long)held[i] + 1;
+    }
+    return from <= last ? raw_syscall(__NR_close_range, (long)from, (long)last, flags, 0, 0, 0) : 0;
+}
+#endif
+
+/* Without the kernel call (HarmonyOS refuses it): the open FDs from a
+ * /proc/self/fd listing, which the broker opens for this process; failing
+ * that, every number below the FD limit. */
+static long close_range_listed(unsigned first, unsigned last, unsigned flags)
+{
+    long dir = host_syscall(__NR_openat, AT_FDCWD, (long)"/proc/self/fd",
+                            00 | 040000 /* O_DIRECTORY */ | O_CLOEXEC_, 0, 0, 0);
+    if (dir < 0) {
+        unsigned long limit[2];
+        if (raw_syscall(__NR_prlimit64, 0, 7 /* RLIMIT_NOFILE */, 0, (long)limit, 0, 0) < 0)
+            limit[0] = 1024;
+        unsigned long end = limit[0] > 1ul << 20 ? 1ul << 20 : limit[0];
+        for (unsigned long fd = first; fd <= last && fd < end; fd++)
+            close_unreserved(fd, flags);
+        return 0;
+    }
+    char buffer[1024];
+    long n;
+    while ((n = raw_syscall(__NR_getdents64, dir, (long)buffer, sizeof(buffer), 0, 0, 0)) > 0)
+        for (long at = 0; at < n;) {
+            unsigned short length; /* ino, offset, reclen, type, name */
+            memcpy(&length, buffer + at + 16, sizeof(length));
+            const char *name = buffer + at + 19;
+            at += length;
+            if (*name < '0' || *name > '9')
+                continue;
+            unsigned long fd = 0;
+            for (; *name >= '0' && *name <= '9'; name++)
+                fd = fd * 10 + (unsigned long)(*name - '0');
+            if (fd >= first && fd <= last && fd != (unsigned long)dir)
+                close_unreserved(fd, flags);
+        }
+    raw_syscall(__NR_close, dir, 0, 0, 0, 0, 0);
+    return n < 0 ? n : 0;
+}
+
+/* close_range that leaves the reserved FDs alone and still succeeds:
+ * glibc's closefrom fallback (posix_spawn, Python's subprocess) rereads
+ * /proc/self/fd from the start after every pass that closed something, so
+ * an FD that stays open while close reports success would loop it forever. */
+static long close_range_unreserved(unsigned first, unsigned last, unsigned flags)
+{
+    if (first > last || (flags & ~(CLOSE_RANGE_UNSHARE_ | CLOSE_RANGE_CLOEXEC_)))
+        return -EINVAL;
+#ifndef GUARDED
+    if (!platform_is_harmonyos()) {
+        long rc = close_range_between(first, last, flags);
+        if (rc != -ENOSYS)
+            return rc;
+    }
+#endif
+    /* Unsharing the table needs the kernel call. */
+    if (flags & CLOSE_RANGE_UNSHARE_)
+        return -ENOSYS;
+    return close_range_listed(first, last, flags);
+}
+
 int broker_fd_guard(long nr, const long a[6], long *result)
 {
     if (!g_payload_config.isolate)
@@ -337,8 +448,7 @@ int broker_fd_guard(long nr, const long a[6], long *result)
         *result = 0;
         return 1;
     case __NR_close_range:
-        /* Callers fall back to closing one by one. */
-        *result = -ENOSYS;
+        *result = close_range_unreserved((unsigned)a[0], (unsigned)a[1], (unsigned)a[2]);
         return 1;
     default:
         return 0;
