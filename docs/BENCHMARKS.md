@@ -87,3 +87,56 @@ changes) and two lookup savings:
   path is resolved again in guest terms. Any failure of the shortened
   resolution, policy refusals included, is also resolved again with the full
   lookup, so decisions never depend on an unfollowed final symlink.
+
+## HarmonyOS, 2026-10-31: isolation mode (`--isolate`)
+
+Two more configurations: `isolate` (default build) and `isolate-g`
+(guarded build, `--guard-file-access dw`), both with the broker and the
+guest filter. Same device and method; the device was slower and noisier
+this day (native `stat` 9.8-12 us, single runs vary by up to 50%).
+
+Before this round, isolation cost `stat` 105 us, `open_close` 85 us and
+guarded `readdir_64` 243-367 us. After:
+
+| case | native | default | guarded | isolate | isolate-g |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| getpid | 209 | 296 | 281 | 268 | 327 |
+| fstat | 784 | 1311 | 1578 | 1380 | 1599 |
+| stat | 9809 | 24672 | 35900 | 66564 | 61421 |
+| open_close | 17250 | 31793 | 40489 | 91886 | 92510 |
+| pread_4k | 923 | 1477 | 1769 | 1897 | 2000 |
+| pwrite_4k | 1775 | 2312 | 2605 | 2337 | 2584 |
+| readdir_64 | 80982 | 85430 | 122634 | 163080 | 176979 |
+| mmap_64k | 1760 | 2697 | 3618 | 2820 | 3775 |
+
+(An earlier run the same day measured `stat` at 45 us for both isolated
+configurations.) Calls that name no path (fstat, IO, mmap) cost the same as
+without the broker.
+
+Where the time goes (`test/isolation/probe.c` mode `rtt`, ns per op):
+a SEQPACKET ping-pong between two processes without the broker costs
+15-26 us on HongMeng, 35 us when an FD comes back (SCM_RIGHTS); an empty
+broker request 22-37 us, a broker lstat 34-44 us, a broker open 43 us. The
+broker's own path walk is a few microseconds: a path call costs about one
+process round trip, so the work was to need fewer of them.
+
+- Optimistic resolution: the payload maps a guest path lexically, without
+  asking the broker about each component, and sends the final call with
+  BROKER_STRICT; the broker refuses with ELOOP if any symlink is on the
+  way (a final one too when the call follows it) and reports which one
+  and its target. The call then runs again with that symlink known, still
+  optimistically, so each symlink costs one more round trip instead of a
+  full lookup per component. Paths with "..", /proc, ancestors of nested
+  bind mount points and link targets with a ".." after a name are resolved
+  fully. A guest `stat` went from three requests to one.
+- The copy of a reused stat result used process_vm_writev on ourselves,
+  which the guest filter refuses; that cost a second stat through the
+  broker. Optimistic resolution no longer needs the reuse.
+- Exec opens the program, script interpreters and PT_INTERP with the same
+  optimistic resolve-and-open (one request each); the execute permission
+  is checked from fstat instead of access(X_OK). A busybox applet exec
+  went from 12 requests to 3.
+- The owners fake_id0 reports as root are looked up once by the initial
+  loader and passed to every child (two lookups per process before).
+- Guarded listings keep the guest name of an open directory per FD while
+  its dev/ino is unchanged (every getdents call named it again).

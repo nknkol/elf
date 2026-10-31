@@ -411,78 +411,70 @@ UNIX 套接字由 broker 创建、bind/connect 由 broker 在目标目录内完�
 2026-10-31 隔离模式验收第一轮（[结果](ISOLATION_RESULTS.md)，`make check-isolation`）：在设备上按目标 A–L 两种构建各跑一遍，
 发现一处缺陷并修复：broker 把整棵 glue 基目录（宿主 TMPDIR）当作可写树，伪造请求可读其中任意文件；现只开放
 `proot-glue-*`。修复后 107 项全部通过，四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18）。
+2026-10-31 隔离模式第三阶段（性能）第一轮：每个路径调用的成本主要是一次进程间往返（HongMeng 上 20–40 µs），
+broker 自身的路径解析只有几微秒，所以目标是减少往返次数。乐观解析：payload 按字面映射 guest 路径、不逐级询问
+broker，最终调用带 BROKER_STRICT；路径上有符号链接时 broker 拒绝（ELOOP）并报告是哪个链接与其目标，payload 带着它
+重试，每个链接只多一次往返。exec 的程序、脚本解释器、PT_INTERP 同样乐观打开，执行权限按 fstat 本地判断；fake_id0 的
+属主由初始 loader 一次查好传给子进程；guarded 列目录按 FD 缓存目录名。guest stat 105→约 45–65 µs，busybox applet 的
+exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARKS.md)）。期间发现并修正 broker 的一个问题：在本平台上
+`openat(O_PATH|O_DIRECTORY|O_NOFOLLOW)` 打开了符号链接本身而未报错，broker 现在先 lstat 判断类型、打开后核对 dev/ino；
+验收增加目录链接（树内、指向树外）用例，共 115 项通过，四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18）。
+最后加入 guarded 列目录缓存后重跑：check、Alpine、Ubuntu 与验收不变；check-guarded 的 vfork 用例在设备上以 128 失败
+（负载均值约 20），已推送的 d3ccff7 在同一时间同样失败，未归因于本次改动，待设备空闲后复测。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
 
-**已可运行受限的 Linux rootfs 工作流；尚未具备 agent 文件访问隔离。**
-主要缺口是挂载/FD 权限来源与执行策略，而不是文件内容的用户态实现。
-路径映射、元数据与策略应保持轻量，内容读写、偏移和实际 FD 仍交给内核。
+**当前结论（2026-10-31）：可运行受限的 Linux rootfs 工作流；隔离模式（`--isolate`）提供 agent 文件访问边界。**
+进程内拦截（默认与 guarded 构建不加 `--isolate`）是 PRoot 语义与策略的兼容层，guest 与 payload 同处一个
+地址空间，对恶意代码不是边界。边界由 broker 进程与 guest 过滤器构成（[设计](ISOLATION.md)，
+[验收](ISOLATION_TESTING.md)，[结果](ISOLATION_RESULTS.md)）。路径映射、元数据与策略保持轻量，
+内容读写、偏移和实际 FD 仍交给内核。
 
-## 两个构建的区别
+## 构建与模式
 
-| 能力 | 默认 `elfloader-proot` | `elfloader-proot-fd-experiment` |
+| 能力 | `build/elfloader` | `build/elfloader-guarded` | 加 `--isolate`（两种构建） |
+| --- | --- | --- | --- |
+| root/bind、路径翻译、动态 ELF/exec、fake_id0 | 有 | 有 | 有（宿主路径调用由 broker 执行） |
+| FD 元数据与来源标签 | 无 | 常用创建/dup/关闭、CLOEXEC、SCM_RIGHTS；最多 128 条 | 同所选构建 |
+| 只读/隐藏策略（`--guard-*` 向量） | 无（全部可写） | 进程内执行 | broker 按树执行，payload 被篡改也不变 |
+| 绕过 payload 的直接系统调用 | 到达宿主 | 到达宿主（`--seccomp-backstop` 改为交给 payload） | guest 过滤器 EPERM |
+| 典型路径调用开销（stat） | 约 2.5× 原生 | 约 3.5× 原生 | 约 5–6×（每次一个进程往返，见 BENCHMARKS） |
+
+`make build` 生成两个二进制及各自 manifest（`build/elfloader[-guarded].json`）；测试拒绝不是最后一次
+构建的二进制。两种构建共用中间产物，不能并发编译。
+
+## 测试入口（2026-10-31，HarmonyOS 真机）
+
+| 入口 | 结果 | 范围 |
 | --- | --- | --- |
-| root/bind、路径翻译、动态 ELF/exec | 已接入并有回归 | 已接入并有回归 |
-| FD 元数据 | 未启用 | 常用创建/dup/关闭、CLOEXEC、SCM_RIGHTS 已接入；最多 128 条 |
-| fork/vfork/exec 的 FD 状态 | 不跟踪 FD 元数据 | 私有 fork、单层受限 vfork、exec 快照交接、pthread 线程（共享 FD 表）通过；其他共享 VM 组合及嵌套 vfork 不支持 |
-| 同线程嵌套慢调用 | 保留重入透传 | 返回 EDEADLK；同进程其他线程使用每进程 64 槽租约表 |
-| openat2 | HarmonyOS 返回 ENOSYS | 24 字节 how、O_PATH\|O_NOFOLLOW 子集；resolve=0 经 PRoot，BENEATH 仅单分量及受限尾斜杠 |
-| 已确认危险 syscall | 公共 guard 返回 ENOSYS | 同一公共 guard 加实验拒绝项 |
-| 挂载来源与只读/默认拒绝 | 未实现 | 绝对/已知目录 FD/cwd 相对 open 已记录 mount/可写配置标签；未知来源及 exec 恢复仍 UNKNOWN；可选路径/FD 修改保护，`--guard-file-access` 增加默认拒绝读取与目录可见性；仍非完整隔离 |
-| agent JSON 配置 | 只输出计划 | 同样未连接执行层 |
+| `make check` | 250 项通过 | 路径、exec/auxv、模型与 clone、ABI/路由、重入、运行时 guard、隔离工作负载对照 |
+| `make check-guarded` | 171 项通过 | FD 运行时、修改保护、默认拒绝读取、socket 与 transport |
+| `make check-alpine` / `make check-ubuntu` | 各 18/18 | 离线 rootfs 验收；Ubuntu 归档硬链接按副本展开 |
+| 以上四套加 `ELF_LOADER_OPTIONS=--isolate` | 同上 | 只作用于经 `test/lib.py` 启动 loader 的测试 |
+| `make check-isolation` | 115 项通过 | 隔离验收目标 A–L，两种构建 |
+| `make bench` | 只记录 | 原生与各配置的微基准（[BENCHMARKS](BENCHMARKS.md)） |
 
-`src/elfloader` 是最后一次构建的产物，不能用它的名称判断启用了哪种能力。
-应使用上述两个具名快照及各自 manifest；两种构建不能并发编译，共用中间产物。
+宿主原生创建硬链接被拒绝的 fixture 记为 SKIP，不算成功；ENOSYS 不算功能实现。
 
-## 本轮测试结果
+## 尚未完成
 
-| 入口 | 本轮结果 | 范围与限制 |
-| --- | --- | --- |
-| `make check` | 通过 | 路径、exec/auxv、模型与 clone、ABI/路由、重入、运行时 guard、配置/解包单测 |
-| `make check-fd-runtime` | 通过 | 实际补丁 SVC、FD 生命周期、错误路径、shell 与文件工作流；不等于权限测试 |
-| `python3 test/alpine/run.py ../alpine-minirootfs-3.24.3-aarch64.tar.gz` | 18/18 | 默认构建，离线验收 |
-| `python3 test/ubuntu/run.py ../ubuntu-base-26.04.1-base-arm64.tar.gz` | 18/18 | 默认构建，离线验收；归档硬链接按副本展开 |
-| FD 实验中的 rootfs 工作流 | 24 个文件用例、12 个 shell 用例通过 | 两套 rootfs；包含相对/绝对路径打包、gzip、符号链接、简单/嵌套解包 |
-| 硬链接打包 fixture | 2 项明确 SKIP | 宿主原生创建硬链接被拒绝，不算成功 |
-| 新增 census 核对 | 两种 loader 逐项核对已记录 SIGSYS 编号 | 扫描记录新增危险调用但运行时探针遗漏时，测试会失败 |
+1. **隔离模式性能**（第三阶段第一轮已完成）：乐观解析后每个路径调用通常一次进程间往返
+   （HongMeng 上约 20–40 µs，带回 FD 再多约 17 µs），exec 3 次；见 BENCHMARKS.md。再降只能减少
+   往返本身的成本（共享内存通道等）。
+2. **隔离验收未覆盖**：大小写别名（需大小写不敏感的存储）；实际工作负载（apt、gcc/make、git、pip、node）
+   在 `--isolate` 下的完整对比与耗时。
+3. **隔离模式的兼容代价**：`close_range` 返回 ENOSYS（调用者退回逐个关闭）；不能创建数据报 UNIX 套接字
+   （如 syslog）；sendto/sendmsg 带 UNIX 路径名返回 EPERM。
+4. **剩余风险**（ISOLATION.md）：内核漏洞、资源耗尽、侧信道、同 uid 的信号/网络/系统服务、`execveat`
+   带非空路径、宿主已有的跨区硬链接、继承的数据报 UNIX 套接字。
+5. **进程内模式的来源与竞争**：未知 cwd/目录 FD 的来源仍为 UNKNOWN，首个目标的 PT_INTERP 不经读策略，
+   非保护模式的路径竞争与 PRoot 相同。隔离模式下这些由 broker 兜底；进程内模式不再作为边界追求。
+6. **FD 与线程语义**：通用 clone 与共享 VM/FD 的组合、`close_range` 的真正实现、更多带 FD 的 ioctl 与辅助消息。
+7. **应用兼容**：联网的包管理器安装、实际 agent/brew 工具链、端到端基准。
 
-`make check` 不含 FD 实验工作流；两套都通过才能支持上表结论。
-构建与离线验收报告位于忽略目录 `vendor/proot/svc/build/`；不提交二进制或 rootfs。
-当前全量扫描记录是 98 个参数配方、13 个不同 SIGSYS 编号，不是所有 syscall 的证明。
-共享慢路径 147 项表示“进入处理器”，不能作为“实现 147 项”的完成率。
-固定危险调用回归另包含 fchmodat2，共 14 项；close_range 有单独的拒绝/回退测试。
-原生配方、支持子集和错误路径都需分别看待，不能把 ENOSYS 算作功能实现。
+## 下一步顺序
 
-## 尚未完成的验收门槛
-
-1. **agent 权限执行**：配置只规划不运行；所有 bind 仍可写。绝对/已知目录 FD/cwd 相对打开已有
-   mount/access 观察值，但未知 cwd/目录 FD、导入和 exec 恢复仍 UNKNOWN；尚无可信来源链。
-   实验版的只读修改保护与默认拒绝读取已可选启用，但首个目标的 PT_INTERP、返回的 socket 地址和竞争仍有缺口。
-   `tools/agent_sandbox/launch.py` 已把 profile 接到实验版文件访问模式，但 brew 实际程序与平台库
-   尚未在 HarmonyOS 沙盒中验证。
-2. **完整 FD/任务语义**：普通线程与共享 VM/FD、通用 clone、close_range 真正实现、
-   更多 ioctl/辅助消息 FD 通道仍有缺口。不能把 128 条元数据表视作全部内核 FD。
-3. **路径与挂载语义**：目录 FD 仍经 `/proc/self/fd` 反向路径映射；往返检查可拒绝
-   一些覆盖歧义，但不等于保留完整挂载身份。重命名竞争、完整 `/proc`、多分量
-   BENEATH、通用 xattr/ACL 等尚未完成，普通模式与实验模式的能力也未统一。
-4. **恶意 guest 边界**：默认重入透传、raw 入口、可写代码/别名、用户指针读取、
-   内部 FD 与可信 exec 交接等需要完整审计。封存快照只保证不可修改，不证明来源可信。
-   现有回归不能替代对抗验收。
-5. **完整应用兼容**：未完成包管理器联网安装、实际 agent/brew 工具链、通用线程程序
-   与端到端性能基准。xz/bzip2 缺失是镜像依赖问题，不自动归因于 syscall。
-
-## 下一步顺序与验收标准
-
-1. **先落地最小挂载身份和只读来源模型**：绝对路径的解析来源已交给 FD 表，
-   目录 FD/cwd、现有 PRoot 路径操作及 exec/BENEATH 已接观察值；下一步处理可信来源链、未知来源和只读配置边界。继承、SCM_RIGHTS
-   和 exec 当前保守清除/保留 UNKNOWN。后续验证同一宿主文件
-   经 ro/rw 两个 bind 打开时不会合并权限，并覆盖 dup、改名和 exec。
-2. **再接入受限策略执行**：选择明确的单线程进程支持范围；同时覆盖路径写入、
-   FD 写入、截断、共享可写映射、splice/copy 等写入通道。支持范围之外拒绝，不能
-   只检查 open 的 O_WRONLY 就宣布只读完成；配置规划器在此之前仍标记 not-connected。
-3. **随后扩展兼容与性能**：按实际 agent/brew 工作流处理 /proc、线程和缺失调用，
-   对照原生测试；基准区分路径解析成本与普通 FD IO 成本，不将所有内容操作改成 VFS。
-
-核查及后续来源接入均未启用只读权限。兼容性基线、来源观察值和危险调用回归，
-不能替代权限执行及对抗验收。
+1. 实际工作负载在 `--isolate` 下的对比与耗时（同时作为性能基准），补入 ISOLATION_RESULTS.md。
+2. 大小写别名的隔离验收。
+3. 按实际 agent 工作流评估第 3 项兼容代价，必要时由 broker 代办。
