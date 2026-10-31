@@ -48,7 +48,7 @@ TMPDIR 内）的伪造 openat 返回了 FD 并读出哨兵内容。修复：glue
 
 ### 未覆盖
 
-- 大小写别名（测试目录在大小写敏感的存储上）；
+- 大小写别名（测试目录在大小写敏感的存储上；第四轮已补）；
 - 继承自宿主的数据报 UNIX 套接字、`execveat` 带非空路径（已列为剩余风险）；
 - N（实际工作负载在隔离下的完整对比与耗时）只做了抽查：Ubuntu rootfs 中 python subprocess 与 gcc 正常。
 
@@ -94,3 +94,31 @@ closerange：close_range(3, ~0) 成功，普通 FD 已关闭，之后路径调�
 重开通道，碰巧可用）。现在槽位用满时回收已退出线程的槽位，fork/vfork 由 clone 通知处理；procfs FD 列表不再显示
 保留 FD。新增验收 K channels：200 个先后创建的线程全部成功、vfork 子进程用过 broker 后父进程仍可用、
 /proc/self/fd 列表中没有保留 FD。两种构建共 119 项通过；四套回归在常规与 `--isolate` 下均通过。
+
+## 2026-10-31，第四轮（大小写别名、apt、数据报套接字）
+
+**大小写别名**（`test/isolation/case_alias.py`，`make check-isolation` 的一部分；没有大小写不敏感的存储时 SKIP）。
+在 /storage/Users（hmdfs，大小写不敏感）上：work 绑定到 /work（可写），work/Secret 绑定到 /work/Secret（guarded 下隐藏），
+work/Ro 绑定到 /work/Ro（只读）。guarded 构建中 Secret 的四种拼写的 open/stat/list 全部失败，Ro 的三种拼写可读、
+不可写（open 写、chmod、unlink、rename、link 全部失败）；把 work/secret/key、work/SECRET/key 和 work/ro/file 等
+宿主路径直接伪造给 broker，同样被拒绝。对照：伪造请求读可写树中的 work/FILE 成功，说明拒绝来自树的权限而不是拼写。
+普通构建（全部可写）每种拼写都能读到。共 38 项通过，未发现缺陷。
+
+**apt**（`test/isolation/apt_install.py ../ubuntu-base-26.04.1-base-arm64.tar.gz [--loader elfloader-guarded]`）：全新解压的
+Ubuntu base 中 apt-get update、安装 tree 与 jq 并运行、卸载 jq、列出包状态。两种构建在 `--isolate` 下输出与常规模式
+一致。耗时差异来自镜像：镜像断开连接（“Remote end closed connection”）时 apt 按指数退避重试，等待期间主循环以零超时
+反复 select 并 stat 正在下载的文件（apt 的行为，常规模式同样发生，一次 update 可达数万到上百万次）；隔离模式下每次
+stat 是一次 broker 往返，只多耗 CPU。常规与隔离同时运行五对：14.3/9.5、14.9/8.2、85.3/191.5、14.1/9.8、34.6/16.1 秒。
+
+**数据报 UNIX 套接字**（评估，未改）：
+
+| 用法 | 常规 | `--isolate` |
+| --- | --- | --- |
+| glibc syslog()、Python SysLogHandler('/dev/log')、logger（rootfs 中无 /dev/log） | 成功（静默丢弃） | 相同 |
+| socketpair(AF_UNIX, SOCK_DGRAM) 收发 | 成功 | 成功（改为顺序包） |
+| socket(AF_UNIX, SOCK_DGRAM)；树内命名或抽象名的 bind + sendto | 成功 | EPERM |
+| UDP | 成功 | 成功 |
+
+只有直接使用命名或抽象名数据报套接字的程序受影响。guest 持有的数据报套接字可以用 sendmsg 的 msg_name 向任意路径
+发送，过滤器检查不到内存中的地址，因此安全的支持只能是 broker 代理收发（guest 拿顺序包的一端，broker 持有真正的
+数据报套接字并按树检查目标）。出现具体需求前不做。
