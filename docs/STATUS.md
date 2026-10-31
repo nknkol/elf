@@ -408,6 +408,9 @@ UNIX 套接字由 broker 创建、bind/connect 由 broker 在目标目录内完�
 控制套接字、loader FD 与通道。设备验证：从 payload 自身的 svc 发出的 openat 在隔离模式下返回 EPERM（无隔离时可打开）；
 只读 bind 的写、删、链接、创建在有无 broker 时结果一致。四套回归在常规与 `ELF_LOADER_OPTIONS=--isolate` 下均通过
 （248 / 171 / 18 / 18）；isolate 下 Ubuntu rootfs 中 python subprocess 与 gcc 正常。
+2026-10-31 隔离模式验收第一轮（[结果](ISOLATION_RESULTS.md)，`make check-isolation`）：在设备上按目标 A–L 两种构建各跑一遍，
+发现一处缺陷并修复：broker 把整棵 glue 基目录（宿主 TMPDIR）当作可写树，伪造请求可读其中任意文件；现只开放
+`proot-glue-*`。修复后 107 项全部通过，四套回归在常规与 `--isolate` 下均通过（250 / 171 / 18 / 18）。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。

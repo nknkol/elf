@@ -4,7 +4,7 @@
 PYTHON ?= python3
 ALPINE_ARCHIVE ?=
 UBUNTU_ARCHIVE ?=
-.PHONY: help build check check-alpine check-ubuntu check-guarded bench
+.PHONY: check-isolation help build check check-alpine check-ubuntu check-guarded bench
 help:
 	@echo 'make build          Build build/elfloader and build/elfloader-guarded'
 	@echo 'make check          Core regressions (both builds)'
@@ -60,6 +60,9 @@ check-ubuntu:
 	$(MAKE) build
 	$(PYTHON) test/ubuntu/run.py "$(UBUNTU_ARCHIVE)"
 
+# Isolation acceptance (docs/ISOLATION_TESTING.md); HarmonyOS device.
+check-isolation: build
+	$(PYTHON) test/isolation/run.py
 check-guarded: build
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py
