@@ -51,7 +51,14 @@ def install_helper(rootfs):
 
 
 def read_guest_file(rootfs, guest_path):
-    """A rootfs file read without following any symlink (None if absent)."""
+    """A rootfs file read without following any symlink (None if absent).
+    rootfs may be (upper, lower) of a --cow container (R6)."""
+    if isinstance(rootfs, tuple):
+        import union
+        host, layer = union.Root(*rootfs).locate('/' + guest_path.lstrip('/'))
+        if layer is None:
+            return None
+        rootfs = rootfs[layer]
     root = unpack.Rootfs(rootfs)
     try:
         fd = root.open_file(unpack.clean_name(guest_path.lstrip('/')))
@@ -108,6 +115,9 @@ def guest_resolve(rootfs, binds, path, follow=True):
         if best:
             rest = guest[len(best[1]):].lstrip('/')
             return Path(best[0], rest) if rest else Path(best[0])
+        if isinstance(rootfs, tuple):  # (upper, lower) of a --cow container
+            import union
+            return union.Root(*rootfs).locate(guest)[0]
         return Path(rootfs, *parts)
 
     parts = []
@@ -142,14 +152,15 @@ def make_guest_dirs(rootfs, binds, path):
 
 
 def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=None,
-          command=None):
+          command=None, lower=None):
     """The elfloader argv of a container start (or exec) and its cwd."""
     cfg, host = record['Config'], record['HostConfig']
     binds = [tuple(b) for b in host['Binds']]     # (host, guest, 'ro'|'rw')
     ro_root = host.get('ReadonlyRootfs')
     guarded = ro_root or any(mode == 'ro' for _, _, mode in binds)
     loader = loader_path(guarded)
-    uid, gid, home = resolve_user(rootfs, user if user is not None else cfg.get('User'))
+    uid, gid, home = resolve_user((rootfs, lower) if lower else rootfs,
+                                  user if user is not None else cfg.get('User'))
     env = {}
     for entry in cfg.get('Env') or []:
         key, _, value = entry.partition('=')
@@ -192,6 +203,8 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
         for device in host.get('IsolateDevices') or []:
             argv += ['--isolate-device', device]
     argv += ['--mode', 'container', '--root', str(rootfs), '--link-copy']
+    if lower:
+        argv += ['--lower', str(lower)]  # R6: the shared image rootfs
     # Mounts the container makes (R4): a table every process of it shares
     # (docker exec joins it through the file), tmpfs directories below.
     argv += ['--mount-table', str(cdir / 'mounts.table'), '--mount-scratch', str(cdir / 'mounts')]
@@ -210,7 +223,7 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
         argv += ['-e', f'{key}={value}']
     if len(str(cdir / 'mounts').encode()) >= MAX_PATH - 48:
         raise SpecError(f'the container directory path is too long for the loader: {cdir}')
-    for value in [str(rootfs), cwd, *(p for b in all_binds for p in b[:2])]:
+    for value in [str(rootfs), str(lower or ''), cwd, *(p for b in all_binds for p in b[:2])]:
         if len(value.encode()) >= MAX_PATH:
             raise SpecError(f'path exceeds the loader limit of {MAX_PATH - 1} bytes: {value[:80]}...')
     if command is None:

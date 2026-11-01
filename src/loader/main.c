@@ -294,6 +294,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	static payload_config_t cfg;
 	static struct image prog, interp;
 	static char interp_buf[CONFIG_MAX_PATH];
+	static char lower_file[CONFIG_MAX_PATH], lower_host[CONFIG_MAX_PATH];
 	struct loader_options opt;
 	(void)fini;
 
@@ -312,6 +313,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	z_printf_enabled = cfg.log_level != LOG_LEVEL_NONE;
 	hook_set_section_scan(cfg.seccomp_backstop);
 	normalize_host_path(cfg.root, CONFIG_MAX_PATH);
+	for (int i = 0; i < cfg.lower_count; i++)
+		normalize_host_path(cfg.lower[i], CONFIG_MAX_PATH);
 	for (int i = 0; i < cfg.bind_count; i++)
 		normalize_host_path(cfg.binds[i].dst, CONFIG_MAX_PATH);
 	/* An isolated child cannot name files: what the initial loader looked
@@ -332,18 +335,26 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 	if (!opt.exec_target && opt.target >= argc)
 		z_errx(1, "no program to run");
 	const char *file = opt.exec_target ? opt.exec_target : argv[opt.target];
+	const char *named = file;
 	if (!opt.child) {
 		/* The initial program is named relative to the root. */
 		if (cfg.root[0] && file[0] == '/')
 			z_errx(1, "absolute path not allowed with --root; use a path relative to it");
 		if (cfg.root[0] && z_chdir(cfg.root) < 0)
 			z_errx(1, "chdir to root %s failed", cfg.root);
+		/* R6: the program may come from a lower layer. */
+		struct stat st;
+		if (cfg.lower_count && z_newfstatat(AT_FDCWD, file, &st, 0) < 0) {
+			lower_file[0] = '/';
+			copy_cstr(lower_file + 1, sizeof(lower_file) - 1, file);
+			file = resolve_interp_path(&cfg, lower_file, lower_host, sizeof(lower_host));
+		}
 		if (!cfg.glue_dir[0])
 			choose_glue_dir(&cfg, host_env);
 	} else if (!isolated_child && !is_elf_file_at(AT_FDCWD, file)) {
 		z_errx(1, "target is not ELF: %s", file);
 	}
-	choose_exec_exe(&cfg, &opt, file);
+	choose_exec_exe(&cfg, &opt, named);
 	if (!opt.child)
 		container_state_open(&cfg, &opt);
 	/* The broker starts before anything of the guest is loaded. */

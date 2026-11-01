@@ -8,7 +8,7 @@ tmpfs (an empty directory of its own, mode from the options), proc from
 the host, MS_MOVE and stacking behave as in a mount namespace; a mount made
 by one process is seen by its children (across exec, after closefrom) and
 its parent; /proc/self/mounts and mountinfo list the table; unsupported
-types give ENODEV, umount of a non-mountpoint EINVAL; the new mount API
+types give ENODEV (overlay without lowerdir EINVAL), umount of a non-mountpoint EINVAL; the new mount API
 gives ENOSYS (util-linux falls back to mount(2)). Without the option mount
 stays unavailable. Both builds, plain and with --isolate."""
 import json
@@ -125,7 +125,8 @@ with tempfile.TemporaryDirectory(prefix='mounts-', dir=lib.mode_capable()) as tm
             assert out['move'] == [0, True, []], (what, out['move'])
             assert out['rbind'] == [0, 0, ['from-a', 'new', 'sub'], []], (what, out['rbind'])
             assert out['busy'] == 'EBUSY' and out['detach'] == [0, []], (what, out)
-            assert out['errors'] == ['ENODEV', 'ENODEV', 'EINVAL', 0, 'EINVAL', 'ENOENT', 0], \
+            # overlay without lowerdir: EINVAL, as the kernel (R6 supports overlay).
+            assert out['errors'] == ['ENODEV', 'EINVAL', 'EINVAL', 0, 'EINVAL', 'ENOENT', 0], \
                 (what, out['errors'])
             assert out['fsopen'] == 'ENOSYS', (what, out['fsopen'])
             assert out['umount_bind'] == [0, ['from-b']], (what, out['umount_bind'])

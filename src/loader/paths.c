@@ -266,6 +266,26 @@ static int map_guest_path(const payload_config_t *cfg, const char *guest, char *
 	}
 	const char *host = found >= 0 ? cfg->binds[found].dst : cfg->root;
 	const char *rest = guest + best;
+	/* R6: a name the upper root lacks comes from the topmost lower that
+	 * has it (whiteouts are the payload's business; the loader only opens
+	 * the program, its interpreter and the working directory). */
+	for (int layer = 0; found < 0 && layer <= cfg->lower_count; layer++) {
+		const char *base = layer ? cfg->lower[layer - 1] : cfg->root;
+		size_t base_len = z_strlen(base), rest_len = z_strlen(rest);
+		if (base_len + rest_len + 2 > out_sz)
+			return -1;
+		z_memcpy(out, base, base_len);
+		const char *r = rest;
+		if (base_len && r[0] == '/' && base[base_len - 1] == '/')
+			r++, rest_len--;
+		z_memcpy(out + base_len, r, rest_len + 1);
+		struct stat st;
+		if (!cfg->lower_count || z_newfstatat(AT_FDCWD, out, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+			if (!out[0])
+				copy_cstr(out, out_sz, "/");
+			return 0;
+		}
+	}
 	size_t host_len = z_strlen(host), rest_len = z_strlen(rest);
 	if (host_len + rest_len + 2 > out_sz)
 		return -1;

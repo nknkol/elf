@@ -7,6 +7,7 @@
 #include "config.h"
 #include "proot_bridge.h"
 #include "container_state.h"
+#include "union_view.h"
 #include "fake_ids.h"
 #include "host_syscall.h"
 #ifdef GUARDED
@@ -129,6 +130,9 @@ static long dispatch_here(long sys_no, pt_regs *regs)
         sys_no == __NR_getsockname || sys_no == __NR_getpeername;
     unsigned capacity = named && a[1] && a[2] ? *(unsigned *)a[2] : 0;
     ret = DISPATCH(sys_no, args);
+    /* R6: a directory of the merged view lists every layer. */
+    if (sys_no == __NR_getdents64 && union_enabled())
+        ret = union_getdents((int)a[0], (void *)a[1], (unsigned long)a[2], ret);
     /* A batch holding only the payload's FDs is read again: zero means the
      * end of the directory. */
     while (sys_no == __NR_getdents64 && ret > 0 && !(ret = broker_hide_fds((int)a[0], (void *)a[1], ret))) {

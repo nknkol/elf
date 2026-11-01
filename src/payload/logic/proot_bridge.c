@@ -16,6 +16,7 @@
 #include "proot_bridge.h"
 #include "fake_ids.h"
 #include "container_state.h"
+#include "union_view.h"
 #ifdef GUARDED
 #include "fd_runtime.h"
 #include "fs_policy.h"
@@ -118,7 +119,55 @@ typedef struct {
     PathFrame *deep_frames;
     char resolve_scratch[2][PATH_MAX];
     char fd_host[PATH_MAX], mapped[PATH_MAX], final_host[PATH_MAX];
+    /* R6: the root's merged view (union_view.h). union_op says what the
+     * call does to its resolved name; resolution leaves the name's layer
+     * and path relative to the layers in union_layer/union_rel (layer -1:
+     * not in the view). */
+    struct union_view views[1 + MOUNT_OVERLAYS];
+    int view_count;
+    const struct union_view *uv, *first_uv; /* the view of union_rel, first_union_rel */
+    const struct union_view *map_view, *final_view; /* of the last mapping, of the resolution */
+    bool root_union; /* views[0] is the root's */
+    char overlay_lowers[MOUNT_OVERLAYS * CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
+    bool union_on;
+    int union_op;
+    long open_flags;
+    bool union_opaque;
+    int union_layer, first_union_layer;
+    struct union_memo umemo;
+    char union_rel[PATH_MAX], first_union_rel[PATH_MAX], union_named[PATH_MAX];
 } Bridge;
+
+enum { UOP_READ, UOP_COPY, UOP_RECORD, UOP_CREATE, UOP_OPEN };
+
+/* The view holding a host path (union_find), NULL if none. */
+static const struct union_view *bridge_view(Bridge *b, const char *host, int *layer, const char **rel)
+{
+    int v = union_find(b->views, b->view_count, host, layer, rel);
+    return v < 0 ? NULL : &b->views[v];
+}
+
+/* A path in the root's lower layers as the root's upper names it; 1 if
+ * rewritten. (The lowerdirs of an overlay mount are guest directories of
+ * their own, named as such.) */
+static int bridge_alias(Bridge *b, const char *host, char *out)
+{
+    return b->root_union ? union_alias(&b->views[0], host, out) : 0;
+}
+
+/* The view whose upper holds host (the longest), NULL if none. */
+static const struct union_view *upper_view(Bridge *b, const char *host)
+{
+    const struct union_view *best = NULL;
+    for (int v = 0; v < b->view_count; v++) {
+        const struct union_view *u = &b->views[v];
+        size_t n = u->length[0];
+        if (!strncmp(host, u->layer[0], n) && (host[n] == 0 || host[n] == '/') &&
+            (!best || n > best->length[0]))
+            best = u;
+    }
+    return best;
+}
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
 
@@ -163,7 +212,17 @@ static PathFrame *deep_frames(void *opaque)
 static int host_map(void *opaque, const char *guest, char *host)
 {
     Bridge *b = opaque;
-    return binding_table_map(&b->table, GUEST, guest, host);
+    int rc = binding_table_map(&b->table, GUEST, guest, host);
+    /* R6: a name in the root's layers (through the root or a bind made of
+     * it) is shown by the topmost layer that has it. */
+    if (rc >= 0 && b->union_on) {
+        if (bridge_alias(b, host, b->mapped)) strcpy(host, b->mapped);
+        const struct union_view *view = upper_view(b, host);
+        b->map_view = view;
+        int u = view ? union_map(view, host, NULL, &b->umemo) : 0;
+        if (u < 0) return u;
+    }
+    return rc;
 }
 
 #ifdef GUARDED
@@ -726,15 +785,31 @@ static int proc_link(void *opaque, char *out, const char *path,
  * A directory renamed beneath an overmount otherwise silently switches FD
  * identity to the mounted directory. Full retained mount/FD identity is not
  * modeled yet: reject such names rather than traverse a different object. */
+/* R6: the same path of the merged view in two layers (a directory merges;
+ * a lower file a descriptor still holds was copied up since): named the
+ * same, it is the same guest name. named is already the upper's form. */
+static bool union_same(Bridge *b, const char *named, const char *mapped)
+{
+    if (!b->union_on) return false;
+    const char *rel;
+    const struct union_view *u = b->map_view; /* host_map just made mapped */
+    if (!u || union_layer_of(u, mapped, &rel) < 0) return false;
+    size_t n = u->length[0];
+    return !strncmp(named, u->layer[0], n) && !strcmp(named + n, rel);
+}
+
 static int visible_guest_path(Bridge *b, const char *host, char *guest)
 {
     char *mapped = b->mapped;
     if (glue_guest(host, guest)) return 0;
-    int rc = binding_table_map(&b->table, HOST, host, guest);
+    /* R6: a lower layer's object, named as the upper names its path. */
+    const char *named = host;
+    if (b->union_on && bridge_alias(b, host, b->union_named)) named = b->union_named;
+    int rc = binding_table_map(&b->table, HOST, named, guest);
     if (rc < 0) return rc;
-    rc = binding_table_map(&b->table, GUEST, guest, mapped);
+    rc = host_map(b, guest, mapped);
     if (rc < 0) return rc;
-    return strcmp(host, mapped) ? -EXDEV : 0;
+    return strcmp(host, mapped) && !union_same(b, named, mapped) ? -EXDEV : 0;
 }
 
 static int observed_guest_path(Bridge *b, const char *host, char *guest)
@@ -748,19 +823,21 @@ static int observed_guest_path(Bridge *b, const char *host, char *guest)
     if (id > b->table.count) return -EXDEV;
     const char *host_prefix = id ? b->table.entries[id-1].host : b->table.root;
     const char *guest_prefix = id ? b->table.entries[id-1].guest : "/";
-    Comparison prefix_match = compare_paths(host_prefix, host);
+    const char *named = host;
+    if (b->union_on && bridge_alias(b, host, b->union_named)) named = b->union_named;
+    Comparison prefix_match = compare_paths(host_prefix, named);
     if (prefix_match != PATHS_ARE_EQUAL && prefix_match != PATH1_IS_PREFIX)
         return -EXDEV;
-    strcpy(guest, host);
+    strcpy(guest, named);
     rc = binding_replace_core(guest, host_prefix, guest_prefix);
     if (rc < 0) return rc;
     rc = binding_table_mount_id(&b->table, guest, &mapped_id);
     if (rc < 0) return rc;
     if (mapped_id != id) return -EXDEV;
     char *mapped = b->mapped;
-    rc = binding_table_map(&b->table, GUEST, guest, mapped);
+    rc = host_map(b, guest, mapped);
     if (rc < 0) return rc;
-    return strcmp(host, mapped) ? -EXDEV : 0;
+    return strcmp(host, mapped) && !union_same(b, named, mapped) ? -EXDEV : 0;
 }
 
 /* A host object can have several faithful guest names when a bind's host
@@ -1003,6 +1080,86 @@ static bool lexical_path(const char *path)
     return true;
 }
 
+/* R6: after a resolution, what the call needs of the merged view: an object
+ * it changes is copied up, a name it creates gets its parents in the upper
+ * and loses its whiteout. b->host then names the upper's copy. */
+static int union_prepare(Bridge *b)
+{
+    const char *rel = "";
+    b->uv = b->final_view;
+    int layer = b->uv ? union_layer_of(b->uv, b->host, &rel) : -1;
+    if (layer < 0) b->uv = NULL;
+    b->union_layer = layer;
+    if (layer < 0) return 0;
+    if (strlen(rel) >= PATH_MAX) return -ENAMETOOLONG;
+    strcpy(b->union_rel, rel);
+    long rc = 0;
+    switch (b->union_op) {
+    case UOP_OPEN: {
+        long f = b->open_flags;
+        bool tmpfile = (f & O_TMPFILE) == O_TMPFILE;
+        bool writes = (f & O_ACCMODE) != O_RDONLY || (f & O_TRUNC) || tmpfile;
+        if (layer > 0) {
+            if (!writes) return 0;
+            if ((f & O_CREAT) && (f & O_EXCL)) return -EEXIST;
+            rc = union_copy_up(b->uv, b->union_rel, !(f & O_TRUNC) || tmpfile);
+            break;
+        }
+        struct stat st;
+        if (!(f & O_CREAT) || tmpfile ||
+            !raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0))
+            return 0;
+        bool opaque;
+        rc = union_prepare_create(b->uv, b->union_rel, &opaque);
+        if (rc == -EEXIST) rc = 0;
+        break;
+    }
+    case UOP_COPY:
+        if (layer == 0) return 0;
+        rc = union_copy_up(b->uv, b->union_rel, true);
+        break;
+    case UOP_CREATE:
+        /* An existing lower name: the kernel's answer for any name. */
+        if (layer > 0) return -EEXIST;
+        rc = union_prepare_create(b->uv, b->union_rel, &b->union_opaque);
+        if (rc == -EEXIST) rc = 0;
+        break;
+    default:
+        return 0;
+    }
+    if (rc < 0) return (int)rc;
+    b->umemo.valid = false;
+    if (layer > 0) {
+        size_t n = b->uv->length[0];
+        if (n + strlen(b->union_rel) >= PATH_MAX) return -ENAMETOOLONG;
+        memcpy(b->host, b->uv->layer[0], n);
+        strcpy(b->host + n, b->union_rel);
+        b->union_layer = 0;
+        b->final_valid = false;
+    }
+    return 0;
+}
+
+/* The layer of the object a descriptor names (union_rel set), -1 if none. */
+static int union_fd(Bridge *b, int fd)
+{
+    char link[32] = "/proc/self/fd/", digits[12];
+    size_t at = strlen(link);
+    int count = 0;
+    unsigned v = (unsigned)fd;
+    do { digits[count++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (count) link[at++] = digits[--count];
+    link[at] = 0;
+    int n = host_readlink(b, link, b->fd_host, PATH_MAX - 1);
+    if (n < 0) return n == -ENOENT ? -EBADF : n;
+    b->fd_host[n] = 0;
+    const char *rel;
+    int layer = -1;
+    b->uv = bridge_view(b, b->fd_host, &layer, &rel);
+    if (layer > 0) strcpy(b->union_rel, rel);
+    return layer;
+}
+
 static int resolve(Bridge *b, int dirfd, const char *path, bool follow)
 {
     b->optimistic = b->optimistic_allowed && path && lexical_path(path);
@@ -1040,6 +1197,8 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
 {
     if (!path)
         return -EFAULT;
+    b->umemo.valid = false;
+    b->union_layer = -1;
     strcpy(b->cwd, "/");
     if (path[0] != '/' && dirfd == AT_FDCWD) {
         long ret = guest_cwd(b);
@@ -1058,7 +1217,9 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
                              host_fd, host_map, b->resolve_scratch};
     b->follow_final = follow;
     b->final_valid = false;
+    b->map_view = NULL;
     int rc = resolve_path_core(&resolver, dirfd, path, follow, b->guest, b->host);
+    b->final_view = b->map_view; /* the final mapping is the last */
     if (rc >= 0) {
         int glue = glue_host(b);
         if (glue < 0) return glue;
@@ -1095,6 +1256,11 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
             rc = -EEXIST;
     }
 #endif
+    /* Last: a refused change must not copy anything up. */
+    if (rc >= 0 && b->union_on) {
+        int u = union_prepare(b);
+        if (u < 0) return u;
+    }
     return rc;
 }
 
@@ -1275,9 +1441,13 @@ static long mutate(Bridge *b, long number, long a[6])
             return ret;
         if (number == __NR_unlinkat && contains_mount(b, b->guest))
             return -EBUSY;
+        if (number == __NR_unlinkat && b->union_layer >= 0)
+            return union_remove(b->uv, b->union_rel, a[2] & AT_REMOVEDIR);
         struct stat old;
         bool known = number == __NR_unlinkat && owners_enabled() && !host_stat(b->host, false, &old);
         ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], 0, 0, 0);
+        if (!ret && number == __NR_mkdirat && b->union_layer >= 0 && b->union_opaque)
+            union_make_opaque(b->uv, b->union_rel);
         if (!ret && number == __NR_mkdirat) owners_new_name(b);
         if (!ret) owners_last_name(&old, known);
         return ret;
@@ -1296,10 +1466,15 @@ static long mutate(Bridge *b, long number, long a[6])
         return ret;
     strcpy(b->first_host, b->host);
     strcpy(b->first_guest, b->guest);
+    b->first_union_layer = b->union_layer;
+    b->first_uv = b->uv;
+    if (b->union_layer >= 0) strcpy(b->first_union_rel, b->union_rel);
     size_t first_mount, second_mount;
     ret = binding_table_mount_id(&b->table, b->first_guest, &first_mount);
     if (ret < 0)
         return ret;
+    /* The new name of a link is made in the upper. */
+    if (hardlink && b->union_on) b->union_op = UOP_CREATE;
     ret = resolve(b, (int)a[2], (const char *)a[3], false);
     if (ret < 0)
         return ret;
@@ -1309,6 +1484,13 @@ static long mutate(Bridge *b, long number, long a[6])
     if (!hardlink && (contains_mount(b, b->first_guest) || contains_mount(b, b->guest)))
         return -EBUSY;
     if (first_mount != second_mount)
+        return -EXDEV;
+    if (!hardlink && b->first_union_layer >= 0 && b->union_layer >= 0 && b->first_uv != b->uv)
+        return -EXDEV;
+    if (!hardlink && b->first_union_layer >= 0 && b->union_layer >= 0)
+        return union_rename(b->uv, b->first_union_rel, b->union_rel,
+                            number == __NR_renameat2 ? (unsigned)a[4] : 0);
+    if (!hardlink && (b->first_union_layer >= 0) != (b->union_layer >= 0))
         return -EXDEV;
     /* A rename that replaces a name may take its object's last one. */
     struct stat old, moved;
@@ -1631,6 +1813,72 @@ static void tmpfs_options(const char *data, unsigned *mode, long *uid, long *gid
     }
 }
 
+/* R6: mount -t overlay -o lowerdir=A[:B...],upperdir=U,workdir=W: a merged
+ * view (union_view.h) at the target. Without upperdir it is read-only (the
+ * topmost lowerdir stands in as the upper; the guarded build refuses
+ * writes). workdir is accepted and not used. */
+static long overlay_mount(Bridge *b, const char *guest, const char *source, const char *data,
+                          unsigned long flags, unsigned long per_mount, struct mount_entry *e)
+{
+    char lowers[CONFIG_MAX_LOWERS + 1][CONFIG_MAX_PATH];
+    char upper[CONFIG_MAX_PATH] = "";
+    char option[PATH_MAX];
+    int count = 0;
+    const char *p = data ? data : "";
+    while (*p) {
+        size_t n = 0;
+        while (p[n] && p[n] != ',') n++;
+        if (n >= sizeof(option)) return -EINVAL;
+        memcpy(option, p, n);
+        option[n] = 0;
+        p += n + (p[n] == ',');
+        bool lower = !strncmp(option, "lowerdir=", 9), up = !strncmp(option, "upperdir=", 9);
+        if (!lower && !up) continue; /* workdir, index, redirect_dir... */
+        char *value = option + 9;
+        while (*value) {
+            char *end = value;
+            while (*end && (!lower || *end != ':')) end++;
+            char saved = *end;
+            *end = 0;
+            if (lower && count > CONFIG_MAX_LOWERS) return -EINVAL;
+            /* An upperdir in the root's lower layer is copied up first. */
+            b->union_op = up ? UOP_COPY : UOP_READ;
+            long ret = resolve(b, AT_FDCWD, value, true);
+            b->union_op = UOP_READ;
+            if (ret < 0) return ret;
+            struct stat st;
+            ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&st, 0, 0, 0);
+            if (ret < 0) return ret;
+            if ((st.st_mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
+            if (strlen(b->host) >= CONFIG_MAX_PATH) return -ENAMETOOLONG;
+            strcpy(up ? upper : lowers[count++], b->host);
+            *end = saved;
+            value = *end ? end + 1 : end;
+            if (up) break;
+        }
+    }
+    if (!count) return -EINVAL;
+    memset(e, 0, sizeof(*e));
+    int first = 0;
+    if (!upper[0]) {
+        strcpy(upper, lowers[0]);
+        first = 1;
+        per_mount |= MS_RDONLY_;
+    }
+    if (count - first > CONFIG_MAX_LOWERS) return -EINVAL;
+    strcpy(e->host, upper);
+    strcpy(e->guest, guest);
+    strcpy(e->fstype, "overlay");
+    strncpy(e->source, source && *source ? source : "overlay", sizeof(e->source) - 1);
+    e->flags = (uint32_t)per_mount;
+    e->access = cap_access(mount_access_of(b, guest) == 'd' ? 'd' : 'w', flags | per_mount);
+    if (count == first) { /* a single lowerdir, read-only: a plain bind does */
+        e->kind = MOUNT_BIND;
+        return mounts_add(e);
+    }
+    return mounts_add_overlay(e, (const char (*)[CONFIG_MAX_PATH])lowers[first], count - first);
+}
+
 static long mount_call(Bridge *b, long a[6])
 {
     const char *source = (const char *)a[0], *target = (const char *)a[1];
@@ -1697,6 +1945,8 @@ static long mount_call(Bridge *b, long a[6])
         memset(e, 0, sizeof(*e)); /* resolution may use the same scratch */
         if (((st.st_mode & S_IFMT) == S_IFDIR) != ((target_st.st_mode & S_IFMT) == S_IFDIR))
             return -ENOTDIR;
+        /* R6: a bind of the merged view is merged too (named by the upper). */
+        if (b->union_on && bridge_alias(b, b->host, b->union_named)) strcpy(b->host, b->union_named);
         if (strlen(b->host) >= CONFIG_MAX_PATH) return -ENAMETOOLONG;
         strcpy(e->host, b->host);
         strcpy(e->guest, guest);
@@ -1758,6 +2008,8 @@ static long mount_call(Bridge *b, long a[6])
     if (!type) return -EFAULT;
     if (!strcmp(guest, "/")) return -EBUSY;
     if ((target_st.st_mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
+    if (!strcmp(type, "overlay"))
+        return overlay_mount(b, guest, source, data, flags, per_mount, e);
     const char *host = NULL;
     for (size_t i = 0; i < sizeof(host_filesystems) / sizeof(host_filesystems[0]); i++)
         if (!strcmp(type, host_filesystems[i].type))
@@ -1876,6 +2128,22 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     b->creates = number == __NR_mkdirat || number == __NR_mknodat || number == __NR_symlinkat ||
         number == __NR_bind;
     b->traverse = path_traversal(number, a);
+    b->union_op = UOP_READ;
+    b->union_opaque = false;
+    if (b->union_on) switch (number) {
+    case __NR_setxattr: case __NR_lsetxattr: case __NR_removexattr: case __NR_lremovexattr:
+    case __NR_truncate: case __NR_utimensat: case __NR_linkat:
+        b->union_op = UOP_COPY; break;
+    /* With an owner database chown and chmod of a lower object are only
+     * recorded: the shared layer's file is not touched. */
+    case __NR_fchownat: case __NR_fchmodat:
+        b->union_op = owners_enabled() ? UOP_RECORD : UOP_COPY; break;
+    case __NR_mkdirat: case __NR_mknodat: case __NR_symlinkat: case __NR_bind:
+        b->union_op = UOP_CREATE; break;
+    case __NR_openat:
+        if (!(a[2] & O_PATH)) { b->union_op = UOP_OPEN; b->open_flags = a[2]; }
+        break;
+    }
     if (number == __NR_mount)
         return mount_call(b, a);
     if (number == __NR_umount2)
@@ -1914,6 +2182,33 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         if (ret < 0) return ret;
 #endif
         return raw_syscall(number, a[0], (long)b->host, a[2], 0, 0, 0);
+    }
+    /* R6: a descriptor of a lower object: chmod is recorded with an owner
+     * database; otherwise it, and utimensat(fd, NULL), copy up first and
+     * change the upper's copy (the descriptor keeps reading the lower). */
+    if (b->union_on && (number == __NR_fchmod || (number == __NR_utimensat && !a[1]))) {
+        ret = union_fd(b, (int)a[0]);
+        if (ret < 0) return ret;
+        if (ret > 0 && number == __NR_fchmod && owners_enabled()) {
+            struct stat st;
+            ret = raw_syscall(__NR_fstat, a[0], (long)&st, 0, 0, 0, 0);
+            if (ret < 0) return ret;
+            ret = owners_may_chmod(&st);
+            if (ret < 0) return ret;
+            owners_chmod_done(&st, (unsigned)a[1], st.st_mode & 07777);
+            return 0;
+        }
+        if (ret > 0) {
+            ret = union_copy_up(b->uv, b->union_rel, true);
+            if (ret < 0) return ret;
+            size_t n = b->uv->length[0];
+            if (n + strlen(b->union_rel) >= PATH_MAX) return -ENAMETOOLONG;
+            memcpy(b->host, b->uv->layer[0], n);
+            strcpy(b->host + n, b->union_rel);
+            if (number == __NR_fchmod)
+                return raw_syscall(__NR_fchmodat, AT_FDCWD, (long)b->host, a[1], 0, 0, 0);
+            return raw_syscall(__NR_utimensat, AT_FDCWD, (long)b->host, a[2], AT_SYMLINK_NOFOLLOW, 0, 0);
+        }
     }
     /* Descriptor operations retain kernel identity; FD policy is a later layer. */
     if ((number == __NR_fchown || number == __NR_fchmod) && owners_enabled()) {
@@ -1973,7 +2268,14 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         if (ret < 0) return ret;
         struct stat st;
         ret = host_stat(b->host, true, &st);
-        return ret < 0 ? ret : owners_apply_mode(-1, b->host, &st, (unsigned)a[2]);
+        if (ret < 0) return ret;
+        if (b->union_layer > 0) {
+            ret = owners_may_chmod(&st);
+            if (ret < 0) return ret;
+            owners_chmod_done(&st, (unsigned)a[2], st.st_mode & 07777);
+            return 0;
+        }
+        return owners_apply_mode(-1, b->host, &st, (unsigned)a[2]);
     }
     if (number == __NR_getcwd) {
         ret = guest_cwd(b);
@@ -2207,6 +2509,12 @@ static long bridge_create(Bridge **out)
     b->traverse = false;
     b->optimistic_allowed = b->optimistic = b->optimistic_used = b->force_full = false;
     b->hints = NULL;
+    b->view_count = 0;
+    b->union_on = false;
+    b->uv = b->first_uv = NULL;
+    b->union_op = UOP_READ;
+    b->union_layer = b->first_union_layer = -1;
+    b->umemo.valid = false;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
     size_t count = (size_t)cfg->bind_count;
@@ -2220,6 +2528,12 @@ static long bridge_create(Bridge **out)
         b->bindings[count++] = mounts_hidden(b->mounts, b->mount_count, i) ?
             (PathBinding){UNMOUNTED, UNMOUNTED} : (PathBinding){b->mounts[i].guest, b->mounts[i].host};
     b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings, count};
+    /* R6: the root's merged view and those of overlay mounts. */
+    if (union_enabled())
+        b->view_count = union_views(b->views, 1 + MOUNT_OVERLAYS, b->overlay_lowers, b->mounts, b->mount_count);
+    b->union_on = b->view_count > 0;
+    b->root_union = b->union_on && cfg->lower_count > 0 && cfg->root[0];
+    b->map_view = b->final_view = NULL;
     long ret = binding_table_validate(&b->table);
 #ifdef GUARDED
     b->reads = false;
@@ -2604,7 +2918,9 @@ static long bridge_run(long number, long args[6], const struct proot_open_origin
 {
     long saved[6];
     memcpy(saved, args, sizeof(saved));
-    struct optimism o = {g_payload_config.isolate, NULL};
+    /* The merged view looks names up itself (and may copy up): never
+     * optimistic. */
+    struct optimism o = {g_payload_config.isolate && !union_enabled(), NULL};
     for (;;) {
         Bridge *b;
         long ret = bridge_create(&b);

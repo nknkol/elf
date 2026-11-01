@@ -27,6 +27,7 @@ enum mount_kind {
     MOUNT_BIND = 1,  /* mount --bind: host is the source's host path */
     MOUNT_TMPFS,     /* a directory of its own under the mount scratch */
     MOUNT_HOST,      /* proc, sysfs, devpts...: the host's own directory */
+    MOUNT_OVERLAY,   /* R6: host is the upperdir; the lowerdirs are in overlays[] */
 };
 struct mount_entry {
     char guest[CONFIG_MAX_PATH];  /* mountpoint, canonical guest path */
@@ -38,10 +39,20 @@ struct mount_entry {
     uint32_t id;                  /* creation order, from next_id */
     uint32_t access;              /* guarded build: 'd', 'r' or 'w' */
 };
+/* The lowerdirs of an overlay mount (topmost first), by its entry's id; a
+ * record whose id no live entry has is free. Kept apart from the entries:
+ * every path call copies those. */
+#define MOUNT_OVERLAYS 8
+struct mount_overlay {
+    uint32_t id, count;
+    char lower[CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
+};
 struct mount_table {
     uint32_t lock, version, count, next_id;
-    uint32_t reserved[12];
+    uint32_t overlays;   /* overlay mounts ever made: union views may exist */
+    uint32_t reserved[11];
     struct mount_entry entries[MOUNT_TABLE_MAX];
+    struct mount_overlay overlay[MOUNT_OVERLAYS];
 };
 #define MOUNT_TABLE_SIZE ((sizeof(struct mount_table) + 4095) & ~(unsigned long)4095)
 _Static_assert(MOUNT_TABLE_SIZE == CONFIG_MOUNT_TABLE_BYTES, "the loader sizes the table");
@@ -56,8 +67,15 @@ int mounts_hidden(const struct mount_entry *entries, int count, int i);
 int mounts_bind_hidden(const struct mount_entry *entries, int count, const char *guest);
 /* Access of every used slot ('d' for a free one); the count. */
 int mounts_access(char *out, int max);
-/* Adds an entry (id assigned) in a free slot; -ENOMEM when full. */
+/* Adds an entry (id assigned) in a free slot; -ENOMEM when full. An
+ * overlay entry takes lowers (count of them), or with lowers NULL those of
+ * the overlay whose id entry->id holds (a copy for --rbind). */
 long mounts_add(const struct mount_entry *entry);
+long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CONFIG_MAX_PATH], int count);
+/* The lowerdirs of overlay mount id (count returned, at most max). */
+int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max);
+/* Whether any overlay mount was ever made in this view. */
+int mounts_overlays(void);
 /* Frees the newest live slot at guest (with detach also every slot below
  * it; without, -EBUSY if any). 0, or -EINVAL if no slot is mounted there. */
 long mounts_remove(const char *guest, int detach);
@@ -121,6 +139,8 @@ void owners_chmod_done(const struct stat *st, unsigned mode, unsigned host_mode)
 void owners_created(const struct stat *st);
 /* The last name of an object is gone. */
 void owners_forget(const struct stat *st);
+/* R6 copy-up: to (the upper's copy) takes the record of from. */
+void owners_copied(const struct stat *from, const struct stat *to);
 /* Reported owner (no record: root for the user's own files). */
 void owners_lookup(const struct stat *st, uint32_t *uid, uint32_t *gid, uint32_t *mode);
 

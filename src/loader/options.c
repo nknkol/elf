@@ -168,6 +168,14 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			/* A root implies container mode unless a mode is given. */
 			if (!mode_explicit)
 				cfg->mode = CONFIG_MODE_CONTAINER;
+		} else if (is(arg, "--lower")) {
+			/* R6: a read-only layer under the root (topmost first). */
+			const char *v = value(argc, argv, &i);
+			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
+				z_errx(1, "--lower needs an absolute host directory");
+			if (cfg->lower_count >= CONFIG_MAX_LOWERS)
+				z_errx(1, "too many --lower layers (at most %d)", CONFIG_MAX_LOWERS);
+			copy_cstr(cfg->lower[cfg->lower_count++], CONFIG_MAX_PATH, v);
 		} else if (is(arg, "-v") || is(arg, "--volume")) {
 			add_bind(cfg, value(argc, argv, &i));
 		} else if (is(arg, "-e") || is(arg, "--env")) {
@@ -318,6 +326,8 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 		z_errx(1, "container state given twice");
 	if (cfg->mount_scratch[0] && !opt->emulate_mounts && !opt->mount_table && cfg->mount_table_fd < 0)
 		z_errx(1, "--mount-scratch requires --emulate-mounts");
+	if (cfg->lower_count && !cfg->root[0])
+		z_errx(1, "--lower requires --root (the writable upper layer)");
 	if (cfg->device_mask && !opt->isolate && !cfg->isolate && !opt->filter_dump)
 		z_errx(1, "--isolate-device requires --isolate");
 #ifdef GUARDED

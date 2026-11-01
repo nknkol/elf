@@ -86,7 +86,8 @@ def write_layer(root, changed, deleted, out_path, modes=None, owners=None):
     """Writes the plain layer tar; returns its diff_id. Parent directories
     of changed entries are included (as Docker does). modes and owners
     (meta.json, R5) give what the host does not hold; the rest is root's."""
-    root = Path(root)
+    if not callable(root):  # union.Root (R6) maps names itself
+        root = Path(root)
     modes = modes or {}
     owners = owners or {}
     entries = set(changed)
@@ -115,7 +116,7 @@ def write_layer(root, changed, deleted, out_path, modes=None, owners=None):
                     info.mode = 0o644
                     tar.addfile(info)
                     continue
-                host = root / name
+                host = root(name) if callable(root) else root / name
                 try:
                     info = tar.gettarinfo(str(host), name)
                 except FileNotFoundError:

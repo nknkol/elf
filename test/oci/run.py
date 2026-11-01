@@ -478,6 +478,52 @@ def mount_owner_tests(home, work):
         docker(home, 'rmi', '-f', image)
 
 
+def cow_tests(home, work):
+    """R6: --cow containers share the image rootfs (docs/OCI.md)."""
+    img = 'test/alpine:1'
+    root = image_root(home, img)
+    for mode in ([], ['--isolate']):
+        tag = ' (--isolate)' if mode else ''
+        before = tree(root)
+        name = 'cow' + ('-isolate' if mode else '')
+        p = docker(home, 'run', '--cow', *mode, '--name', name, '-u', 'root', img,
+                   'echo changed > /etc/motd && rm /etc/issue && mkdir -p /srv/app/new && echo y > /srv/app/new/f '
+                   '&& cat /etc/motd && ls /etc | grep -c "^issue$"; true')
+        cid = docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+        cdir = home / 'containers' / cid
+        check(p.returncode == 0 and p.stdout == 'changed\n0\n' and not (cdir / 'rootfs').exists() and
+              (cdir / 'upper/etc/motd').read_text() == 'changed\n' and (cdir / 'upper/etc/.wh.issue').exists()
+              and tree(root) == before,
+              '--cow: writes go to the upper layer, nothing copied, the image rootfs unchanged' + tag,
+              p.stdout + p.stderr)
+        p = docker(home, 'run', '--rm', '--cow', *mode, img, 'cat /etc/issue | wc -l; grep -c changed /etc/motd')
+        check(p.stdout.split()[1:] == ['0'] and p.stdout.split()[0] != '0',
+              '--cow: another container of the image sees none of it' + tag, p.stdout + p.stderr)
+        p = docker(home, 'diff', name)
+        check({'C /etc/motd', 'D /etc/issue', 'A /srv/app/new/f'} <= set(p.stdout.splitlines()),
+              '--cow: diff' + tag, p.stdout + p.stderr)
+        (work / 'cow-in').write_text('in\n')
+        p = docker(home, 'cp', str(work / 'cow-in'), f'{name}:/usr/share/')
+        p2 = docker(home, 'cp', f'{name}:/etc/motd', str(work / 'cow-out'))
+        check(p.returncode == 0 and (cdir / 'upper/usr/share/cow-in').read_text() == 'in\n' and
+              p2.returncode == 0 and (work / 'cow-out').read_text() == 'changed\n',
+              '--cow: cp in (to the upper) and out (merged view)' + tag, p.stderr + p2.stderr)
+        image = f'test/cow{"-isolate" if mode else ""}:1'
+        p = docker(home, 'commit', name, image)
+        p2 = docker(home, 'run', '--rm', '--cow', *mode, image,
+                    'cat /etc/motd /usr/share/cow-in /srv/app/new/f; test -e /etc/issue || echo gone')
+        check(p.returncode == 0 and p2.stdout == 'changed\nin\ny\ngone\n',
+              '--cow: commit makes an image of the merged view' + tag, p.stdout + p.stderr + p2.stdout + p2.stderr)
+        docker(home, 'rm', name)
+        docker(home, 'rmi', '-f', image)
+    p = docker(home, 'run', '--rm', '--cow', '--owners', '-u', 'root', img,
+               'chown 1234:5 /etc/motd && chmod 600 /etc/motd && stat -c "%u %g %a" /etc/motd; stat -c %u /etc/fstab')
+    check(p.stdout == '1234 5 600\n0\n' and tree(root) == before,
+          '--cow --owners: chown/chmod of a lower file recorded', p.stdout + p.stderr)
+    p = docker(home, 'run', '--rm', '--cow', '--read-only', img, 'true')
+    check(p.returncode == 125, '--cow with --read-only is refused', p.stderr)
+
+
 def alpine_image(home, work):
     root = lib.require(lib.ALPINE, 'Alpine test rootfs')
     raw = io.BytesIO()
@@ -726,6 +772,7 @@ def main():
             docker(home, 'rm', 'inplace')
             build_tests(home, work)
             mount_owner_tests(home, work)
+            cow_tests(home, work)
         else:
             print('SKIP: container runs need', lib.ALPINE)
         p = docker(home, 'system', 'prune', '-af', '--volumes')

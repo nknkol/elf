@@ -422,6 +422,8 @@ def run_parser(prog):
     p.add_argument('--isolate', action='store_true', help='run under the isolation broker (ELF)')
     p.add_argument('--owners', action='store_true',
                    help='record chown/chmod and report image owners (ELF, docs/OCI.md R5)')
+    p.add_argument('--cow', action='store_true',
+                   help='share the image rootfs, write to a private upper layer (ELF, docs/OCI.md R6)')
     p.add_argument('--isolate-device', action='append', default=[])
     p.add_argument('-a', '--attach', action='append', default=[])
     p.add_argument('--sig-proxy', default='true')
@@ -474,6 +476,8 @@ def new_record(st, a, image_id, image_text):
         raise Fail(f'--network {a.network} is not supported: containers share the host network')
     if a.read_only and a.in_place:
         raise Fail('--read-only and --in-place exclude each other')
+    if a.cow and (a.read_only or a.in_place):
+        raise Fail('--cow excludes --read-only and --in-place')
     for spec in a.publish:
         ports = spec.split('/')[0].split(':')
         if len(ports) < 2 or ports[-1] != ports[-2]:
@@ -539,7 +543,7 @@ def new_record(st, a, image_id, image_text):
                    'Volumes': config.get('Volumes') or {}},
         'HostConfig': {'Binds': binds, 'AutoRemove': a.rm, 'ReadonlyRootfs': a.read_only,
                        'InPlace': a.in_place, 'Isolate': a.isolate, 'IsolateDevices': a.isolate_device,
-                       'Owners': a.owners,
+                       'Owners': a.owners, 'Cow': a.cow,
                        'RestartPolicy': restart, 'Tmpfs': tmpfs, 'ExtraHosts': hosts, 'Dns': a.dns,
                        'PortBindings': a.publish},
         'State': {'Status': 'created', 'Running': False, 'Pid': 0, 'ExitCode': 0,
@@ -777,7 +781,11 @@ def container_inspect(st, record):
                        'RestartPolicy': host.get('RestartPolicy'), 'Tmpfs': {t: '' for t in host.get('Tmpfs') or []},
                        'ExtraHosts': [f'{n}:{i}' for n, i in host.get('ExtraHosts') or []],
                        'Dns': host.get('Dns') or [], 'Isolate': host.get('Isolate', False)},
-        'GraphDriver': {'Name': 'elf', 'Data': {'Rootfs': str(runtime.rootfs_of(st, record))}},
+        'GraphDriver': {'Name': 'elf', 'Data': dict(
+            {'Rootfs': str(runtime.rootfs_of(st, record))},
+            **({'UpperDir': str(runtime.rootfs_of(st, record)),
+                'LowerDir': str(st.image_dir(record['Image']) / 'rootfs')}
+               if record['HostConfig'].get('Cow') else {}))},
         'Mounts': [{'Type': 'bind' if s.startswith('/') else 'volume', 'Source': s if s.startswith('/') else
                     str(st.volume_dir(s) / 'data'), 'Name': '' if s.startswith('/') else s,
                     'Destination': d, 'Mode': m, 'RW': m != 'ro'} for s, d, m in host['Binds']],

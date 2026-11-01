@@ -63,7 +63,7 @@
  * --mount-scratch; child loaders get the FD. */
 #define CONFIG_MOUNT_TABLE_FD 901
 #define CONFIG_MAX_MOUNTS 48
-#define CONFIG_MOUNT_TABLE_BYTES 32768 /* container_state.h checks it */
+#define CONFIG_MOUNT_TABLE_BYTES 49152 /* container_state.h checks it */
 /* Mount ids of one view: 0 the root, 1.. the binds, then the table slots. */
 #define CONFIG_MOUNT_IDS (CONFIG_MAX_BINDS + 1 + CONFIG_MAX_MOUNTS)
 #define CONFIG_CHILD_MOUNT_TABLE_FD "--mount-table-fd"
@@ -72,6 +72,9 @@
  * initial loader (--owner-db PATH) and inherited at this number. */
 #define CONFIG_OWNER_DB_FD 902
 #define CONFIG_CHILD_OWNER_DB_FD "--owner-db-fd"
+/* Copy-on-write root (docs/OCI.md, R6): read-only lower directories under
+ * the root, topmost first (--lower DIR, repeated); the root is the upper. */
+#define CONFIG_MAX_LOWERS 8
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -152,6 +155,9 @@ typedef struct payload_config {
     char mount_scratch[CONFIG_MAX_PATH];
     /* R5: owner database FD (-1: owners as fake_id0 reports them). */
     int32_t owner_db_fd;
+    /* R6: the root's lower layers (union_view.h); 0: a plain root. */
+    int32_t lower_count;
+    char lower[CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
 } payload_config_t;

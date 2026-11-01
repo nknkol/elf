@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import owners as owners_mod
+import union
 import runspec
 import store as store_mod
 from store import StoreError
@@ -56,9 +57,25 @@ def refresh(st, record):
 
 
 def rootfs_of(st, record):
+    """The loader's --root: the image's rootfs (read-only, in place), the
+    container's copy, or with --cow its upper layer (R6)."""
     if record['HostConfig'].get('ReadonlyRootfs') or record['HostConfig'].get('InPlace'):
         return st.image_dir(record['Image']) / 'rootfs'
+    if record['HostConfig'].get('Cow'):
+        return st.container_dir(record['Id']) / 'upper'
     return st.container_dir(record['Id']) / 'rootfs'
+
+
+def lower_of(st, record):
+    """The image rootfs under a --cow container's upper, else None."""
+    return st.image_dir(record['Image']) / 'rootfs' if record['HostConfig'].get('Cow') else None
+
+
+def view_of(st, record):
+    """What guest paths resolve against: a rootfs, or (upper, lower)."""
+    lower = lower_of(st, record)
+    root = rootfs_of(st, record)
+    return (root, lower) if lower else root
 
 
 def create(st, record, quiet=False):
@@ -77,22 +94,35 @@ def create(st, record, quiet=False):
                 info = store_mod.read_json(st.image_dir(record['Image']) / 'info.json', {})
                 info['dirty'] = True
                 store_mod.write_json(st.image_dir(record['Image']) / 'info.json', info)
+        elif host.get('Cow'):
+            # R6: nothing is copied; the image rootfs is the lower layer.
+            (work / 'upper').mkdir()
         else:
             runspec.copy_rootfs(image_root, work / 'rootfs')
         runspec.write_etc(work, record['Config']['Hostname'], host.get('ExtraHosts') or [],
                           host.get('Dns') or [])
         for tmpfs in host.get('Tmpfs') or []:
             (work / 'tmpfs' / tmpfs.strip('/').replace('/', '_')).mkdir(parents=True, exist_ok=True)
-        rootfs = image_root if host.get('ReadonlyRootfs') or host.get('InPlace') else work / 'rootfs'
+        rootfs = image_root if host.get('ReadonlyRootfs') or host.get('InPlace') else \
+            work / 'upper' if host.get('Cow') else work / 'rootfs'
         if host.get('Owners'):
-            # R5: owners and modes of the image, by inode of this rootfs.
+            # R5: owners and modes of the image, by inode of this rootfs
+            # (with --cow, of the shared image rootfs: copy-up carries them).
             meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
-            owners_mod.from_meta(rootfs, meta, work / 'owners.db')
+            owners_mod.from_meta(image_root if host.get('Cow') else rootfs, meta, work / 'owners.db')
         runspec.install_helper(rootfs)
         # Docker creates a missing working directory (not in a read-only root).
         cwd = record['Config'].get('WorkingDir')
-        if cwd and not host.get('ReadonlyRootfs'):
-            runspec.make_guest_dirs(rootfs, [(b[0], b[1]) for b in all_binds(st, record, work)], cwd)
+        binds = [(b[0], b[1]) for b in all_binds(st, record, work)]
+        if cwd and host.get('Cow'):
+            found = runspec.guest_resolve((rootfs, image_root), binds, cwd)
+            if not found.is_dir():
+                if any(cwd == d or cwd.startswith(d.rstrip('/') + '/') for _, d in binds):
+                    found.mkdir(parents=True, exist_ok=True)
+                else:
+                    union.mkdirs(rootfs, image_root, cwd)
+        elif cwd and not host.get('ReadonlyRootfs'):
+            runspec.make_guest_dirs(rootfs, binds, cwd)
         store_mod.write_json(work / 'run.json', record)
         with st.lock():
             if any(c['Name'] == record['Name'] for c in st.containers()):
@@ -135,7 +165,7 @@ def command_line(st, record, **kwargs):
     cdir = st.container_dir(record['Id'])
     resolved = dict(record, HostConfig=dict(record['HostConfig'], Binds=all_binds(st, record)))
     return runspec.build(resolved, rootfs_of(st, record), cdir,
-                         isolate=record['HostConfig'].get('Isolate'), **kwargs)
+                         isolate=record['HostConfig'].get('Isolate'), lower=lower_of(st, record), **kwargs)
 
 
 def set_state(st, cid, **fields):
@@ -430,7 +460,7 @@ def exec_in(st, record, command, interactive, tty, detach, env, workdir, user):
 
 def container_path(st, record, path, follow=True):
     binds = [(b[0], b[1]) for b in all_binds(st, record)]
-    return runspec.guest_resolve(rootfs_of(st, record), binds, path, follow)
+    return runspec.guest_resolve(view_of(st, record), binds, path, follow)
 
 
 def cp(st, src, dest, archive_mode=False):
@@ -455,6 +485,9 @@ def cp(st, src, dest, archive_mode=False):
         copy_tree(host_src, Path(dest_path), src_path)
     else:
         host_dest = container_path(st, dest_c, dest_path)
+        if lower_of(st, dest_c):
+            # R6: written into the upper (a lower directory is made there).
+            host_dest = union.writable(rootfs_of(st, dest_c), lower_of(st, dest_c), host_dest)
         if src_path == '-':
             if not host_dest.is_dir():
                 raise StoreError(f'destination "{dest_path}" must be a directory')

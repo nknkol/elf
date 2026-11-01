@@ -1,7 +1,8 @@
 # Docker/OCI 镜像支持
 
-**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主已实现（`tools/oci/docker`），在
-HarmonyOS 真机上通过验收（见文末“R1–R3 实现记录”“R4–R5 实现记录”）；R6、R7 仍是设计。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
+**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主、R6 写时复制已实现（`tools/oci/docker`），在
+HarmonyOS 真机上通过验收（见文末“R1–R3 实现记录”“R4–R5 实现记录”“R6 实现记录”）；R6 中的层镜像（erofs/squashfs）与
+`mount -o loop` 没有做（理由见 R6 实现记录）；R7 仍是设计。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
 
 ## 目标
 
@@ -190,7 +191,7 @@ build-cache/                       R3：构建缓存索引
 
 R1 只有复制方式：`containers/<cid>/rootfs` 是镜像 rootfs 的完整副本，容器随意修改，`rm` 时删除。代价是
 启动时间与空间（debian-slim 约 80 MB、python-slim 约 150 MB），运行时就是普通目录。R2 加只读与原地方式，
-R6 加共享镜像的写时复制。
+R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`containers/<cid>/upper` 作上层，不复制）。
 
 ### 配置映射（`runspec.py`）
 
@@ -360,7 +361,7 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 - **验收**：postgres 以 postgres 用户初始化并启动数据目录；sshd 在 StrictModes 下接受密钥；构建中 `chown`/`useradd` 后
   导出的层 tar 头属主正确。
 
-## R6 层镜像与写时复制（需单独详细设计）
+## R6 层镜像与写时复制（实现见文末“R6 实现记录”，与下文设计的差别也写在那里）
 
 - **层镜像**：每层转成一个 erofs 或 squashfs 文件（只读、带压缩；属主、模式、setuid、设备节点、硬链接都保存在镜像元数据中）。
   镜像是普通文件，放在大小写不敏感的存储上也没问题。ext4 读写不做（写回需要完整的日志与分配逻辑）。
@@ -390,14 +391,15 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
   `exec` 进入的进程看得到宿主的其他进程。
 - **网络**：共用宿主网络；不能隔离、不能端口映射；数据报 UNIX 套接字在 `--isolate` 下不可用（见 STATUS.md）。
 - **资源**：没有 cgroup，`--memory`、`--cpus` 不可用，`stats` 只能粗略汇总宿主进程的数据。
-- **空间**：R6 之前每个容器一份 rootfs；设备 `/data` 目前剩余 65 GB。
+- **空间**：复制式容器每个一份 rootfs；`--cow` 容器只占上层（改过与新建的文件）；设备 `/data` 目前剩余 65 GB。
 
 ## 待定问题
 
 1. ~~R5 的属主数据库在不加 `--isolate` 时是否值得做~~：做了，两种模式都在共享内存里，不作安全边界（见“R4–R5 实现记录”）。
 2. ~~守护进程何时引入~~：R1–R3 都不需要（每容器监视进程）；R7 的 Engine API 需要时再定。
 3. `docker` 命令名与真正的 Docker 冲突时的安装方式。
-4. R6 选 erofs 还是 squashfs：erofs 随机读更快、格式更简单，squashfs 工具更普及；需要各写一个读取器原型比较。
+4. ~~R6 选 erofs 还是 squashfs~~：暂不做层镜像。展开后的镜像 rootfs 本来就只有一份、可作所有容器的共享下层，写时复制
+   不依赖镜像文件；层镜像只在要放到大小写不敏感的存储上或要省展开空间时才有用（见“R6 实现记录”）。
 
 ## R1–R3 实现记录（2026-11-01，HarmonyOS 真机）
 
@@ -486,3 +488,53 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
   别的文件（隔离模式下 broker 只按自己的树判断）。待定问题 1 因此按“值得做”处理。
 - **差别**：宿主之外复制或解包产生的新 inode（例如 `docker cp` 进来的文件）没有记录，显示为 root；硬链接复制
   （`--link-copy`）得到的新文件归创建者，不继承源的属主；chown 不清 setuid 位。
+
+## R6 实现记录（2026-11-01，HarmonyOS 真机）
+
+验收：`test/proot/test_union.py`（`make check`，两种构建 × 常规与 `--isolate`；Alpine 作下层，复制上层、whiteout、不透明
+目录、目录改名 EXDEV 回退复制、合并列表、下层 cwd、容器内 overlay 挂载，结束时逐字节核对下层未变）；`make check-oci`
+87→99 项（新增 `--cow` 的写入只进上层且镜像 rootfs 不变、另一个容器看不到、diff、cp 进出、commit，常规与 `--isolate`
+各一遍；`--cow --owners`；与 `--read-only` 互斥）全部通过。
+
+### 合并视图（payload）
+
+- **loader**：`--root UPPER --lower LOWER`（可重复，最上层在前，最多 8 层）。根就是上层，下层只读。子 loader 收到同样的
+  `--lower`；loader 自己打开的首个程序、PT_INTERP 与 `--cwd` 在上层没有时取最上面有它的下层。payload ABI 24。
+- **格式**：上层就是 OCI 层 diff：复制上来的与新建的条目、`.wh.<名字>` whiteout、`.wh..wh..opq` 不透明目录。所以一份
+  展开的层目录也能直接作下层。以 `.wh.` 开头的名字在视图里永远不可见，guest 也不能创建（EPERM）。
+- **查找**（`src/payload/logic/union_view.c`）：每个分量取最上面有它的层；非目录或不透明目录截断下面的层；whiteout 隐藏
+  下面的层。路径翻译对每个前缀映射一次，同一次调用复用公共前缀的结果，所以每个分量多 1–3 次 lstat（设计说的“查找最多翻倍”）。
+- **写**：改内容（写方式或截断 open）、chmod、utimensat、truncate、xattr、link 的源先复制上来（父目录一并；普通文件写到隐藏
+  的临时名再改名，并发安全；保留模式与时间，属主数据库的记录随之转到新 inode）；创建先在上层补齐父目录并去掉 whiteout，
+  在 whiteout 处新建的目录设为不透明；unlink/rmdir 删上层的并在下层有时留 whiteout，合并后非空的目录 ENOTEMPTY；rename
+  复制源、目标处理同上，下层有的目录改名 EXDEV（与不开 redirect_dir 的 overlayfs 相同，mv 会退回复制）。FD 上的 fchmod 与
+  `utimensat(fd, NULL)` 按 FD 的路径复制上来再改。开了属主数据库时，下层对象的 chown/chmod 只记录，不复制也不碰共享的文件。
+- **列目录**：内核先列 FD 自己那一层（去掉 `.wh.` 名字）；读完后 payload 用自己的 FD 依次读下面的层，去掉上层已有或被
+  whiteout 的名字。rewind 后内核重新返回条目，状态随之重置。
+- **反向映射**：内核给出的下层路径（cwd、`/proc/self/fd`）按根的上层命名；目录被复制上来之后，旧 FD/cwd 仍得到同一个 guest 名字。
+- **隔离模式**：broker 把下层登记为只读树，即使绕过 payload 的视图逻辑也写不到下层；合并视图本身不是安全边界。合并视图要
+  自己查找，所以开启时不走乐观的词法解析。
+- **容器内 `mount -t overlay`**（R4 的表）：`lowerdir=A:B,upperdir=U,workdir=W` 在目标处建立同样的合并视图（下层路径存在
+  挂载表的附加区，不进入每次路径调用复制的槽快照）；没有 upperdir 时只读。宿主路径属于上层最长匹配的视图，所以对合并目录的
+  bind 也是合并的；直接访问 lowerdir 本身看到的是它自己。
+
+### docker
+
+- `run`/`create --cow`（HostConfig `Cow`）：不复制 rootfs，镜像 rootfs 作下层、`containers/<id>/upper` 作上层；exec helper
+  与缺失的 WorkingDir 建在上层。与 `--read-only`、`--in-place` 互斥（125）。`--owners` 的数据库按镜像 rootfs 的 inode 建立，
+  复制上来时记录随之转移。
+- `diff`、`commit`、`cp`、用户解析用 `tools/oci/union.py` 读同一个合并视图：diff 比较镜像与合并后的快照；commit 的层从
+  显示该文件的那一层读取，新镜像的 rootfs 是镜像副本应用上层；`cp` 进容器写到上层（下层目录先在上层建立）；`inspect` 的
+  GraphDriver 多出 UpperDir、LowerDir。复制式容器照旧可用，仍是默认。
+
+### 与设计的差别
+
+- **没有层镜像**（erofs/squashfs、按需展开）与 `mount -o loop`：共享与写时复制只需要已展开的镜像 rootfs，它本来就只有一份；
+  层镜像要在 payload 与 broker 里各实现一个文件系统读取器加按需展开的缓存，收益只是能放在大小写不敏感的存储上、少占展开
+  空间。需要时再做。
+- **build 仍按扫描计算层**：RUN 还在复制式工作 rootfs 上执行；改成直接写合并视图的上层留待之后。
+- **下层不按层拆分**：docker 的下层是展开后的整个镜像 rootfs（一层）；loader 支持多层，`build` 与按层共享还没有用上。
+- **inode**：复制上来后 st_ino 改变（overlayfs 会保持）；已打开的下层 FD 继续读旧内容；硬链接复制后各自独立（本机本来就
+  不能建硬链接）。overlay 挂载的上层里的 whiteout 在根的视图里看不见（真实 overlayfs 里是字符设备，可见）。
+- **guarded 的安全遍历**：路径落在下层时不经 mount 根的逐级 O_NOFOLLOW 遍历（下层只读，guest 不能在里面放符号链接）。
+

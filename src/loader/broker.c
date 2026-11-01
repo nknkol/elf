@@ -12,7 +12,7 @@
 #include "loader.h"
 #include "broker_proto.h"
 
-#define TREES (CONFIG_MAX_BINDS + 5)
+#define TREES (CONFIG_MAX_BINDS + 5 + CONFIG_MAX_LOWERS)
 #define PATH_BYTES 4096
 #define LINKS_MAX 40
 #define ENOENT_ 2
@@ -1184,6 +1184,9 @@ static void broker_run(int control, const payload_config_t *cfg)
 	add_tree(cfg->root[0] ? cfg->root : "/", access[0] ? access[0] : 'w');
 	for (int i = 0; i < cfg->bind_count; i++)
 		add_tree(cfg->binds[i].dst, access[0] ? access[i + 1] : 'w');
+	/* R6: the root's lower layers are never written (copy-up goes to the root). */
+	for (int i = 0; i < cfg->lower_count; i++)
+		add_tree(cfg->lower[i], access[0] == 'd' ? 'd' : 'r');
 	add_tree(cfg->glue_dir, 'g');
 	add_tree(cfg->loader_path, 'r');
 	/* tmpfs mounts made inside the container (R4) live here. */

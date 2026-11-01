@@ -27,6 +27,7 @@ import owners as owners_mod
 import registry
 import runspec
 import runtime
+import union
 import store as store_mod
 import unpack
 from store import StoreError
@@ -1142,6 +1143,10 @@ def container_diff(st, record):
         return {}, {}, None
     image_root = st.image_dir(record['Image']) / 'rootfs'
     container_root = runtime.rootfs_of(st, record)
+    if host.get('Cow'):
+        # R6: the merged view; files are read from the layer that shows them.
+        return layers.scan(image_root), union.scan(container_root, image_root), \
+            union.Root(container_root, image_root)
     return layers.scan(image_root), layers.scan(container_root), container_root
 
 
@@ -1151,7 +1156,9 @@ def container_meta(st, record, root):
     meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
     db = st.container_dir(record['Id']) / 'owners.db'
     new = json.loads(json.dumps(meta))
-    if root is not None and db.exists():
+    if isinstance(root, union.Root) and db.exists():
+        owners_mod.update_meta(new, union.guest_view(root.upper, root.lower, db))
+    elif root is not None and db.exists():
         owners_mod.update_meta(new, owners_mod.guest_view(root, db))
     return meta, new
 
@@ -1232,6 +1239,9 @@ def cmd_commit(st, args):
         image_root = work / 'rootfs'
         if root is None:
             runspec.copy_rootfs(st.image_dir(record['Image']) / 'rootfs', image_root)
+        elif isinstance(root, union.Root):
+            runspec.copy_rootfs(root.lower, image_root)
+            union.apply(root.upper, image_root)
         else:
             runspec.copy_rootfs(root, image_root)
         image_id = install_built(st, config_bytes, manifest, image_root, new_meta)

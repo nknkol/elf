@@ -209,6 +209,83 @@ long mounts_add(const struct mount_entry *entry)
     return rc;
 }
 
+static int id_live(const struct mount_table *t, uint32_t id)
+{
+    uint32_t count = t->count > MOUNT_TABLE_MAX ? MOUNT_TABLE_MAX : t->count;
+    for (uint32_t i = 0; i < count; i++)
+        if (t->entries[i].guest[0] && t->entries[i].id == id)
+            return 1;
+    return 0;
+}
+
+long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CONFIG_MAX_PATH], int count)
+{
+    struct mount_table *t = table();
+    if (!t)
+        return -ENOSYS;
+    if (count < 0 || count > CONFIG_MAX_LOWERS)
+        return -EINVAL;
+    write_begin(&t->lock, &t->version);
+    long rc = -ENOMEM;
+    struct mount_overlay *record = NULL, *from = NULL;
+    for (int i = 0; i < MOUNT_OVERLAYS; i++) {
+        if (!lowers && t->overlay[i].id == entry->id && id_live(t, entry->id)) from = &t->overlay[i];
+        else if (!record && (!t->overlay[i].id || !id_live(t, t->overlay[i].id))) record = &t->overlay[i];
+    }
+    uint32_t used = t->count > MOUNT_TABLE_MAX ? MOUNT_TABLE_MAX : t->count, slot = 0;
+    while (slot < used && t->entries[slot].guest[0])
+        slot++;
+    if (record && slot < MOUNT_TABLE_MAX && (lowers || from)) {
+        if (from) {
+            memcpy(record->lower, from->lower, sizeof(record->lower));
+            record->count = from->count;
+        } else {
+            for (int i = 0; i < count; i++)
+                strncpy(record->lower[i], lowers[i], CONFIG_MAX_PATH - 1);
+            record->count = (uint32_t)count;
+        }
+        struct mount_entry *e = &t->entries[slot];
+        memcpy(e, entry, sizeof(*e));
+        e->kind = MOUNT_OVERLAY;
+        e->id = ++t->next_id;
+        record->id = e->id;
+        if (slot == used)
+            t->count = used + 1;
+        t->overlays++;
+        rc = 0;
+    }
+    write_end(&t->lock, &t->version);
+    return rc;
+}
+
+int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max)
+{
+    struct mount_table *t = table();
+    if (!t || !id)
+        return 0;
+    for (;;) {
+        uint32_t v = read_begin(&t->version);
+        int n = 0;
+        for (int i = 0; i < MOUNT_OVERLAYS; i++) {
+            if (t->overlay[i].id != id) continue;
+            n = (int)(t->overlay[i].count > (uint32_t)max ? (uint32_t)max : t->overlay[i].count);
+            for (int k = 0; k < n; k++)
+                memcpy(out[k], t->overlay[i].lower[k], CONFIG_MAX_PATH);
+        }
+        if (read_retry(&t->version, v))
+            continue;
+        for (int k = 0; k < n; k++)
+            out[k][CONFIG_MAX_PATH - 1] = 0;
+        return n;
+    }
+}
+
+int mounts_overlays(void)
+{
+    struct mount_table *t = table();
+    return t && __atomic_load_n(&t->overlays, __ATOMIC_RELAXED) != 0;
+}
+
 long mounts_remove(const char *guest, int detach)
 {
     struct mount_table *t = table();
@@ -698,4 +775,15 @@ void owners_forget(const struct stat *st)
 {
     if (db())
         update(st, 0, OWNER_IDS | OWNER_MODE, 0, 0, 0);
+}
+
+void owners_copied(const struct stat *from, const struct stat *to)
+{
+    struct owner_record r;
+    if (!db())
+        return;
+    if (find(from, &r) && (r.flags & (OWNER_IDS | OWNER_MODE)))
+        update(to, r.flags & (OWNER_IDS | OWNER_MODE), OWNER_IDS | OWNER_MODE, r.uid, r.gid, r.mode);
+    else
+        update(to, 0, OWNER_IDS | OWNER_MODE, 0, 0, 0);
 }
