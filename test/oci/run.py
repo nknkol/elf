@@ -1140,6 +1140,29 @@ def run_tests(home, work, isolate):
     check(p.returncode == 0 and conf.read_text() == 'copied' and p2.returncode != 0 and
           roconf.read_text() == 'old\n', 'cp onto a file bind updates its source; a read-only one refuses' + tag,
           p.stderr + p2.stderr)
+    # The bind's own source (also through a path alias), or a volume file
+    # copied onto itself, keeps its content.
+    alias = work / ('alias' + suffix)
+    alias.symlink_to(work)
+    (mvol / 'g').write_text('volfile\n')
+    p = docker(home, 'cp', str(conf), f'{mname}:/srv/app.conf')
+    p2 = docker(home, 'cp', str(alias / conf.name), f'{mname}:/srv/app.conf')
+    p3 = docker(home, 'cp', str(alias / mvol.name / 'g'), f'{mname}:/srv/sub/')
+    check(p.returncode == 0 and p2.returncode == 0 and p3.returncode == 0 and conf.read_text() == 'copied' and
+          (mvol / 'g').read_text() == 'volfile\n',
+          'cp of a bind source onto itself (or through an alias) keeps its content' + tag,
+          p.stderr + p2.stderr + p3.stderr)
+    # --read-only: a writable file bind in a read-only directory updates; the
+    # root's own files still refuse.
+    rname = 'rofile' + suffix
+    docker(home, 'run', *mode, '--name', rname, '--read-only', '-v', f'{conf}:/etc/app.conf', img, 'true')
+    rcdir = image_root(home, img)
+    p = docker(home, 'cp', str(work / 'release'), f'{rname}:/etc/app.conf')
+    p2 = docker(home, 'cp', str(work / 'cpfile'), f'{rname}:/etc/motd')
+    check(p.returncode == 0 and conf.read_text() == (work / 'release').read_text() and p2.returncode != 0 and
+          (rcdir / 'etc/motd').read_text() != 'copied',
+          '--read-only: cp updates a writable file bind, the root refuses' + tag, p.stderr + p2.stderr)
+    docker(home, 'rm', rname)
     docker(home, 'rm', mname)
     # exec -d processes are the container's: they end when it stops, also
     # background jobs left by an exec whose shell has exited.

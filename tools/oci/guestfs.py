@@ -20,6 +20,7 @@ An entry is (parts, kind, mode, mtime, size, link, open). kind is one of:
 'd' directory, 'f' regular file, 'l' symlink, 'h' hard link (link = parts
 of its target in the same copy), or 'o' other (not copied). open() returns
 a binary file object."""
+import io
 import os
 import stat
 import tarfile
@@ -261,7 +262,8 @@ class GuestSink:
         self.view, self.base = view, list(base)
         self.sinks = {}
         self.made = set()   # directories known to be in the upper
-        view.write_area(self.base)
+        # (Each entry is checked where it lands: base only locates them, so
+        # a read-only root's directory may hold a writable file bind.)
 
     def upper_dir(self, guest):
         """The guest directory made in the upper as a --cow directory is
@@ -281,20 +283,27 @@ class GuestSink:
         source (opened, not replaced), the mount stays."""
         if e.kind != 'f':
             raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
-        fd = os.open(root, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | os.O_CLOEXEC)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
-            os.ftruncate(fd, 0)
-            with e.open() as src:
+        with e.open() as src:
+            fd = os.open(root, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                dest = os.fstat(fd)
+                if not stat.S_ISREG(dest.st_mode):
+                    raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
+                try:
+                    source = os.fstat(src.fileno())
+                except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+                    source = None   # (a tar member)
+                if source is not None and (source.st_dev, source.st_ino) == (dest.st_dev, dest.st_ino):
+                    return   # the bind's own source: already this content
+                os.ftruncate(fd, 0)
                 while True:
                     chunk = src.read(1 << 20)
                     if not chunk:
                         break
                     os.write(fd, chunk)
-            os.utime(fd, (e.mtime, e.mtime))
-        finally:
-            os.close(fd)
+                os.utime(fd, (e.mtime, e.mtime))
+            finally:
+                os.close(fd)
 
     def sink(self, root, upper):
         key = str(root)
@@ -424,6 +433,23 @@ class DirSink:
             os.close(fd)
 
     def write(self, fd, name, e):
+        # The source is opened before anything at the destination goes: it
+        # may be the very file being replaced (a volume copied onto itself).
+        src = None
+        if e.kind == 'h':
+            try:
+                src = os.fdopen(self.root.open_file(e.link), 'rb')
+            except OSError:
+                raise StoreError(f'hard link {"/".join(e.parts)} to missing {"/".join(e.link)}') from None
+        elif e.kind == 'f':
+            src = e.open()
+        try:
+            self.place(fd, name, e, src)
+        finally:
+            if src is not None:
+                src.close()
+
+    def place(self, fd, name, e, src):
         try:
             existing = os.stat(name, dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -458,27 +484,19 @@ class DirSink:
             except OSError:
                 pass
         else:
-            if e.kind == 'h':
-                try:
-                    src = os.fdopen(self.root.open_file(e.link), 'rb')
-                except OSError:
-                    raise StoreError(f'hard link {"/".join(e.parts)} to missing {"/".join(e.link)}') from None
-            else:
-                src = e.open()
-            with src:
-                out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                              0o600, dir_fd=fd)
-                try:
-                    while True:
-                        chunk = src.read(1 << 20)
-                        if not chunk:
-                            break
-                        os.write(out, chunk)
-                    mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode) if e.kind == 'h' else e.mode
-                    set_mode(out, mode, False)
-                    os.utime(out, (e.mtime, e.mtime))
-                finally:
-                    os.close(out)
+            out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          0o600, dir_fd=fd)
+            try:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    os.write(out, chunk)
+                mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode) if e.kind == 'h' else e.mode
+                set_mode(out, mode, False)
+                os.utime(out, (e.mtime, e.mtime))
+            finally:
+                os.close(out)
 
     def finish(self):
         for parts, mtime in reversed(self.dir_times):
