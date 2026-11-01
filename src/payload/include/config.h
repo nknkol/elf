@@ -63,7 +63,7 @@
  * --mount-scratch; child loaders get the FD. */
 #define CONFIG_MOUNT_TABLE_FD 901
 #define CONFIG_MAX_MOUNTS 48
-#define CONFIG_MOUNT_TABLE_BYTES 49152 /* container_state.h checks it */
+#define CONFIG_MOUNT_TABLE_BYTES 53248 /* container_state.h checks it */
 /* Mount ids of one view: 0 the root, 1.. the binds, then the table slots. */
 #define CONFIG_MOUNT_IDS (CONFIG_MAX_BINDS + 1 + CONFIG_MAX_MOUNTS)
 #define CONFIG_CHILD_MOUNT_TABLE_FD "--mount-table-fd"

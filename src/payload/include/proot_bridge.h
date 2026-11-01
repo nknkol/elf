@@ -59,4 +59,6 @@ struct proot_path_context {
 long proot_context_syscall(long number, long args[6], const struct proot_path_context *context);
 int proot_handles_syscall(long number);
 long proot_syscall(long number, long args[6]);
+/* R6: an ioctl on an emulated loop device (/dev/loop*): 1 with *result. */
+int proot_loop_ioctl(long fd, unsigned long cmd, long arg, long *result);
 #endif

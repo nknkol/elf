@@ -1,8 +1,8 @@
 # Docker/OCI 镜像支持
 
 **状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主、R6 写时复制、R7 compose 与 Engine API
-已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收（见文末各“实现记录”）；R6 的层镜像（erofs，按需展开）与
-`build` 直接写合并视图的上层也已完成，只剩只读镜像的 `mount -o loop` 没有做。下文各节保留设计原文，实现与设计不同之处
+已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收（见文末各“实现记录”）；R6 的层镜像（erofs，按需展开）、
+`build` 直接写合并视图的上层与容器内只读镜像的 `mount -o loop` 也已完成。下文各节保留设计原文，实现与设计不同之处
 集中写在“实现与设计的差异”。
 
 ## 目标
@@ -336,7 +336,7 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 | `mount -t proc` / `sysfs` / `devpts` | 绑定宿主的对应目录 | 内容是宿主的 |
 | `umount` | 删除该条翻译 | — |
 | `/proc/self/mounts`、`mountinfo` | 按表伪造 | `findmnt`、`df` 看到一致的结果 |
-| `mount -t overlay`、只读镜像的 `mount -o loop` | R6 的合并视图与层镜像提供 | — |
+| `mount -t overlay`、只读镜像的 `mount -o loop` | R6 的合并视图与层镜像提供 | loop 只认 erofs |
 | ext4 等可写镜像、块设备、NFS/CIFS、FUSE | 不支持 | — |
 
 要点：
@@ -589,9 +589,38 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
 - **限制**：缓存要区分大小写，和展开的 rootfs 一样由 store 打开时的检查保证（大小写不敏感的位置直接拒绝）；HarmonyOS 应用
   存储上 FIFO 的模式受 umask 影响、时间为展开时刻（存储拒绝事后修改）。
 
+### mount -o loop（2026-11-01）
+
+- **loop 设备**（`--emulate-mounts`，docker 容器总是开）：`/dev/loop-control` 与 `/dev/loop0`–`7` 由 payload 模拟，
+  不存在于宿主。打开它们得到一个以设备命名的 memfd（`elf-loop3`），ioctl 按 FD 自己的链接认出设备，fork、dup 都不用
+  另外记录；stat 显示块设备 7:N（控制设备字符设备 10:237），guarded 构建的修改保护不把它们算作所在挂载的文件。
+  支持 `LOOP_CTL_GET_FREE`、`LOOP_SET_FD`、`LOOP_CONFIGURE`、`LOOP_SET/GET_STATUS64`、`LOOP_CLR_FD`、`BLKGETSIZE64`
+  等；绑定记在共享挂载表的新区（每个设备：后备文件的宿主路径、dev/ino、大小、偏移、`lo_file_name`、标志），所以
+  `losetup` 与之后单独运行的 `mount` 看到同一个设备。挂载表 48 KiB → 52 KiB，payload ABI 26。
+- **挂载**：`mount -t erofs /dev/loopN DIR`（`mount -o loop` 先绑设备再这样挂）或直接以镜像文件为
+  源（Linux 6.12 的文件后端 erofs）。挂载是只读的合并视图：上层是挂载 scratch 下的空目录，唯一的下层是 scratch 下的缓存
+  目录，镜像是它的层镜像，所以按需展开与填充都用层镜像那一套（每个挂载一份缓存）。`/proc/mounts` 显示
+  `/dev/loop0 DIR erofs ro`；umount 时带 `LO_FLAGS_AUTOCLEAR`（mount 设的）且没有别的挂载用它的设备被释放，挂载中
+  `LOOP_CLR_FD` 改为卸载时释放。偏移不为 0 的设备拒绝（EINVAL），其他块设备文件系统类型 EINVAL（BusyBox 试下一个）。
+- **/proc/filesystems**：开了挂载模拟时由 payload 生成（模拟支持的 nodev 类型加 erofs）。HongMeng 没有这个文件，
+  BusyBox 的 `mount -o loop` 不带 `-t` 时靠它挑类型。
+- **隔离模式**：broker 不读挂载表，所以新增伪调用 `BROKER_LAZY_MOUNT {rel, op, image, cache}`：broker 按自己的树确认
+  缓存目录在 guest 可写的树里、镜像是 guest 可读的文件，再用这两个 FD（不再按名字）展开或填充；展开只写缓存，guest
+  自己本来就能写那里，所以不扩权。顺带修正 broker 里两个按 x86 写的常量（`O_DIRECTORY` 0200000 在 AArch64 是
+  `O_DIRECT`，`O_TMPFILE` 同理）。
+- **普通构建**：只读只显示不执行（与 R4 的 `-o ro` 相同），写入落在挂载自己的空上层里，不碰镜像；guarded 构建拒绝（EROFS）。
+- **util-linux（Ubuntu）**：`losetup -f --show FILE` 加 `mount -t erofs /dev/loopN DIR` 正常；`mount -o loop` 挂上了
+  （文件可读），但随后写 `/run/mount/utab` 失败，报 “filesystem was mounted, but any subsequent operation failed:
+  Operation not permitted” 并退出 1（同一 rootfs 里带 `x-` 选项的 bind 写 utab 正常，原因未查明）；`losetup -a` 读 sysfs，
+  列不出模拟的设备。
+- **验收**：`test/proot/test_loop.py`（`make check`，两种构建 × 常规与 `--isolate`，Alpine 的 BusyBox）：`mount -o loop`
+  后读文件、符号链接、执行镜像里的脚本、30 万字节文件的 md5；`/proc/mounts`；子进程看得到；guarded 拒绝写入；
+  `losetup -f`、`losetup DEV FILE`、`losetup DEV`、`mount -t erofs DEV`、`losetup -d`；umount 释放设备；不是镜像的
+  文件挂不上；只有读过的文件被填充，镜像文件不变。
+
 ### 与设计的差别
 
-- **没有 `mount -o loop`**：层镜像只作为 docker 的下层（`--lower-image`）使用，容器内挂载只读镜像还没有接上 R4 的挂载表。
+- **`mount -o loop` 只认 erofs**：squashfs 与可写的块设备文件系统没有做（类型对、内容不是 erofs 时 EINVAL）。
 - **下层按层拆分只在层镜像时**：未转换的镜像，docker 的下层是展开后的整个镜像 rootfs（一层）；转换后每层一个层镜像。
 - **inode**：复制上来后 st_ino 改变（overlayfs 会保持）；已打开的下层 FD 继续读旧内容；硬链接复制后各自独立（本机本来就
   不能建硬链接）。overlay 挂载的上层里的 whiteout 在根的视图里看不见（真实 overlayfs 里是字符设备，可见）。

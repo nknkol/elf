@@ -25,10 +25,10 @@
 #define ENAMETOOLONG_ 36
 #define ENOTDIR_ 20
 #define O_PATH_ 010000000
-#define O_DIRECTORY_ 0200000
+#define O_DIRECTORY_ 040000 /* AArch64 values (0200000 is O_DIRECT here) */
 #define O_CREAT_ 0100
 #define O_TRUNC_ 01000
-#define O_TMPFILE_ 020200000
+#define O_TMPFILE_ 020040000
 #define O_ACCMODE_ 3
 #define O_CLOEXEC_ 02000000
 #define AT_SYMLINK_FOLLOW_ 0x400
@@ -607,7 +607,7 @@ static long held_access(int fd, int flags)
 		return held;
 	if (flags & O_PATH_)
 		return 0;
-	if ((held & O_PATH_) || (flags & (O_CREAT_ | O_TMPFILE_)))
+	if ((held & O_PATH_) || (flags & O_CREAT_) || (flags & O_TMPFILE_) == O_TMPFILE_)
 		return -EACCES_;
 	int want = flags & O_ACCMODE_, have = (int)(held & O_ACCMODE_);
 	if (have == 2 || want == have)
@@ -668,6 +668,47 @@ static long lazy_request(const struct call *c)
 			       : lazy_expand(broker_cfg->lower_image[i], cache, path + n);
 	}
 	return -EACCES_;
+}
+
+/* BROKER_LAZY_MOUNT: the cache directory (path 3) must be writable to the
+ * guest, the image (path 2) readable; both are then used by their FDs, so
+ * a later swap of a path name changes nothing. */
+static long lazy_mount_request(struct call *c)
+{
+	const char *rel = c->path[0];
+	if (!rel || rel[0] != '/' || z_strlen(rel) >= 4096)
+		return -EINVAL_;
+	struct target t = {.dir = -1}, u = {.dir = -1};
+	int next = 0;
+	long cache = -1, image = -1;
+	long rc = target_of(c, 2, &next, 0, &u);
+	if (rc >= 0)
+		rc = target_of(c, 3, &next, 0, &t);
+	if (rc >= 0)
+		rc = check(&u, 0);
+	if (rc >= 0)
+		rc = check(&t, 1);
+	if (rc >= 0 && (!u.name[0] || !t.name[0]))
+		rc = -EINVAL_;
+	if (rc >= 0) {
+		image = sys(__NR_openat, u.dir, (long)u.name, O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0); /* O_RDONLY */
+		cache = sys(__NR_openat, t.dir, (long)t.name,
+			    O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+		rc = image < 0 ? image : cache < 0 ? cache : 0;
+	}
+	if (rc >= 0) {
+		char image_path[32], cache_path[32];
+		fd_path(image_path, (int)image);
+		fd_path(cache_path, (int)cache);
+		rc = c->a[1] ? lazy_fill(image_path, cache_path, rel) : lazy_expand(image_path, cache_path, rel);
+	}
+	if (image >= 0)
+		sys(__NR_close, image, 0, 0, 0, 0, 0);
+	if (cache >= 0)
+		sys(__NR_close, cache, 0, 0, 0, 0, 0);
+	release(&t);
+	release(&u);
+	return rc;
 }
 
 static long execute(struct call *c, long nr)
@@ -956,6 +997,9 @@ static long execute(struct call *c, long nr)
 		break;
 	case BROKER_LAZY_PATH:
 		rc = lazy_request(c);
+		break;
+	case BROKER_LAZY_MOUNT:
+		rc = lazy_mount_request(c);
 		break;
 	default:
 		rc = -EACCES_;

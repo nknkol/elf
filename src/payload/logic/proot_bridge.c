@@ -34,6 +34,7 @@ extern long raw_syscall(long, long, long, long, long, long, long);
 #include "host_syscall.h"
 #include "broker_proto.h"
 #define raw_syscall host_syscall
+static int loop_device(const char *guest); /* (R6 loop devices, below) */
 _Static_assert(sizeof(struct stat) == 128 && offsetof(struct stat, st_mode) == 16,
                "Adapter requires Linux AArch64 kernel stat ABI");
 /* AArch64 user msghdr; only the name fields are rewritten, in a private copy. */
@@ -1242,7 +1243,9 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
         if (visibility == FS_HIDDEN || (visibility == FS_TRAVERSE && !b->traverse))
             return -EACCES;
     }
-    if (rc >= 0 && b->mutation && g_payload_config.guard >= GUARD_PATHS) {
+    /* (The emulated loop devices are no file of the mount they appear in.) */
+    if (rc >= 0 && b->mutation && g_payload_config.guard >= GUARD_PATHS &&
+        !(mounts_enabled() && loop_device(b->guest) != -1)) {
         size_t mount;
         rc = binding_table_mount_id(&b->table, b->guest, &mount);
         if (rc < 0) return rc;
@@ -1814,6 +1817,359 @@ static void tmpfs_options(const char *data, unsigned *mode, long *uid, long *gid
     }
 }
 
+/* ---- R6 loop devices (container_state.h): /dev/loop-control and
+ * /dev/loop0..7 are the payload's own. Opening one gives a memfd named
+ * after it ("elf-loop3"), so the ioctls tell the device from the FD's own
+ * link, through fork and dup alike; stat shows the block or character
+ * device. A loop mount of an erofs image is a read-only merged view whose
+ * only lower is a cache of the image (lazy_layer.h). */
+#define LOOP_CONTROL (-2)
+#define LO_FLAGS_READ_ONLY_ 1u
+#define LO_FLAGS_AUTOCLEAR_ 4u
+#define LO_FLAGS_SETTABLE_ (4u | 8u | 16u) /* AUTOCLEAR, PARTSCAN, DIRECT_IO */
+#define EROFS_MAGIC_ 0xE0F5E1E2u
+
+/* LOOP_CONTROL, a loop number, or -1 for any other guest path. */
+static int loop_device(const char *guest)
+{
+    if (strncmp(guest, "/dev/loop", 9)) return -1;
+    const char *p = guest + 9;
+    if (!strcmp(p, "-control")) return LOOP_CONTROL;
+    if (p[0] >= '0' && p[0] < '0' + MOUNT_LOOPS && !p[1]) return p[0] - '0';
+    return -1;
+}
+
+/* The device a FD of loop_open is, as loop_device; -1 for another FD. */
+static int loop_fd(int fd)
+{
+    char link[32] = "/proc/self/fd/", target[64], digits[12];
+    unsigned v = (unsigned)fd;
+    size_t at = strlen(link);
+    int nd = 0;
+    if (fd < 0) return -1;
+    do { digits[nd++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (nd) link[at++] = digits[--nd];
+    link[at] = 0;
+    long n = raw_syscall(__NR_readlinkat, AT_FDCWD, (long)link, (long)target, sizeof(target) - 1, 0, 0);
+    if (n < 0) return -1;
+    target[n] = 0;
+    static const char prefix[] = "/memfd:elf-loop";
+    if (strncmp(target, prefix, sizeof(prefix) - 1)) return -1;
+    const char *p = target + sizeof(prefix) - 1;
+    if (!strncmp(p, "-control", 8) && (p[8] == 0 || p[8] == ' ')) return LOOP_CONTROL;
+    if (p[0] >= '0' && p[0] < '0' + MOUNT_LOOPS && (p[1] == 0 || p[1] == ' ')) return p[0] - '0';
+    return -1;
+}
+
+/* ioctl and stat buffers of the guest: copied directly, as the stat
+ * post-processing does (process_vm_* is refused with --isolate). */
+static long guest_copy_out(void *to, const void *from, size_t n)
+{
+    if (!to) return -EFAULT;
+    memcpy(to, from, n);
+    return 0;
+}
+
+static long guest_copy_in(void *to, const void *from, size_t n)
+{
+    if (!from) return -EFAULT;
+    memcpy(to, from, n);
+    return 0;
+}
+
+/* A path call on a loop device of the guest. */
+static long loop_path_call(long number, long a[6], int device)
+{
+    unsigned mode = device == LOOP_CONTROL ? 0020660 : 0060660;
+    unsigned major = device == LOOP_CONTROL ? 10 : 7, minor = device == LOOP_CONTROL ? 237 : (unsigned)device;
+    switch (number) {
+    case __NR_openat: {
+        if ((a[2] & O_CREAT) && (a[2] & O_EXCL)) return -EEXIST;
+        if (a[2] & O_DIRECTORY) return -ENOTDIR;
+        char name[24] = "elf-loop";
+        if (device == LOOP_CONTROL) strcat(name, "-control");
+        else { name[8] = (char)('0' + device); name[9] = 0; }
+        return raw_syscall(__NR_memfd_create, (long)name, (a[2] & O_CLOEXEC) ? 1 /* MFD_CLOEXEC */ : 0,
+                           0, 0, 0, 0);
+    }
+    case __NR_newfstatat: {
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        st.st_mode = mode;
+        st.st_nlink = 1;
+        st.st_rdev = (major << 8) | minor;
+        st.st_blksize = 4096;
+        return guest_copy_out((void *)a[2], &st, sizeof(st));
+    }
+    case __NR_statx: {
+        unsigned char sx[256];
+        memset(sx, 0, sizeof(sx));
+        uint32_t mask = 0x7ff, blksize = 4096, nlink = 1;  /* STATX_BASIC_STATS */
+        uint16_t m = (uint16_t)mode;
+        memcpy(sx, &mask, 4);
+        memcpy(sx + 4, &blksize, 4);
+        memcpy(sx + 16, &nlink, 4);
+        memcpy(sx + 28, &m, 2);
+        memcpy(sx + 128, &major, 4);
+        memcpy(sx + 132, &minor, 4);
+        return guest_copy_out((void *)a[4], sx, sizeof(sx));
+    }
+    case __NR_faccessat: case __NR_faccessat2:
+        return 0;
+    case __NR_readlinkat:
+        return -EINVAL;
+    case __NR_mknodat:
+        return -EEXIST;
+    default:
+        return -EPERM;
+    }
+}
+
+/* Whether a live mount shows loop device n (its source is /dev/loopN). */
+static bool loop_mounted(int n)
+{
+    struct mount_entry *mounts = (struct mount_entry *)proot_scratch_alloc(sizeof(struct mount_entry) * CONFIG_MAX_MOUNTS);
+    if ((unsigned long)mounts >= (unsigned long)-4095) return true; /* (keep it bound) */
+    int count = mounts_snapshot(mounts, CONFIG_MAX_MOUNTS);
+    char name[16] = "/dev/loop";
+    name[9] = (char)('0' + n);
+    name[10] = 0;
+    bool found = false;
+    for (int i = 0; i < count && !found; i++)
+        found = mounts[i].guest[0] && !strcmp(mounts[i].source, name);
+    proot_scratch_free(mounts, sizeof(struct mount_entry) * CONFIG_MAX_MOUNTS);
+    return found;
+}
+
+/* struct loop_info64: offset 24, sizelimit 32, number 40, flags 52,
+ * file name 56 (64 bytes); 232 bytes. */
+static void loop_info_out(unsigned char *info, int n, const struct mount_loop *l)
+{
+    memset(info, 0, 232);
+    memcpy(info + 8, &l->ino, 8);
+    memcpy(info + 16, &l->dev, 8);
+    memcpy(info + 24, &l->offset, 8);
+    memcpy(info + 32, &l->sizelimit, 8);
+    uint32_t number = (uint32_t)n;
+    memcpy(info + 40, &number, 4);
+    memcpy(info + 52, &l->flags, 4);
+    memcpy(info + 56, l->name, 63);
+}
+
+static long loop_set_status(int n, const unsigned char *info)
+{
+    struct mount_loop l;
+    long rc = mounts_loop_get(n, &l);
+    if (rc < 0) return rc;
+    uint32_t flags;
+    memcpy(&l.offset, info + 24, 8);
+    memcpy(&l.sizelimit, info + 32, 8);
+    memcpy(&flags, info + 52, 4);
+    l.flags = (l.flags & ~LO_FLAGS_SETTABLE_) | (flags & LO_FLAGS_SETTABLE_);
+    memcpy(l.name, info + 56, 63);
+    l.name[63] = 0;
+    return mounts_loop_status(n, &l);
+}
+
+static long loop_set_fd(int n, int file)
+{
+    struct mount_loop l;
+    memset(&l, 0, sizeof(l));
+    struct stat st;
+    long rc = raw_syscall(__NR_fstat, file, (long)&st, 0, 0, 0, 0);
+    if (rc < 0) return -EBADF;
+    if ((st.st_mode & S_IFMT) != S_IFREG) return -EINVAL;
+    char link[32] = "/proc/self/fd/", digits[12], host[PATH_MAX];
+    unsigned v = (unsigned)file;
+    size_t at = strlen(link);
+    int nd = 0;
+    do { digits[nd++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (nd) link[at++] = digits[--nd];
+    link[at] = 0;
+    long len = raw_syscall(__NR_readlinkat, AT_FDCWD, (long)link, (long)host, sizeof(host) - 1, 0, 0);
+    if (len < 0) return len;
+    if (len >= CONFIG_MAX_PATH || host[0] != '/') return -ENAMETOOLONG;
+    host[len] = 0;
+    strcpy(l.file, host);
+    l.dev = st.st_dev;
+    l.ino = st.st_ino;
+    l.size = (uint64_t)st.st_size;
+    long fl = raw_syscall(__NR_fcntl, file, 3 /* F_GETFL */, 0, 0, 0, 0);
+    if (fl >= 0 && (fl & O_ACCMODE) == O_RDONLY) l.flags |= LO_FLAGS_READ_ONLY_;
+    return mounts_loop_bind(n, &l);
+}
+
+int proot_loop_ioctl(long fd, unsigned long cmd, long arg, long *result)
+{
+    bool loop_cmd = (cmd & 0xff00) == 0x4c00;
+    bool block_cmd = cmd == 0x80081272 /* BLKGETSIZE64 */ || cmd == 0x1260 /* BLKGETSIZE */ ||
+        cmd == 0x1268 /* BLKSSZGET */ || cmd == 0x125e /* BLKROGET */ || cmd == 0x1261 /* BLKFLSBUF */;
+    if (!loop_cmd && !block_cmd) return 0;
+    int device = loop_fd((int)fd);
+    if (device == -1) return 0;
+    long rc = -ENOTTY;
+    struct mount_loop l;
+    if (device == LOOP_CONTROL) {
+        if (cmd == 0x4c82) rc = mounts_loop_free();              /* LOOP_CTL_GET_FREE */
+        else if (cmd == 0x4c80) rc = arg >= 0 && arg < MOUNT_LOOPS ? -EEXIST : -ENOSPC; /* ADD */
+        else if (cmd == 0x4c81) rc = mounts_loop_get((int)arg, &l) == 0 ? -EBUSY : -EPERM; /* REMOVE */
+        *result = rc;
+        return 1;
+    }
+    unsigned char info[232];
+    switch (cmd) {
+    case 0x4c00: /* LOOP_SET_FD */
+        rc = loop_set_fd(device, (int)arg);
+        break;
+    case 0x4c0a: { /* LOOP_CONFIGURE: fd, block_size, loop_info64, reserved */
+        unsigned char config[8 + 232];
+        rc = guest_copy_in(config, (void *)arg, sizeof(config));
+        if (rc < 0) break;
+        uint32_t file;
+        memcpy(&file, config, 4);
+        rc = loop_set_fd(device, (int)file);
+        if (rc == 0) rc = loop_set_status(device, config + 8);
+        if (rc < 0 && rc != -EBUSY) mounts_loop_bind(device, NULL);
+        break;
+    }
+    case 0x4c01: /* LOOP_CLR_FD: while mounted, at the umount */
+        rc = mounts_loop_get(device, &l);
+        if (rc < 0) break;
+        if (loop_mounted(device)) {
+            l.flags |= LO_FLAGS_AUTOCLEAR_;
+            rc = mounts_loop_status(device, &l);
+        } else {
+            rc = mounts_loop_bind(device, NULL);
+        }
+        break;
+    case 0x4c04: /* LOOP_SET_STATUS64 */
+        rc = guest_copy_in(info, (void *)arg, sizeof(info));
+        if (rc == 0) rc = loop_set_status(device, info);
+        break;
+    case 0x4c05: /* LOOP_GET_STATUS64 */
+        rc = mounts_loop_get(device, &l);
+        if (rc == 0) {
+            loop_info_out(info, device, &l);
+            rc = guest_copy_out((void *)arg, info, sizeof(info));
+        }
+        break;
+    case 0x4c02: case 0x4c03: /* the old loop_info: unbound tells ENXIO */
+        rc = mounts_loop_get(device, &l);
+        if (rc == 0) rc = -EINVAL;
+        break;
+    case 0x4c07: case 0x4c08: case 0x4c09: /* SET_CAPACITY, DIRECT_IO, BLOCK_SIZE */
+        rc = mounts_loop_get(device, &l);
+        break;
+    case 0x80081272: case 0x1260: { /* BLKGETSIZE64, BLKGETSIZE */
+        rc = mounts_loop_get(device, &l);
+        uint64_t size = rc < 0 ? 0 : l.size > l.offset ? l.size - l.offset : 0;
+        if (l.sizelimit && size > l.sizelimit) size = l.sizelimit;
+        if (cmd == 0x1260) size >>= 9;
+        rc = guest_copy_out((void *)arg, &size, 8);
+        break;
+    }
+    case 0x1268: { /* BLKSSZGET */
+        int sector = 512;
+        rc = guest_copy_out((void *)arg, &sector, 4);
+        break;
+    }
+    case 0x125e: { /* BLKROGET */
+        int ro = mounts_loop_get(device, &l) == 0 && (l.flags & LO_FLAGS_READ_ONLY_);
+        rc = guest_copy_out((void *)arg, &ro, 4);
+        break;
+    }
+    case 0x1261: /* BLKFLSBUF */
+        rc = 0;
+        break;
+    }
+    *result = rc;
+    return 1;
+}
+
+/* Whether host is an erofs image the payload can expand (an image of an
+ * uncompressed layout is checked as it is expanded). */
+static long erofs_image(const char *host)
+{
+    long fd = raw_syscall(__NR_openat, AT_FDCWD, (long)host, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+    if (fd < 0) return fd;
+    uint32_t magic = 0;
+    long n = raw_syscall(__NR_pread64, fd, (long)&magic, 4, 1024, 0, 0);
+    raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+    return n == 4 && magic == EROFS_MAGIC_ ? 0 : -EINVAL;
+}
+
+/* Filesystems a block device could hold: a loop mount of another type is
+ * "wrong fs type" (busybox tries the next one) rather than ENODEV. */
+static bool block_filesystem(const char *type)
+{
+    static const char *const types[] = {"ext2", "ext3", "ext4", "vfat", "msdos", "exfat", "squashfs",
+                                        "iso9660", "udf", "xfs", "btrfs", "f2fs", "ntfs", "ntfs3",
+                                        "cramfs", "romfs", "minix", "hfsplus", "jfs", "reiserfs"};
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++)
+        if (!strcmp(type, types[i])) return true;
+    return false;
+}
+
+/* mount of a loop device or (erofs, as Linux 6.12 can) of an image file. 1
+ * with *result when the source is one; 0: not a loop mount. */
+static int loop_mount(Bridge *b, const char *guest, const char *source, const char *type,
+                      unsigned long flags, unsigned long per_mount, struct mount_entry *e, long *result)
+{
+    if (!source || !*source) return 0;
+    long ret = resolve(b, AT_FDCWD, source, true);
+    if (ret < 0) return 0;
+    int device = loop_device(b->guest);
+    char image[CONFIG_MAX_PATH], label[64];
+    struct mount_loop l;
+    if (device >= 0) {
+        if (mounts_loop_get(device, &l) < 0) { *result = -ENXIO; return 1; }
+        if (l.offset) { *result = -EINVAL; return 1; } /* (an image at offset 0 only) */
+        strcpy(image, l.file);
+        strcpy(label, "/dev/loop0");
+        label[9] = (char)('0' + device);
+    } else {
+        struct stat st;
+        if (device == LOOP_CONTROL || strcmp(type, "erofs") ||
+            raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&st, 0, 0, 0) < 0 ||
+            (st.st_mode & S_IFMT) != S_IFREG)
+            return 0;
+        if (strlen(b->host) >= CONFIG_MAX_PATH) { *result = -ENAMETOOLONG; return 1; }
+        strcpy(image, b->host);
+        memset(label, 0, sizeof(label));
+        strncpy(label, b->guest, sizeof(label) - 1);
+    }
+    if (strcmp(type, "erofs")) {
+        *result = block_filesystem(type) ? -EINVAL : -ENODEV;
+        return 1;
+    }
+    if ((ret = erofs_image(image)) < 0) { *result = ret; return 1; }
+    char cache[1][CONFIG_MAX_PATH];
+    memset(e, 0, sizeof(*e)); /* (resolution may use the same scratch) */
+    if ((ret = scratch_dir(b, e->host, 0755)) < 0 || (ret = scratch_dir(b, cache[0], 0755)) < 0) {
+        *result = ret;
+        return 1;
+    }
+    strcpy(e->guest, guest);
+    strcpy(e->fstype, "erofs");
+    memcpy(e->source, label, sizeof(e->source));
+    e->flags = (uint32_t)(per_mount | MS_RDONLY_);
+    e->access = cap_access(mount_access_of(b, guest) == 'd' ? 'd' : 'w', flags | MS_RDONLY_);
+    *result = mounts_add_overlay(e, (const char (*)[CONFIG_MAX_PATH])cache, 1, image);
+    return 1;
+}
+
+/* After the umount of a loop mount: an auto-clearing device it was the
+ * last mount of is freed. */
+static void loop_unmounted(const char *source)
+{
+    int device = loop_device(source);
+    struct mount_loop l;
+    if (device < 0 || mounts_loop_get(device, &l) < 0 || !(l.flags & LO_FLAGS_AUTOCLEAR_) ||
+        loop_mounted(device))
+        return;
+    mounts_loop_bind(device, NULL);
+}
+
 /* R6: mount -t overlay -o lowerdir=A[:B...],upperdir=U,workdir=W: a merged
  * view (union_view.h) at the target. Without upperdir it is read-only (the
  * topmost lowerdir stands in as the upper; the guarded build refuses
@@ -1877,7 +2233,7 @@ static long overlay_mount(Bridge *b, const char *guest, const char *source, cons
         e->kind = MOUNT_BIND;
         return mounts_add(e);
     }
-    return mounts_add_overlay(e, (const char (*)[CONFIG_MAX_PATH])lowers[first], count - first);
+    return mounts_add_overlay(e, (const char (*)[CONFIG_MAX_PATH])lowers[first], count - first, NULL);
 }
 
 static long mount_call(Bridge *b, long a[6])
@@ -2011,6 +2367,9 @@ static long mount_call(Bridge *b, long a[6])
     if ((target_st.st_mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
     if (!strcmp(type, "overlay"))
         return overlay_mount(b, guest, source, data, flags, per_mount, e);
+    long loop_result;
+    if (loop_mount(b, guest, source, type, flags, per_mount, e, &loop_result))
+        return loop_result;
     const char *host = NULL;
     for (size_t i = 0; i < sizeof(host_filesystems) / sizeof(host_filesystems[0]); i++)
         if (!strcmp(type, host_filesystems[i].type))
@@ -2062,7 +2421,13 @@ static long umount_call(Bridge *b, long a[6])
         const char *at = id ? b->table.entries[id - 1].guest : "/";
         return strcmp(at, b->guest) ? -EINVAL : -EBUSY;
     }
-    return mounts_remove(b->guest, (flags & 2) != 0);
+    int slot = mounts_find(b->mounts, b->mount_count, b->guest);
+    char source[sizeof(b->mounts[0].source)] = "";
+    if (slot >= 0) memcpy(source, b->mounts[slot].source, sizeof(source));
+    source[sizeof(source) - 1] = 0;
+    ret = mounts_remove(b->guest, (flags & 2) != 0);
+    if (!ret) loop_unmounted(source);
+    return ret;
 }
 
 /* /proc/<pid>/mounts, mountinfo (and the task/<tid> ones) of a process of
@@ -2102,6 +2467,36 @@ static long proc_mounts(Bridge *b, int flags)
                           (flags & O_CLOEXEC) ? 1 /* MFD_CLOEXEC */ : 0, 0, 0, 0, 0);
     if (fd < 0) return fd;
     long rc = mounts_render((int)fd, info);
+    if (rc >= 0) rc = raw_syscall(__NR_lseek, fd, 0, 0, 0, 0, 0);
+    if (rc < 0) {
+        raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+        return rc;
+    }
+    return fd;
+}
+
+/* /proc/filesystems with emulated mounts: the types mount(2) takes here
+ * (HongMeng has no such file; mount -o loop without -t reads it). */
+static long proc_filesystems(Bridge *b, int flags)
+{
+    if (strcmp(b->guest, "/proc/filesystems")) return -ENOENT;
+    long fd = raw_syscall(__NR_memfd_create, (long)"filesystems", (flags & O_CLOEXEC) ? 1 : 0, 0, 0, 0, 0);
+    if (fd < 0) return fd;
+    char text[1024];
+    size_t at = 0;
+    static const char *const nodev[] = {"tmpfs", "ramfs", "overlay"};
+    for (size_t i = 0; i < sizeof(host_filesystems) / sizeof(host_filesystems[0]) + 3; i++) {
+        const char *name = i < 3 ? nodev[i] : host_filesystems[i - 3].type;
+        size_t n = strlen(name);
+        if (at + 7 + n > sizeof(text)) break;
+        memcpy(text + at, "nodev\t", 6);
+        memcpy(text + at + 6, name, n);
+        text[at + 6 + n] = '\n';
+        at += 7 + n;
+    }
+    memcpy(text + at, "\terofs\n", 7);
+    at += 7;
+    long rc = raw_syscall(__NR_write, fd, (long)text, (long)at, 0, 0, 0);
     if (rc >= 0) rc = raw_syscall(__NR_lseek, fd, 0, 0, 0, 0, 0);
     if (rc < 0) {
         raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
@@ -2370,10 +2765,21 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     b->defer_final = number == __NR_openat && follow && !(a[2] & O_PATH) &&
         length && length < PATH_MAX && path[length - 1] != '/';
     bool deferred = b->defer_final;
+    /* R6: the emulated loop devices, spelled as such (no resolution: the
+     * name has no host file, which a guarded final lookup refuses). */
+    if (mounts_enabled() && path[0] == '/' && loop_device(path) != -1) {
+        b->defer_final = false;
+        return loop_path_call(number, a, loop_device(path));
+    }
     ret = resolve(b, (int)a[0], path, follow);
     b->defer_final = false;
     if (ret < 0)
         return ret;
+    /* R6: the emulated loop devices. */
+    if (mounts_enabled()) {
+        int device = loop_device(b->guest);
+        if (device != -1) return loop_path_call(number, a, device);
+    }
     if (number == __NR_readlinkat) {
         Comparison c = compare_paths("/proc", b->guest);
         if (c == PATH1_IS_PREFIX)
@@ -2405,6 +2811,8 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         ret = proc_cmdline(b, (int)a[2]);
         if (ret == -ENOENT && mounts_enabled())
             ret = proc_mounts(b, (int)a[2]);
+        if (ret == -ENOENT && mounts_enabled())
+            ret = proc_filesystems(b, (int)a[2]);
     } else ret = -ENOENT;
     if (ret == -ENOENT && number == __NR_newfstatat && follow && b->final_match) {
         /* Copied by the kernel so a bad buffer is still EFAULT. */

@@ -46,6 +46,20 @@ struct mount_entry {
 struct mount_overlay {
     uint32_t id, count;
     char lower[CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
+    /* R6 mount -o loop: the layer image (lazy_layer.h) whose cache the
+     * last lower is; empty for a plain overlay. */
+    char image[CONFIG_MAX_PATH];
+};
+/* R6 loop devices /dev/loop0..7 (emulated: a loop mount of an erofs image
+ * is a read-only merged view of its cache). A slot is bound to a backing
+ * file by LOOP_SET_FD/LOOP_CONFIGURE and freed by LOOP_CLR_FD, or at the
+ * umount of its last mount when it has LO_FLAGS_AUTOCLEAR. */
+#define MOUNT_LOOPS 8
+struct mount_loop {
+    uint32_t bound, flags;          /* flags: LO_FLAGS_* */
+    uint64_t offset, sizelimit, dev, ino, size;
+    char file[CONFIG_MAX_PATH];     /* the backing file's host path */
+    char name[64];                  /* lo_file_name */
 };
 struct mount_table {
     uint32_t lock, version, count, next_id;
@@ -53,6 +67,7 @@ struct mount_table {
     uint32_t reserved[11];
     struct mount_entry entries[MOUNT_TABLE_MAX];
     struct mount_overlay overlay[MOUNT_OVERLAYS];
+    struct mount_loop loop[MOUNT_LOOPS];
 };
 #define MOUNT_TABLE_SIZE ((sizeof(struct mount_table) + 4095) & ~(unsigned long)4095)
 _Static_assert(MOUNT_TABLE_SIZE == CONFIG_MOUNT_TABLE_BYTES, "the loader sizes the table");
@@ -71,9 +86,19 @@ int mounts_access(char *out, int max);
  * overlay entry takes lowers (count of them), or with lowers NULL those of
  * the overlay whose id entry->id holds (a copy for --rbind). */
 long mounts_add(const struct mount_entry *entry);
-long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CONFIG_MAX_PATH], int count);
-/* The lowerdirs of overlay mount id (count returned, at most max). */
-int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max);
+long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CONFIG_MAX_PATH], int count,
+                        const char *image);
+/* The lowerdirs of overlay mount id (count returned, at most max); image
+ * (CONFIG_MAX_PATH, may be NULL): its layer image or "". */
+int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max, char *image);
+/* Loop device n: a copy (0, or -ENXIO when unbound). */
+long mounts_loop_get(int n, struct mount_loop *out);
+/* Binds a free loop device (-EBUSY if bound); with in NULL frees it. */
+long mounts_loop_bind(int n, const struct mount_loop *in);
+/* Status change of a bound device: flags, offset, sizelimit, name. */
+long mounts_loop_status(int n, const struct mount_loop *in);
+/* The first unbound loop device, -ENOSPC if none. */
+int mounts_loop_free(void);
 /* Whether any overlay mount was ever made in this view. */
 int mounts_overlays(void);
 /* Frees the newest live slot at guest (with detach also every slot below

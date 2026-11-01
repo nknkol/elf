@@ -218,7 +218,8 @@ static int id_live(const struct mount_table *t, uint32_t id)
     return 0;
 }
 
-long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CONFIG_MAX_PATH], int count)
+long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CONFIG_MAX_PATH], int count,
+                        const char *image)
 {
     struct mount_table *t = table();
     if (!t)
@@ -238,10 +239,14 @@ long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CO
     if (record && slot < MOUNT_TABLE_MAX && (lowers || from)) {
         if (from) {
             memcpy(record->lower, from->lower, sizeof(record->lower));
+            memcpy(record->image, from->image, sizeof(record->image));
             record->count = from->count;
         } else {
+            memset(record->lower, 0, sizeof(record->lower));
+            memset(record->image, 0, sizeof(record->image));
             for (int i = 0; i < count; i++)
                 strncpy(record->lower[i], lowers[i], CONFIG_MAX_PATH - 1);
+            if (image) strncpy(record->image, image, CONFIG_MAX_PATH - 1);
             record->count = (uint32_t)count;
         }
         struct mount_entry *e = &t->entries[slot];
@@ -258,9 +263,10 @@ long mounts_add_overlay(const struct mount_entry *entry, const char (*lowers)[CO
     return rc;
 }
 
-int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max)
+int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max, char *image)
 {
     struct mount_table *t = table();
+    if (image) image[0] = 0;
     if (!t || !id)
         return 0;
     for (;;) {
@@ -271,13 +277,77 @@ int mounts_overlay_lowers(uint32_t id, char (*out)[CONFIG_MAX_PATH], int max)
             n = (int)(t->overlay[i].count > (uint32_t)max ? (uint32_t)max : t->overlay[i].count);
             for (int k = 0; k < n; k++)
                 memcpy(out[k], t->overlay[i].lower[k], CONFIG_MAX_PATH);
+            if (image) memcpy(image, t->overlay[i].image, CONFIG_MAX_PATH);
         }
         if (read_retry(&t->version, v))
             continue;
         for (int k = 0; k < n; k++)
             out[k][CONFIG_MAX_PATH - 1] = 0;
+        if (image) image[CONFIG_MAX_PATH - 1] = 0;
         return n;
     }
+}
+
+long mounts_loop_get(int n, struct mount_loop *out)
+{
+    struct mount_table *t = table();
+    if (!t) return -ENODEV;
+    if (n < 0 || n >= MOUNT_LOOPS) return -ENXIO;
+    for (;;) {
+        uint32_t v = read_begin(&t->version);
+        memcpy(out, &t->loop[n], sizeof(*out));
+        if (read_retry(&t->version, v)) continue;
+        out->file[CONFIG_MAX_PATH - 1] = 0;
+        out->name[sizeof(out->name) - 1] = 0;
+        return out->bound ? 0 : -ENXIO;
+    }
+}
+
+long mounts_loop_bind(int n, const struct mount_loop *in)
+{
+    struct mount_table *t = table();
+    if (!t) return -ENODEV;
+    if (n < 0 || n >= MOUNT_LOOPS) return -ENXIO;
+    write_begin(&t->lock, &t->version);
+    long rc = 0;
+    if (!in) {
+        if (!t->loop[n].bound) rc = -ENXIO;
+        else memset(&t->loop[n], 0, sizeof(t->loop[n]));
+    } else if (t->loop[n].bound) {
+        rc = -EBUSY;
+    } else {
+        memcpy(&t->loop[n], in, sizeof(*in));
+        t->loop[n].bound = 1;
+    }
+    write_end(&t->lock, &t->version);
+    return rc;
+}
+
+long mounts_loop_status(int n, const struct mount_loop *in)
+{
+    struct mount_table *t = table();
+    if (!t) return -ENODEV;
+    if (n < 0 || n >= MOUNT_LOOPS) return -ENXIO;
+    write_begin(&t->lock, &t->version);
+    long rc = -ENXIO;
+    if (t->loop[n].bound) {
+        t->loop[n].flags = in->flags;
+        t->loop[n].offset = in->offset;
+        t->loop[n].sizelimit = in->sizelimit;
+        memcpy(t->loop[n].name, in->name, sizeof(t->loop[n].name));
+        rc = 0;
+    }
+    write_end(&t->lock, &t->version);
+    return rc;
+}
+
+int mounts_loop_free(void)
+{
+    struct mount_table *t = table();
+    if (!t) return -ENODEV;
+    for (int n = 0; n < MOUNT_LOOPS; n++)
+        if (!__atomic_load_n(&t->loop[n].bound, __ATOMIC_RELAXED)) return n;
+    return -ENOSPC;
 }
 
 int mounts_overlays(void)

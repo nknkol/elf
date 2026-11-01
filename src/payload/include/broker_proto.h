@@ -40,6 +40,11 @@ struct broker_spec {
 /* R6 layer images: expand (op 0) the directory or fill (op 1) the file at
  * the path, which must lie in a lower layer that is an image's cache. */
 #define BROKER_LAZY_PATH    (-3)
+/* R6 mount -o loop: expand (op 0) or fill (op 1) rel ("/a/b") of the cache
+ * directory of a loop mount from its image. The cache must be a directory
+ * in a tree the guest may write, the image a file it may read: what the
+ * broker does then stays inside the cache. */
+#define BROKER_LAZY_MOUNT   (-4)
 
 /* Request flags: path argument i was /proc/self/fd/N, so the request acts
  * on the attached FD N itself. */
@@ -154,6 +159,7 @@ static const struct broker_spec broker_specs[] = {
     {BROKER_BIND_PATH,   {A_F, A_P}},
     {BROKER_CONNECT_PATH, {A_F, A_P}},
     {BROKER_LAZY_PATH,   {A_P, A_V}},
+    {BROKER_LAZY_MOUNT,  {A_S, A_V, A_P, A_P}},
 };
 
 static inline const struct broker_spec *broker_spec(long nr)

@@ -129,6 +129,9 @@ static long dispatch_here(long sys_no, pt_regs *regs)
     int named = sys_no == __NR_accept || sys_no == __NR_accept4 ||
         sys_no == __NR_getsockname || sys_no == __NR_getpeername;
     unsigned capacity = named && a[1] && a[2] ? *(unsigned *)a[2] : 0;
+    /* R6: loop devices are the payload's (before the guarded ioctl policy). */
+    if (sys_no == __NR_ioctl && mounts_enabled() && proot_loop_ioctl(a[0], (unsigned long)a[1], a[2], &ret))
+        return ret;
     ret = DISPATCH(sys_no, args);
     /* R6: a directory of the merged view lists every layer. */
     if (sys_no == __NR_getdents64 && union_enabled())

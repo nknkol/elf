@@ -48,6 +48,7 @@ check: build
 	$(PYTHON) test/proot/test_mounts.py
 	$(PYTHON) test/proot/test_owners.py
 	$(PYTHON) test/proot/test_union.py
+	$(PYTHON) test/proot/test_loop.py
 	$(PYTHON) test/proot/test_auxv.py
 	$(PYTHON) test/proot/test_jit.py
 	$(PYTHON) test/syscalls/check_dispatch.py

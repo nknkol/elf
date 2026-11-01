@@ -130,7 +130,8 @@ int union_views(struct union_view *views, int max, char (*storage)[CONFIG_MAX_PA
     for (int i = 0; i < mount_count && n < max && used < MOUNT_OVERLAYS; i++) {
         if (!mounts[i].guest[0] || mounts[i].kind != MOUNT_OVERLAY) continue;
         char (*lowers)[CONFIG_MAX_PATH] = storage + used * CONFIG_MAX_LOWERS;
-        int count = mounts_overlay_lowers(mounts[i].id, lowers, CONFIG_MAX_LOWERS);
+        char image[CONFIG_MAX_PATH];
+        int count = mounts_overlay_lowers(mounts[i].id, lowers, CONFIG_MAX_LOWERS, image);
         if (count <= 0) continue;
         used++;
         struct union_view *u = &views[n++];
@@ -138,6 +139,11 @@ int union_views(struct union_view *views, int max, char (*storage)[CONFIG_MAX_PA
         u->layer[0] = mounts[i].host;
         u->image[0] = NULL;
         for (int k = 0; k < count; k++) { u->layer[1 + k] = lowers[k]; u->image[1 + k] = NULL; }
+        /* A loop mount: its image is kept in the storage after the lowers. */
+        if (image[0] && count < CONFIG_MAX_LOWERS) {
+            memcpy(lowers[count], image, CONFIG_MAX_PATH);
+            u->image[count] = lowers[count];
+        }
         set_lengths(u);
     }
     return n;
@@ -194,10 +200,23 @@ static uint64_t lazy_key(const struct stat *st)
 
 /* Expansion or fill (op 1) of host, a path of layer i: by the broker with
  * --isolate (the guest cannot write the cache there). */
+/* Whether layer i of u is a configured lower (--lower-image), not one of a
+ * loop mount (container_state.h). */
+static bool configured_image(const struct union_view *u, int i)
+{
+    return i >= 1 && i <= CONFIG_MAX_LOWERS && u->image[i] == g_payload_config.lower_image[i - 1];
+}
+
 static long lazy_call(const struct union_view *u, int i, const char *host, int op)
 {
-    if (g_payload_config.isolate) return hs(BROKER_LAZY_PATH, (long)host, op, 0, 0, 0, 0);
     const char *rel = host + u->length[i];
+    /* With --isolate the broker expands: a configured lower is a read-only
+     * tree it knows; a loop mount's cache is in the mount scratch and its
+     * image any file the guest may read (the broker checks both). */
+    if (g_payload_config.isolate)
+        return configured_image(u, i) ? hs(BROKER_LAZY_PATH, (long)host, op, 0, 0, 0, 0)
+                                      : hs(BROKER_LAZY_MOUNT, (long)(*rel ? rel : "/"), op,
+                                           (long)u->image[i], (long)u->layer[i], 0, 0);
     return op ? lazy_fill(u->image[i], u->layer[i], rel) : lazy_expand(u->image[i], u->layer[i], rel);
 }
 
@@ -218,12 +237,15 @@ static long lazy_dir(const struct union_view *u, int i, const char *host, const 
 static long lazy_tops(const struct union_view *u)
 {
     for (int i = 1; i < u->count; i++) {
-        if (!u->image[i] || (__atomic_load_n(&lazy_roots, __ATOMIC_RELAXED) & (1u << i))) continue;
+        /* (The bit is per configured lower; a loop mount's top is checked
+         * through the dev/ino cache.) */
+        bool root = configured_image(u, i);
+        if (!u->image[i] || (root && (__atomic_load_n(&lazy_roots, __ATOMIC_RELAXED) & (1u << i)))) continue;
         struct stat st;
         long rc = lstat_at(u->layer[i], &st);
         if (rc == 0) rc = lazy_dir(u, i, u->layer[i], &st);
         if (rc < 0) return rc;
-        __atomic_or_fetch(&lazy_roots, 1u << i, __ATOMIC_RELAXED);
+        if (root) __atomic_or_fetch(&lazy_roots, 1u << i, __ATOMIC_RELAXED);
     }
     return 0;
 }
@@ -242,6 +264,7 @@ long union_lazy_fill(const struct union_view *u, const char *host)
 
 static bool any_image(void)
 {
+    if (mounts_enabled() && mounts_overlays()) return true; /* loop mounts may have images */
     static int images = -1;
     if (images < 0) {
         int any = 0;
@@ -255,7 +278,6 @@ static bool any_image(void)
 extern long raw_syscall(long, long, long, long, long, long, long);
 
 static long fd_host(int fd, char *host);
-
 long union_lazy_fd(int fd)
 {
     if (!any_image()) return 0;
@@ -263,11 +285,17 @@ long union_lazy_fd(int fd)
     if (raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) < 0 || (st.st_mode & S_IFMT_) != S_IFREG_ ||
         !lazy_placeholder_times((long)st.st_atime, (long)st.st_atime_nsec))
         return 0;
-    char host[PATH_MAX];
-    long rc = fd_host(fd, host);
-    if (rc < 0) return rc;
-    struct union_view u;
-    return union_root(&u) ? union_lazy_fill(&u, host) : 0;
+    struct scratch *s = scratch_get();
+    if (!s) return -ENOMEM;
+    long rc = fd_host(fd, s->list);
+    if (rc >= 0) {
+        int mount_count = mounts_enabled() ? mounts_snapshot(s->mounts, CONFIG_MAX_MOUNTS) : 0;
+        int views = union_views(s->views, 1 + MOUNT_OVERLAYS, s->lowers, s->mounts, mount_count);
+        int v = union_find(s->views, views, s->list, NULL, NULL);
+        rc = v < 0 ? 0 : union_lazy_fill(&s->views[v], s->list);
+    }
+    scratch_put(s);
+    return rc;
 }
 
 void union_lazy_stat(long number, const long *a)
