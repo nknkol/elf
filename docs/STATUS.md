@@ -444,3 +444,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-11-01 审查修复二：guestfs 的读取与枚举也从区域根 FD 逐级 `O_NOFOLLOW` 打开，文件先打开再 fstat；`union.mkdirs` 改为在上层根 FD 下补建目录（`mkdirs_fd`），解析后被换成宿主链接的父目录只会得到 ELOOP/ENOTDIR；exec 按进程组跟踪，组长退出而后台任务仍在时登记保留、停止时一并 SIGKILL；复制进容器逐项按挂载边界选区域（volume 内的内容写进来源，挂载点本身保留），只读 volume 与只读根拒绝。新增验收：exec 留下的后台任务随 stop 结束、复制树内的 volume 与只读 volume。
 2026-11-01 审查修复三：复制进上层时 tar 里没有条目的父目录也走 COW 目录创建（whiteout 删除的目录补建为不透明）；单文件 bind 的挂载点可经来源 FD 更新内容，只读的拒绝。新增验收：无目录条目的 tar、可写/只读文件 bind。
 2026-11-01 审查修复四：文件 bind 更新先打开源并比较 dev/ino，同一文件（含路径别名）不截断；DirSink 先打开源再替换目标；GuestSink 只按条目实际区域检查写权限，`--read-only` 下的 rw 文件 bind 可更新。新增验收：自身与别名复制、volume 文件复制到自身、只读根配合可写文件 bind。
+2026-11-01 审查修复五：guestfs 两处复制循环与层展开改用 `unpack.write_all`，短写继续写完，不再丢数据仍返回成功。

@@ -300,7 +300,7 @@ class GuestSink:
                     chunk = src.read(1 << 20)
                     if not chunk:
                         break
-                    os.write(fd, chunk)
+                    unpack.write_all(fd, chunk)
                 os.utime(fd, (e.mtime, e.mtime))
             finally:
                 os.close(fd)
@@ -491,7 +491,7 @@ class DirSink:
                     chunk = src.read(1 << 20)
                     if not chunk:
                         break
-                    os.write(out, chunk)
+                    unpack.write_all(out, chunk)
                 mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode) if e.kind == 'h' else e.mode
                 set_mode(out, mode, False)
                 os.utime(out, (e.mtime, e.mtime))

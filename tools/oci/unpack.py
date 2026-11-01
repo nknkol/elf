@@ -137,6 +137,16 @@ class Rootfs:
             os.close(fd)
 
 
+def write_all(fd, data):
+    """os.write until all of data is written (a short write is not the end)."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        if n <= 0:
+            raise OSError(f'write returned {n}')
+        view = view[n:]
+
+
 def remove_tree(dir_fd, name):
     """Removes name under dir_fd recursively, never following symlinks."""
     try:
@@ -327,7 +337,7 @@ class Extractor:
                     chunk = src.read(1 << 20)
                     if not chunk:
                         break
-                    os.write(out, chunk)
+                    write_all(out, chunk)
                 self.chmod(out, mode, False, key)
                 os.utime(out, (m.mtime, m.mtime))
             finally:
