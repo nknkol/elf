@@ -184,6 +184,25 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			if (!cfg->lower_count || cfg->lower_image[cfg->lower_count - 1][0])
 				z_errx(1, "--lower-image follows the --lower that is its cache");
 			copy_cstr(cfg->lower_image[cfg->lower_count - 1], CONFIG_MAX_PATH, v);
+		} else if (is(arg, "--net-addr")) {
+			/* Container networks: the container's address (net_view.h). */
+			const char *v = value(argc, argv, &i);
+			uint32_t ip = 0, part = 0;
+			int dots = 0, digits = 0;
+			for (const char *p = v; *p; p++) {
+				if (*p >= '0' && *p <= '9' && digits < 3) { part = part * 10 + (uint32_t)(*p - '0'); digits++; }
+				else if (*p == '.' && digits && dots < 3) { ip = ip << 8 | part; part = 0; digits = 0; dots++; }
+				else z_errx(1, "--net-addr needs a dotted IPv4 address");
+				if (part > 255) z_errx(1, "--net-addr needs a dotted IPv4 address");
+			}
+			if (dots != 3 || !digits || ((ip << 8 | part) & 0xff800000u) != 0x7f800000u)
+				z_errx(1, "--net-addr needs an address of 127.128.0.0/9");
+			cfg->net_addr = ip << 8 | part;
+		} else if (is(arg, "--net-peers")) {
+			const char *v = value(argc, argv, &i);
+			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
+				z_errx(1, "--net-peers needs an absolute host file");
+			copy_cstr(cfg->net_peers, CONFIG_MAX_PATH, v);
 		} else if (is(arg, "-v") || is(arg, "--volume")) {
 			add_bind(cfg, value(argc, argv, &i));
 		} else if (is(arg, "-e") || is(arg, "--env")) {

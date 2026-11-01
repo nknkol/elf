@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import layer_images
+import network
 import owners as owners_mod
 import union
 import runspec
@@ -141,14 +142,17 @@ def create(st, record, quiet=False):
                     union.mkdirs(rootfs, lower, cwd)
         elif cwd and not host.get('ReadonlyRootfs'):
             runspec.make_guest_dirs(rootfs, binds, cwd)
-        store_mod.write_json(work / 'run.json', record)
         with st.lock():
-            if any(c['Name'] == record['Name'] for c in st.containers()):
+            others = st.containers()
+            if any(c['Name'] == record['Name'] for c in others):
                 raise StoreError(f'Conflict. The container name "/{record["Name"]}" is already in use')
+            network.allocate(st, record, others)
+            store_mod.write_json(work / 'run.json', record)
             work.rename(st.container_dir(cid))
     finally:
         if work.exists():
             store_mod.remove(work)
+    network.refresh(st)
     return cid
 
 
@@ -183,7 +187,8 @@ def command_line(st, record, **kwargs):
     cdir = st.container_dir(record['Id'])
     resolved = dict(record, HostConfig=dict(record['HostConfig'], Binds=all_binds(st, record)))
     return runspec.build(resolved, rootfs_of(st, record), cdir,
-                         isolate=record['HostConfig'].get('Isolate'), lower=lower_of(st, record), **kwargs)
+                         isolate=record['HostConfig'].get('Isolate'), lower=lower_of(st, record),
+                         loader_extra=network.loader_options(st, record, cdir), **kwargs)
 
 
 def set_state(st, cid, **fields):
@@ -192,6 +197,13 @@ def set_state(st, cid, **fields):
         record['State'].update(fields)
         st.save_container(record)
         return record
+
+
+def set_ports(st, cid, ports):
+    with st.lock():
+        record = st.load_container(cid)
+        network.settings(record)['Ports'] = ports
+        st.save_container(record)
 
 
 class Forwarder:
@@ -265,6 +277,12 @@ def run_once(st, record, stdio, interactive, tty):
     terminal = None
     if (interactive or tty) and os.isatty(0) and stdin is None:
         terminal = 0
+    # Published ports: forwarders to the container's address (network.py).
+    publisher = None
+    target = network.address(st, record)
+    if target and record['HostConfig'].get('PortBindings'):
+        publisher = network.Publisher(target, record['HostConfig']['PortBindings'])
+        set_ports(st, cid, publisher.start())
     forwarder = Forwarder(parse_signal(record['Config'].get('StopSignal')))
     forwarder.install()
     try:
@@ -272,6 +290,9 @@ def run_once(st, record, stdio, interactive, tty):
                      str(rootfs), terminal)
     except BaseException:
         forwarder.restore()
+        if publisher:
+            publisher.stop()
+            set_ports(st, cid, {})
         raise
     forwarder.pgid = proc.pid
     set_state(st, cid, Status='running', Running=True, Pid=proc.pid,
@@ -286,6 +307,9 @@ def run_once(st, record, stdio, interactive, tty):
                 continue
     finally:
         forwarder.restore()
+        if publisher:
+            publisher.stop()
+            set_ports(st, cid, {})
         # The main process is gone: the rest of the container goes too, as
         # when a PID namespace's init exits.
         try:
@@ -444,6 +468,7 @@ def remove(st, record, force=False, volumes=False):
         with st.lock():
             cdir.rename(trash)
         store_mod.remove(trash)
+        network.refresh(st)
 
 
 def exec_in(st, record, command, interactive, tty, detach, env, workdir, user):

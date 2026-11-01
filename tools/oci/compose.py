@@ -1,23 +1,27 @@
 """docker compose (docs/OCI.md R7): compose files run as plain containers.
 
-Every service becomes a container made through the same path as `docker
-create` ({project}-{service}-1, labelled com.docker.compose.*), started by
-its monitor process like `docker run -d`. There is no network of our own:
-containers share the host network, so services reach each other at
-localhost:<port>, and every service name resolves to 127.0.0.1 through the
-containers' /etc/hosts. Two services cannot listen on the same port.
+Every service becomes containers made through the same path as `docker
+create` ({project}-{service}-N, labelled com.docker.compose.*, N up to its
+replicas: deploy.replicas, scale, --scale), started by its monitor process
+like `docker run -d`. Networks are container networks (network.py): each
+container has a loopback address of its own, the project's networks
+({project}_default unless the service lists others; external ones must
+exist) decide which containers reach each other, and on them a service is
+found by its name, container name and aliases (replicas: one hosts entry
+each). network_mode host, none and service:NAME are supported.
 
 Supported: compose.yaml/compose.yml/docker-compose.y(a)ml (+ override,
 several -f), .env and --env-file, ${VAR} interpolation (:- - :? ? :+ +, $$),
 name/-p/COMPOSE_PROJECT_NAME, profiles, image, build (context, dockerfile,
 args, target), command, entrypoint, environment, env_file, volumes (short
-and long; named volumes are project volumes), tmpfs, ports (as themselves),
+and long; named volumes are project volumes), tmpfs, ports (forwarded to the container address),
 working_dir, user, hostname, container_name, depends_on (service_started,
 service_healthy, service_completed_successfully), healthcheck, restart,
 labels, extra_hosts, dns, stop_signal, stop_grace_period, read_only, tty,
-stdin_open, secrets and configs (files), and x-elf: {isolate, cow, owners}.
-Options that need namespaces or cgroups (networks, cap_add, mem_limit,
-deploy.resources, init...) are ignored with a warning."""
+stdin_open, secrets and configs (files), networks (aliases), network_mode,
+deploy.replicas and scale, and x-elf: {isolate, cow, owners}. Options that
+need namespaces or cgroups (cap_add, mem_limit, deploy.resources, init...)
+are ignored with a warning."""
 import hashlib
 import json
 import os
@@ -29,6 +33,7 @@ import sys
 import time
 from pathlib import Path
 
+import network
 import runtime
 import store as store_mod
 import yamlite
@@ -37,11 +42,11 @@ FILES = ('compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.ya
 OVERRIDES = ('compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yml',
              'docker-compose.override.yaml')
 LABEL = 'com.docker.compose.'
-IGNORED = ('networks', 'cap_add', 'cap_drop', 'privileged', 'mem_limit', 'memswap_limit', 'cpus',
+IGNORED = ('cap_add', 'cap_drop', 'privileged', 'mem_limit', 'memswap_limit', 'cpus',
            'cpu_shares', 'cpuset', 'pids_limit', 'ulimits', 'sysctls', 'devices', 'security_opt',
-           'init', 'ipc', 'pid', 'shm_size', 'logging', 'deploy', 'mac_address', 'domainname',
+           'init', 'ipc', 'pid', 'shm_size', 'logging', 'mac_address', 'domainname',
            'oom_score_adj', 'oom_kill_disable', 'userns_mode', 'cgroup_parent', 'runtime',
-           'platform', 'expose', 'links', 'external_links', 'scale', 'network_mode', 'group_add',
+           'platform', 'expose', 'links', 'external_links', 'group_add',
            'storage_opt', 'isolation', 'blkio_config', 'device_cgroup_rules', 'cgroup', 'uts',
            'pull_policy', 'annotations', 'attach', 'develop', 'post_start', 'pre_stop',
            'stop_signal_timeout', 'mem_reservation', 'mem_swappiness', 'cpu_quota', 'cpu_period',
@@ -243,6 +248,14 @@ class Project:
         self.volumes = data.get('volumes') or {}
         self.secrets = data.get('secrets') or {}
         self.configs = data.get('configs') or {}
+        self.networks = {str(k): (v or {}) for k, v in (data.get('networks') or {}).items()}
+        self.networks.setdefault('default', {})
+        for sname, svc in self.services.items():
+            for net in self.service_networks(sname):
+                if net not in self.networks:
+                    raise ComposeError(f'service "{sname}" refers to undefined network {net}: invalid compose project')
+            if self.replicas(sname) > 1 and svc.get('container_name'):
+                raise ComposeError(f'service "{sname}": container_name cannot be used with several replicas')
 
     def extend(self, name, svc, services):
         ext = svc['extends']
@@ -309,6 +322,35 @@ class Project:
             visit(n, [])
         return [n for n in out if n in names or any(n in self.depends(m) for m in names)]
 
+    def service_networks(self, name):
+        """{network key: aliases} of a service ({} with a network_mode)."""
+        svc = self.services[name]
+        if svc.get('network_mode'):
+            return {}
+        nets = svc.get('networks')
+        if nets is None:
+            return {'default': []}
+        if isinstance(nets, list):
+            return {str(n): [] for n in nets}
+        return {str(k): [str(a) for a in as_list((v or {}).get('aliases'))] for k, v in nets.items()}
+
+    def network_name(self, key):
+        spec = self.networks.get(key) or {}
+        if spec.get('name'):
+            return str(spec['name'])
+        if spec.get('external'):
+            return key
+        return f'{self.name}_{key}'
+
+    def replicas(self, name, scale=None):
+        svc = self.services[name]
+        if scale and name in scale:
+            return int(scale[name])
+        if svc.get('scale') is not None:
+            return int(svc['scale'])
+        replicas = (svc.get('deploy') or {}).get('replicas')
+        return 1 if replicas is None else int(replicas)
+
     def container_name(self, name, number=1):
         return self.services[name].get('container_name') or f'{self.name}-{name}-{number}'
 
@@ -367,8 +409,13 @@ def create_args(project, name, number=1, elf=None):
     svc = project.services[name]
     for key in svc:
         if key in IGNORED:
-            warn(f'service "{name}": {key} is ignored (no namespaces or cgroups here; '
-                 'containers share the host network)')
+            warn(f'service "{name}": {key} is ignored (no namespaces or cgroups here)')
+    for key in (svc.get('deploy') or {}):
+        if key not in ('replicas', 'restart_policy', 'labels'):
+            warn(f'service "{name}": deploy.{key} is ignored (no cgroups or orchestrator here)')
+    mode = svc.get('network_mode')
+    if mode and not (mode in ('host', 'none', 'bridge') or str(mode).startswith(('service:', 'container:'))):
+        raise ComposeError(f'service "{name}": network_mode {mode} is not supported')
     args = ['--name', project.container_name(name, number)]
     if svc.get('hostname'):
         args += ['-h', str(svc['hostname'])]
@@ -413,12 +460,6 @@ def create_args(project, name, number=1, elf=None):
         if ip is None and '=' in host:
             host, _, ip = host.partition('=')
         args += ['--add-host', f'{host}:{ip}']
-    # Service discovery on the shared host network.
-    for other in project.services:
-        args += ['--add-host', f'{other}:127.0.0.1']
-        cname = project.services[other].get('container_name')
-        if cname and cname != other:
-            args += ['--add-host', f'{cname}:127.0.0.1']
     labels = key_values(svc.get('labels'))
     for k, v in labels.items():
         args += ['-l', f'{k}={v or ""}']
@@ -607,6 +648,7 @@ class Compose:
         a = cli.run_parser('create').parse_args(args + [image])
         a.command = []
         record = cli.new_record(self.st, a, image_id, image)
+        self.attach_networks(record, name)
         cfg = record['Config']
         if oneoff and oneoff.get('entrypoint') is not None:
             cfg['Entrypoint'], cfg['Cmd'] = oneoff['entrypoint'], None
@@ -621,6 +663,53 @@ class Compose:
             record['HostConfig']['AutoRemove'] = True
         runtime.create(self.st, record)
         return self.st.load_container(record['Id'])
+
+    def attach_networks(self, record, name):
+        """The service's networks (aliases: its name and its own) or mode."""
+        svc = self.p.services[name]
+        mode = svc.get('network_mode')
+        if mode:
+            mode = str(mode)
+            if mode.startswith('service:'):
+                target = self.containers(mode.split(':', 1)[1])
+                if not target:
+                    raise ComposeError(f'service "{name}": network_mode {mode}: the service has no container')
+                mode = 'container:' + target[0]['Id']
+            network.attach_new(self.st, record, mode)
+            return
+        first = True
+        for key, aliases in self.p.service_networks(name).items():
+            real = self.ensure_network(key)
+            names = list(dict.fromkeys([name] + aliases))
+            if first:
+                network.attach_new(self.st, record, real, names)
+                first = False
+            else:
+                spec = network.find(self.st, real)
+                record['NetworkSettings']['Networks'][real] = {'Aliases': names, 'NetworkID': spec['Id']}
+
+    def ensure_network(self, key):
+        spec = self.p.networks.get(key) or {}
+        real = self.p.network_name(key)
+        if spec.get('external'):
+            try:
+                network.find(self.st, real)
+            except store_mod.StoreError:
+                raise ComposeError(f'network {real} declared as external, but could not be found') from None
+            return real
+        if real not in network.networks(self.st):
+            labels = {LABEL + 'project': self.p.name, LABEL + 'network': key}
+            labels.update(key_values(spec.get('labels')))
+            network.create(self.st, real, spec.get('driver') or 'bridge', labels, spec.get('internal'),
+                           spec.get('attachable'), check=False)
+            print(f' Network {real}  Created', file=sys.stderr)
+        return real
+
+    def number_of(self, record):
+        try:
+            return int((record['Config'].get('Labels') or {}).get(LABEL + 'container-number') or 1)
+        except ValueError:
+            return 1
 
     def ensure_volume(self, vol):
         src = vol.get('source') if isinstance(vol, dict) and vol.get('type', 'volume') == 'volume' else \
@@ -689,7 +778,7 @@ class Compose:
     # ---- commands
     def up(self, names=(), detach=False, build=False, force=False, no_recreate=False, orphans=False,
            pull='missing', abort=False, exit_from=None, wait=False, elf=None, no_start=False,
-           timeout=None, no_deps=False):
+           timeout=None, no_deps=False, scale=None):
         services = self.p.active(names) if not no_deps else list(names)
         if orphans:
             for c in self.containers():
@@ -698,30 +787,42 @@ class Compose:
                     print(f' Container {c["Name"]}  Removed', file=sys.stderr)
         started = []
         for name in services:
-            recs = self.containers(name)
+            count = self.p.replicas(name, scale)
+            recs = {}
+            for r in self.containers(name):
+                if self.number_of(r) > count:   # scaled down: the highest numbers go
+                    runtime.stop(self.st, r, timeout)
+                    runtime.remove(self.st, self.st.load_container(r['Id']), force=True)
+                    print(f' Container {r["Name"]}  Removed', file=sys.stderr)
+                else:
+                    recs[self.number_of(r)] = r
             image_id, _ = self.image_for(name, build, pull)
             want = config_hash(self.p, name, image_id)
-            rec = recs[0] if recs else None
-            if rec and not no_recreate and (force or
-                                            (rec['Config'].get('Labels') or {}).get(LABEL + 'config-hash') != want):
-                runtime.stop(self.st, rec, timeout)
-                runtime.remove(self.st, self.st.load_container(rec['Id']), force=True)
-                print(f' Container {rec["Name"]}  Recreate', file=sys.stderr)
-                rec = None
-            if rec is None:
-                rec = self.create(name, build=False, pull='never' if 'build' not in self.p.services[name]
-                                  else 'missing', elf=elf)
-                print(f' Container {rec["Name"]}  Created', file=sys.stderr)
-            if no_start:
-                continue
-            self.wait_for(name)
-            rec = runtime.refresh(self.st, self.st.load_container(rec['Id']))
-            if rec['State']['Status'] not in ('running', 'restarting'):
-                runtime.start_detached(self.st, rec)
-                print(f' Container {rec["Name"]}  Started', file=sys.stderr)
-            else:
-                print(f' Container {rec["Name"]}  Running', file=sys.stderr)
-            started.append(rec['Id'])
+            waited = False
+            for number in range(1, count + 1):
+                rec = recs.get(number)
+                if rec and not no_recreate and (force or
+                                                (rec['Config'].get('Labels') or {}).get(LABEL + 'config-hash') != want):
+                    runtime.stop(self.st, rec, timeout)
+                    runtime.remove(self.st, self.st.load_container(rec['Id']), force=True)
+                    print(f' Container {rec["Name"]}  Recreate', file=sys.stderr)
+                    rec = None
+                if rec is None:
+                    rec = self.create(name, number, build=False,
+                                      pull='never' if 'build' not in self.p.services[name] else 'missing', elf=elf)
+                    print(f' Container {rec["Name"]}  Created', file=sys.stderr)
+                if no_start:
+                    continue
+                if not waited:
+                    self.wait_for(name)
+                    waited = True
+                rec = runtime.refresh(self.st, self.st.load_container(rec['Id']))
+                if rec['State']['Status'] not in ('running', 'restarting'):
+                    runtime.start_detached(self.st, rec)
+                    print(f' Container {rec["Name"]}  Started', file=sys.stderr)
+                else:
+                    print(f' Container {rec["Name"]}  Running', file=sys.stderr)
+                started.append(rec['Id'])
         if wait:
             for name in services:
                 for r in self.containers(name):
@@ -820,6 +921,13 @@ class Compose:
             labels = c['Config'].get('Labels') or {}
             if labels.get(LABEL + 'project') == self.p.name and labels.get(LABEL + 'oneoff') == 'True':
                 runtime.remove(self.st, c, force=True)
+        for key, spec in self.p.networks.items():
+            if spec.get('external'):
+                continue
+            real = self.p.network_name(key)
+            if real in network.networks(self.st) and not network.users(self.st, real):
+                network.remove(self.st, real)
+                print(f' Network {real}  Removed', file=sys.stderr)
         if volumes:
             for vname, spec in self.p.volumes.items():
                 if (spec or {}).get('external'):
@@ -923,12 +1031,37 @@ def cmd_up(c, args):
     p.add_argument('--no-color', action='store_true')
     p.add_argument('--no-log-prefix', action='store_true')
     p.add_argument('-y', '--yes', action='store_true')
+    p.add_argument('--scale', action='append', default=[])
     elf_flags(p)
     p.add_argument('services', nargs='*')
     a = p.parse_args(args)
     return c.up(a.services, a.detach or a.wait, a.build, a.force_recreate, a.no_recreate, a.remove_orphans,
                 a.pull if a.pull != 'build' else 'missing', a.abort_on_container_exit, a.exit_code_from,
-                a.wait, dict(isolate=a.isolate, cow=a.cow, owners=a.owners), a.no_start, a.timeout, a.no_deps)
+                a.wait, dict(isolate=a.isolate, cow=a.cow, owners=a.owners), a.no_start, a.timeout, a.no_deps,
+                parse_scale(c.p, a.scale))
+
+
+def parse_scale(project, items):
+    scale = {}
+    for item in items:
+        svc, eq, n = item.partition('=')
+        if not eq or not n.isdigit():
+            raise ComposeError(f'--scale {item}: expected SERVICE=NUM')
+        if svc not in project.services:
+            raise ComposeError(f'no such service: {svc}')
+        if int(n) > 1 and project.services[svc].get('container_name'):
+            raise ComposeError(f'service "{svc}": container_name cannot be used with several replicas')
+        scale[svc] = int(n)
+    return scale
+
+
+def cmd_scale(c, args):
+    p = sub('scale')
+    p.add_argument('--no-deps', action='store_true')
+    p.add_argument('pairs', nargs='+')
+    a = p.parse_args(args)
+    scale = parse_scale(c.p, a.pairs)
+    return c.up(list(scale), detach=True, no_deps=True, scale=scale)
 
 
 def cmd_create(c, args):
@@ -1274,15 +1407,15 @@ def cmd_images(c, args):
 
 def cmd_port(c, args):
     p = sub('port')
+    p.add_argument('--index', type=int, default=1)
     p.add_argument('service')
     p.add_argument('private_port')
     a = p.parse_args(args)
-    port = a.private_port.split('/')[0]
-    for spec in as_list(c.p.services[a.service].get('ports')):
-        pub, target = port_spec(spec).split('/')[0].split(':')[-2:]
-        if target == port:
-            print(f'0.0.0.0:{pub}')
-            return 0
+    key = a.private_port if '/' in a.private_port else a.private_port + '/tcp'
+    rec = runtime.refresh(c.st, c.resolve(a.service, a.index))
+    for b in (c.cli.network_settings(c.st, rec)['Ports'].get(key) or []):
+        print(f'{b["HostIp"]}:{b["HostPort"]}')
+        return 0
     return 1
 
 
@@ -1328,7 +1461,7 @@ def cmd_ls(st, args):
 
 
 COMMANDS = {
-    'up': cmd_up, 'create': cmd_create, 'down': cmd_down, 'ps': cmd_ps, 'logs': cmd_logs, 'exec': cmd_exec,
+    'up': cmd_up, 'scale': cmd_scale, 'create': cmd_create, 'down': cmd_down, 'ps': cmd_ps, 'logs': cmd_logs, 'exec': cmd_exec,
     'run': cmd_run, 'start': simple('start'), 'stop': simple('stop'), 'restart': simple('restart'),
     'kill': simple('kill'), 'rm': simple('rm'), 'build': cmd_build, 'pull': cmd_pull, 'config': cmd_config,
     'convert': cmd_config, 'images': cmd_images, 'port': cmd_port, 'top': cmd_top,

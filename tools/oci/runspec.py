@@ -154,7 +154,7 @@ def make_guest_dirs(rootfs, binds, path):
 
 
 def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=None,
-          command=None, lower=None):
+          command=None, lower=None, loader_extra=()):
     """The elfloader argv of a container start (or exec) and its cwd."""
     cfg, host = record['Config'], record['HostConfig']
     binds = [tuple(b) for b in host['Binds']]     # (host, guest, 'ro'|'rw')
@@ -215,6 +215,7 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
     argv += ['--mount-table', str(cdir / 'mounts.table'), '--mount-scratch', str(cdir / 'mounts')]
     if host.get('Owners'):
         argv += ['--owner-db', str(cdir / 'owners.db')]
+    argv += list(loader_extra)   # container networks (network.py)
     vector = 'r' if ro_root else 'w'
     for src, dst, mode in all_binds:
         if ':' in src or ':' in dst:

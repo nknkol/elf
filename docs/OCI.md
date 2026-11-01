@@ -2,7 +2,8 @@
 
 **状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主、R6 写时复制、R7 compose 与 Engine API
 已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收（见文末各“实现记录”）；R6 的层镜像（erofs，按需展开）、
-`build` 直接写合并视图的上层与容器内只读镜像的 `mount -o loop` 也已完成。下文各节保留设计原文，实现与设计不同之处
+`build` 直接写合并视图的上层、容器内只读镜像的 `mount -o loop`，以及容器网络（每个容器一个回环地址，compose 的网络
+与副本数）也已完成。下文各节保留设计原文，实现与设计不同之处
 集中写在“实现与设计的差异”。
 
 ## 目标
@@ -144,7 +145,7 @@ build-cache/                       R3：构建缓存索引
   重定向后 exec 的程序就写不了标准输出。已打开的 FD 写入不受限制。加 `--isolate` 时由 broker 执行同一向量。
 - **信号**：stop/kill 与前台的信号转发只发给容器主进程（与 Docker 相同）；主进程退出后，同一进程组里剩下的进程被
   SIGKILL（相当于 PID 命名空间的 init 退出）。主进程放在自己的进程组，`-it` 时设为终端前台进程组。
-- **`--init`、`-p` 映射不同端口、`-P`、`--network` 非 host、cgroup 类参数**：报错退出 125（见 docker 的 UNSUPPORTED 表）。
+- **`--init`、cgroup 类参数**：报错退出 125（见 docker 的 UNSUPPORTED 表）。`-p`、`-P`、`--network` 见“网络与副本”。
 - **R2 的运行中追加卷**：未实现。R4 的共享翻译表已有，但追加只能由容器外发起（见“外部 → 容器”），还没有入口。
 - **build**：输出为传统构建器格式（`Step n/m`、`Using cache`）；完全命中缓存时镜像 id 不变（config 的时间取自缓存的层）；
   `COPY --chown` 被忽略（R5 之前文件都属于 root），`COPY --parents`、`--mount=type=ssh`、远程上下文与 git 源报错；
@@ -396,7 +397,8 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 - **特权操作**：iptables、sysctl、modprobe、创建设备节点、真实挂载不能用；需要 `--privileged` 的镜像不行。
 - **进程模型**：没有 pid 命名空间，入口程序不是 pid 1；镜像自带的 tini/dumb-init 能 wait 自己的子进程，但收养不了孙进程。
   `exec` 进入的进程看得到宿主的其他进程。
-- **网络**：共用宿主网络；不能隔离、不能端口映射；数据报 UNIX 套接字在 `--isolate` 下不可用（见 STATUS.md）。
+- **网络**：每个容器一个回环地址，按网络决定互通，`-p` 由转发进程发布（见“网络与副本”）；数据报 UNIX 套接字在
+  `--isolate` 下不可用（见 STATUS.md）。
 - **资源**：没有 cgroup，`--memory`、`--cpus` 不可用，`stats` 只能粗略汇总宿主进程的数据。
 - **空间**：复制式容器每个一份 rootfs；`--cow` 容器只占上层（改过与新建的文件）；设备 `/data` 目前剩余 65 GB。
 
@@ -645,16 +647,15 @@ stdout/stderr 分流）、`put_archive`/`get_archive`、按标签过滤列表、
   env_file、volumes（短/长写法；命名卷是 `{项目}_{名字}`，external 与 name 照规范）、tmpfs、ports、working_dir、user、
   hostname、container_name、restart、labels、extra_hosts、dns、stop_signal、stop_grace_period、read_only、tty、
   stdin_open、secrets 与 configs（file、environment、content）、healthcheck，以及扩展 `x-elf: {isolate, cow, owners}`。
-  需要命名空间或 cgroup 的键（networks、cap_add、mem_limit、deploy、init……）警告后忽略。
-- **网络**：与宿主共用。每个容器的 `/etc/hosts` 把所有服务名（和 container_name）指向 127.0.0.1，所以
-  `http://db:端口/` 可用；同一端口只能有一个服务监听。
+  需要命名空间或 cgroup 的键（cap_add、mem_limit、deploy.resources、init……）警告后忽略。
+- **网络**：见“网络与副本”（项目网络、别名、network_mode、副本数）。
 - **依赖**：按 depends_on 拓扑排序（有环报错）；`service_healthy` 由 compose 自己按 healthcheck（服务的或镜像的）
   在容器里反复执行检查命令，`service_completed_successfully` 等待退出码 0。
 - **命令**：up（`-d`、`--build`、`--force-recreate`、`--no-recreate`、`--no-deps`、`--remove-orphans`、`--wait`、
   前台模式带前缀输出、`--abort-on-container-exit`、`--exit-code-from`，Ctrl-C 停止）、create、down（`-v`、`--rmi`）、
   ps、logs（`-f`、`--tail`）、exec、run（`--rm`、`--no-deps`、一次性容器）、start/stop/restart/kill/rm、build、
   pull、config（`--services`、`--format json`）、images、port、top、ls、version。配置哈希不变的服务 up 时保留，改了才重建。
-- **差别**：没有项目网络、网络别名与服务间隔离；`deploy.replicas`/`scale` 只建一个；healthcheck 只在 compose 等待
+- **差别**：healthcheck 只在 compose 等待
   依赖或 `--wait` 时执行（容器没有持续的健康状态，ps 不显示 healthy）。
 
 ### Engine API（`tools/oci/engine.py`）
@@ -666,15 +667,77 @@ stdout/stderr 分流）、`put_archive`/`get_archive`、按标签过滤列表、
   （create、json 带 all/filters(label、name、id、status、ancestor)/limit、`{id}/json`、start、stop、restart、kill、
   wait（condition）、DELETE（force、v）、rename、logs（tail、follow）、attach、top、resize、archive 的 GET/HEAD/PUT）；
   exec（create、start（Detach、Tty、AttachStdin）、json、resize）；volumes（列表、create、inspect、DELETE）；networks
-  （只有 host 与 bridge 两个名字，都是宿主网络；create 返回 501）。
+  （列表、inspect、create、DELETE、connect、disconnect，见“网络与副本”）。
 - **流**：没有 TTY 时用多路复用帧（8 字节头，stdout 1、stderr 2）；客户端请求 `Connection: Upgrade` 时以 101 劫持连接
   （attach、exec start），否则以关闭连接结束响应。容器日志里 stdout 与 stderr 已合并，logs 都作为 stdout 帧；exec 的
   两路分开。
 - **创建**：JSON 翻译成 `docker create` 的选项后走同一路径（校验、镜像配置、runtime.create），Cmd/Entrypoint 原样使用；
-  PortBindings 的 HostPort 为空或等于容器端口（发布为端口本身，inspect 的 NetworkSettings.Ports 照此报告），不同则 400；
+  PortBindings 与 PublishAllPorts 变成 `-p`/`-P`，NetworkMode 与 NetworkingConfig 的别名、IPv4Address 变成 `--network`、
+  `--network-alias`、`--ip`；
   Privileged 400；CapAdd、Memory 等进 Warnings；HostConfig 的 `Isolate`、`Cow`、`Owners` 是 ELF 的扩展。
 - **安全**：把引擎套接字（默认路径、`DOCKER_HOST`、正在服务的路径）绑进 `--isolate` 容器会被拒绝（API 与命令行都是），
   除非设 `ELF_OCI_ALLOW_ENGINE_SOCKET=1`。不加 `--isolate` 的容器本来就以应用身份运行，绑进去不额外扩权。
-- **差别**：没有 build、commit、events、stats、export/import、swarm、plugins、networks 的创建；attach 只有输出（没有
+- **差别**：没有 build、commit、events、stats、export/import、swarm、plugins；attach 只有输出（没有
   向容器主进程写 stdin）；exec 实例只在引擎进程内存里。
 
+
+
+## 网络与副本（2026-11-01，HarmonyOS 真机）
+
+没有网络命名空间，但 Linux 把整个 127.0.0.0/8 路由到回环接口，不配置就能 bind 其中任何地址（HongMeng 上实测：
+127.0.0.2、127.1.2.3、127.255.0.9 都能 bind/connect，同一端口可在不同地址上各监听一次，IPv4 映射的 IPv6 地址也能
+bind）。所以每个容器分到一个自己的回环地址，相当于有了自己的端口空间。
+
+验收：`test/proot/test_net.py`（`make check`，两种构建 × 常规与 `--isolate`）；`make check-oci` 新增 19 项
+（user-defined 网络上两个容器都监听 80、按名字/别名/地址访问，另一个网络上的容器既连不上也解析不到，`--isolate`
+下同样被拒，network connect/disconnect，`-p 18480:80` 转发与 `docker port`/ps，network rm/ls；compose 的两个项目网络、
+`deploy.replicas: 2` 各自监听 80、跨两个网络的服务、别名、ports、`--scale`、`compose scale`、down 删除网络）。
+
+### payload（`src/payload/include/net_view.h`）
+
+- loader `--net-addr 127.x.y.z`（必须在 127.128.0.0/9 里）与 `--net-peers FILE`，子 loader 收到同样的参数；payload ABI 27。
+- **bind**：通配地址与 127.0.0.1 改成容器自己的地址；绑池里别的地址 EADDRNOTAVAIL。
+- **connect/sendto/sendmsg**：127.0.0.1 与通配地址是容器自己（与网络命名空间里的 localhost 相同）；127.127.0.1
+  是宿主的 127.0.0.1（`--add-host X:host-gateway` 写的就是它）；池里的地址只有自己的或 peers 文件里列出的才连，否则
+  ECONNREFUSED；连池地址前，未绑定的套接字先绑到容器地址，对方看到的来源就是这个容器。
+- **端口**：本机不许非特权进程绑 1024 以下（`ip_unprivileged_port_start` 1024），所以池地址上的端口 p<1024 实际是
+  61000+p（在临时端口范围 32768–60999 之上，不会撞上自动分配的源端口）；getsockname、getpeername、accept、recvfrom、
+  recvmsg 返回的地址再换回 p。
+- **IPv6**：`::` 与 `::1` 当作容器地址，用 IPv4 映射地址（先关 IPV6_V6ONLY）；真正的 IPv6 地址原样。
+- **隔离模式**：broker 执行 bind/connect，自己读 peers 文件：绑别的容器的地址 EADDRNOTAVAIL，连不在 peers 里的池地址
+  ECONNREFUSED。不加 `--isolate` 时只是视图（guest 直接发系统调用能绕过），与 R4、R5 的约束性质相同。
+
+### docker（`tools/oci/network.py`）
+
+- **网络**：`bridge`（默认：同网的容器按地址互通，没有名字解析，与 Docker 默认网桥相同）、`host`（以前的行为：没有自己的
+  地址，端口就是宿主端口，`-p` 只能 N:N）、`none`（有地址、没有 peers）、自定义网络（`docker network create/ls/inspect/
+  rm/connect/disconnect/prune`，记在 `networks.json`）、`container:ID`（用另一个容器的地址与 peers）。
+- **地址**：create 时在 store 锁里从 127.128.0.2 起分配（末字节跳过 0 与 255），`--ip` 可指定；记在
+  `NetworkSettings.IPAddress`，网络列在 `NetworkSettings.Networks`（带别名）。
+- **peers 与 hosts**：每次 create、rm、rename、connect、disconnect 后重写所有容器的 `peers` 文件与 `etc/hosts`（原地写，
+  运行中的容器绑着它）：peers 是共享任一网络的容器的地址；自定义网络上的容器按容器名与别名写进 hosts（Docker 的内置
+  DNS 做的事；副本各一行同名记录）。
+- **`-p`**：`[ip:][host[-host]:]container[-container]`，host 端口省略时取空闲端口；转发进程在运行容器的进程里（前台
+  `docker run` 或后台的监视进程），像 docker-proxy 一样把连接转到容器地址（端口按上面的规则换算）。宿主端口被占用时
+  start 失败；`docker port`、ps 的 PORTS、inspect 的 `NetworkSettings.Ports` 报告实际绑定。`-P` 发布镜像 EXPOSE 的
+  TCP 端口。只支持 TCP。
+
+### compose
+
+- **网络**：顶层 `networks`（隐含 `default`，名字 `{项目}_{键}`，`name`、`external`、`labels`、`internal`、`attachable`）；
+  服务的 `networks`（列表或带 `aliases` 的映射，缺省 `default`）；服务名总是别名。up 时建网络（` Network X  Created`），
+  down 删掉项目自己的、没人用的网络；external 网络必须已存在。`network_mode`：host、none、bridge、`service:名字`、
+  `container:ID`。
+- **副本**：`deploy.replicas`、`scale`、`up --scale 服务=N`、`compose scale 服务=N`；容器 `{项目}-{服务}-1..N`，缩小时删掉
+  编号大的；有 container_name 时不能多于 1 个。`exec --index`、`port --index` 选副本。
+
+### 与 Docker 的差别
+
+- **只监听 127.0.0.1 的程序**：在 Docker 里别的容器连不上它，这里绑到容器地址后同网的容器连得上。
+- **getsockname**：绑 127.0.0.1 的套接字报告容器地址（Docker 报告 127.0.0.1）。
+- **UDP**：数据报照样换地址与端口，但 `--isolate` 下未连接的 sendto/sendmsg 不经 broker，不执行 peers 检查；`-p` 不转发 UDP。
+- **容器地址只在本机可达**：局域网只能经发布的端口访问（与 Docker 默认网桥相同）；宿主上已经监听 0.0.0.0:端口的程序
+  仍会占住同一个发布端口。
+- **负载均衡**：同名的多条 hosts 记录按顺序返回（musl 与 glibc 都给出全部地址，客户端多半用第一个），没有 Docker DNS 的
+  轮转；没有 swarm 的 VIP。
+- **`none`**：没有 peers，但出站连接（局域网、互联网）不受限。

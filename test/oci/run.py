@@ -694,6 +694,140 @@ secrets:
     docker(home, 'compose', '--project-directory', str(fg), 'down')
 
 
+def serve(text, port=80):
+    """A test/alpine:1 command: an HTTP server answering text on port."""
+    return (f'while true; do printf "HTTP/1.0 200 OK\\r\\n\\r\\n{text}\\n" | nc -l -p {port}; done')
+
+
+def fetch(url, tries=20):
+    """A shell snippet: GET url (retried while the server restarts nc)."""
+    return f'for i in $(seq {tries}); do wget -qO- -T 2 {url} 2>/dev/null && break; sleep 0.3; done'
+
+
+def http_get(port, timeout=20):
+    import urllib.request
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=3) as r:
+                return r.read().decode().strip()
+        except OSError:
+            time.sleep(0.3)
+    return None
+
+
+def network_tests(home, work):
+    """Container networks and replicas (docs/OCI.md, network.py)."""
+    img = 'test/alpine:1'
+    p = docker(home, 'network', 'create', 'appnet')
+    check(p.returncode == 0 and len(p.stdout.strip()) == 64, 'network create', p.stderr)
+    for name in ('s1', 's2'):
+        p = docker(home, 'run', '-d', '--name', name, '--network', 'appnet', '--network-alias', name + '-alias',
+                   '-u', 'root', img, serve(name))
+        check(p.returncode == 0, f'run -d {name} on a user-defined network (port 80)', p.stderr)
+    ip1 = docker(home, 'inspect', '-f', '{{.NetworkSettings.IPAddress}}', 's1').stdout.strip()
+    ip2 = docker(home, 'inspect', '-f', '{{.NetworkSettings.IPAddress}}', 's2').stdout.strip()
+    check(ip1.startswith('127.') and ip2.startswith('127.') and ip1 != ip2,
+          'each container has a loopback address of its own', (ip1, ip2))
+    p = docker(home, 'run', '--rm', '--network', 'appnet', img,
+               f'{fetch("http://s1/")}; {fetch("http://s2-alias/")}; {fetch("http://" + ip1 + "/")}')
+    check(p.returncode == 0 and p.stdout.split() == ['s1', 's2', 's1'],
+          'two containers listen on port 80; reached by name, alias and address', p.stdout + p.stderr)
+    p = docker(home, 'run', '--rm', img, f'wget -qO- -T 2 http://{ip1}/ || echo refused; '
+               'grep -c s1 /etc/hosts || true')
+    check(p.stdout.split() == ['refused', '0'],
+          'a container on another network neither reaches nor resolves it', p.stdout + p.stderr)
+    p = docker(home, 'run', '--rm', '--isolate', img, f'wget -qO- -T 2 http://{ip1}/ || echo refused')
+    check(p.stdout.split() == ['refused'], 'the same refusal under --isolate (broker)', p.stdout + p.stderr)
+    p = docker(home, 'run', '-d', '--name', 'roamer', '-u', 'root', img, 'sleep 60')
+    p = docker(home, 'network', 'connect', '--alias', 'rm-alias', 'appnet', 'roamer')
+    p2 = docker(home, 'exec', 'roamer', 'sh', '-c', fetch('http://s1/'))
+    check(p.returncode == 0 and p2.stdout.strip() == 's1', 'network connect: reaches the network by name',
+          p.stderr + p2.stdout + p2.stderr)
+    p = docker(home, 'network', 'disconnect', 'appnet', 'roamer')
+    p2 = docker(home, 'exec', 'roamer', 'sh', '-c', f'wget -qO- -T 2 http://{ip1}/ || echo refused')
+    check(p.returncode == 0 and p2.stdout.strip() == 'refused', 'network disconnect', p.stderr + p2.stdout)
+    # Published ports: the forwarder of the container's process.
+    p = docker(home, 'run', '-d', '--name', 'pub', '-p', '18480:80', '-u', 'root', img, serve('pub'))
+    got = http_get(18480)
+    p2 = docker(home, 'port', 'pub')
+    p3 = docker(home, 'ps', '--filter', 'name=pub', '--format', '{{.Ports}}')
+    check(p.returncode == 0 and got == 'pub' and p2.stdout.strip() == '80/tcp -> 0.0.0.0:18480' and
+          p3.stdout.strip() == '0.0.0.0:18480->80/tcp', '-p 18480:80 forwards to the container (port, ps)',
+          (got, p2.stdout, p3.stdout, p.stderr))
+    p = docker(home, 'network', 'rm', 'appnet')
+    check(p.returncode != 0 and 'active endpoints' in p.stderr, 'network rm of a network in use fails', p.stderr)
+    docker(home, 'rm', '-f', 's1', 's2', 'roamer', 'pub')
+    p = docker(home, 'network', 'rm', 'appnet')
+    p2 = docker(home, 'network', 'ls', '--format', '{{.Name}}')
+    check(p.returncode == 0 and p2.stdout.split() == ['bridge', 'host', 'none'], 'network rm, ls',
+          p.stderr + p2.stdout)
+    # Compose: networks, aliases, replicas, ports.
+    proj = work / 'compose-net'
+    proj.mkdir()
+    (proj / 'compose.yaml').write_text(f"""
+name: netp
+x-base: &base
+  image: {img}
+  user: root
+services:
+  web:
+    <<: *base
+    command: ['{serve('web-$$HOSTNAME')}']
+    deploy:
+      replicas: 2
+    networks: [front]
+  api:
+    <<: *base
+    command: ['{serve('api')}']
+    ports: ["18481:80"]
+    networks:
+      front:
+      back:
+        aliases: [api-internal]
+  db:
+    <<: *base
+    command: ['{serve('db')}']
+    networks: [back]
+  ui:
+    <<: *base
+    command: ['sleep 60']
+    networks: [front]
+networks:
+  front:
+  back:
+""")
+
+    def compose(*args, timeout=300):
+        return docker(home, 'compose', '--project-directory', str(proj), *args, timeout=timeout)
+    p = compose('up', '-d')
+    check(p.returncode == 0 and 'Network netp_front  Created' in p.stderr and 'netp-web-2' in p.stderr,
+          'compose: networks created, replicas started', p.stderr)
+    p = compose('exec', '-T', 'ui', 'sh', '-c',
+                f'{fetch("http://netp-web-1/")}; {fetch("http://netp-web-2/")}; {fetch("http://api/")}; '
+                'wget -qO- -T 2 http://db/ || echo no-db; grep -c " web" /etc/hosts')
+    out = p.stdout.split()
+    check(len(out) == 5 and out[0].startswith('web-') and out[1].startswith('web-') and out[0] != out[1] and
+          out[2:] == ['api', 'no-db', '2'],
+          'compose: replicas on port 80 each, a service in two networks, db unreachable from front',
+          p.stdout + p.stderr)
+    p = compose('exec', '-T', 'db', 'sh', '-c', fetch('http://api-internal/'))
+    check(p.stdout.strip() == 'api', 'compose: a network alias', p.stdout + p.stderr)
+    check(http_get(18481) == 'api', 'compose: ports forward to the service')
+    p = compose('up', '-d', '--scale', 'web=3', 'web')
+    p2 = compose('ps', '--format', '{{.Name}}')
+    check(p.returncode == 0 and 'netp-web-3' in p2.stdout.split(), 'compose: up --scale web=3', p.stderr + p2.stdout)
+    p = compose('scale', 'web=1')
+    p2 = compose('ps', '--format', '{{.Name}}')
+    names = p2.stdout.split()
+    check(p.returncode == 0 and 'netp-web-1' in names and 'netp-web-2' not in names and 'netp-web-3' not in names,
+          'compose: scale web=1 removes the others', p.stderr + p2.stdout)
+    p = compose('down')
+    p2 = docker(home, 'network', 'ls', '--format', '{{.Name}}')
+    check(p.returncode == 0 and 'netp_front' not in p2.stdout, 'compose: down removes the networks',
+          p.stderr + p2.stdout)
+
+
 def engine_tests(home, work):
     """R7: the Engine API on a UNIX socket (docs/OCI.md)."""
     import http.client
@@ -775,8 +909,10 @@ def engine_tests(home, work):
               js(ex)['ExitCode'] == 5,
               'engine: exec create, start (stdout and stderr frames), inspect', str(out) + str(ex))
         status, out, _ = api('GET', '/containers/api2/json')
-        check(js(out)['NetworkSettings']['Ports'].get('18432/tcp') == [{'HostIp': '0.0.0.0', 'HostPort': '18432'}],
-              'engine: a port binding without a host port is the port itself', out[:400])
+        bound = js(out)['NetworkSettings']['Ports'].get('18432/tcp') or [{}]
+        check(len(bound) == 1 and bound[0].get('HostIp') == '0.0.0.0' and bound[0].get('HostPort', '0').isdigit() and
+              int(bound[0]['HostPort']) > 0,
+              'engine: a port binding without a host port gets a free host port', out[:400])
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode='w') as tar:
             info = tarfile.TarInfo('put.txt')
@@ -807,8 +943,9 @@ def engine_tests(home, work):
                                                           'HostConfig': {'Privileged': True}})
         s3, out3, _ = api('POST', '/containers/create', {
             'Image': 'test/alpine:1', 'HostConfig': {'Isolate': True, 'Binds': [f'{sock}:/var/run/docker.sock']}})
-        check(s1 == 501 and s2 == 400 and s3 >= 400 and b'refused' in out3,
-              'engine: networks, --privileged and the socket in an --isolate container refused',
+        s4, _, _ = api('DELETE', '/networks/n')
+        check(s1 == 201 and s4 == 204 and s2 == 400 and s3 >= 400 and b'refused' in out3,
+              'engine: network create and delete; --privileged and the socket in an --isolate container refused',
               f'{s1} {s2} {s3} {out3}')
         p = docker(home, 'run', '--rm', '--isolate', '-v', f'{home}/docker.sock:/var/run/docker.sock',
                    'test/alpine:1', 'true')
@@ -873,7 +1010,7 @@ def run_tests(home, work, isolate):
     check(p.returncode == 127, 'missing command exits 127' + tag, p.stderr)
     p = docker(home, 'run', '--rm', *mode, img, 'exit 42')
     check(p.returncode == 42, 'container exit status' + tag)
-    for flag in (['--privileged'], ['--memory', '1g'], ['-p', '8080:80'], ['--network', 'none']):
+    for flag in (['--privileged'], ['--memory', '1g'], ['--mac-address', '02:42:ac:11:00:02']):
         p = docker(home, 'run', '--rm', *mode, *flag, img)
         check(p.returncode == 125 and 'not supported' in p.stderr, f'{flag[0]} refused with 125' + tag,
               p.stderr)
@@ -1126,6 +1263,7 @@ def main():
             cow_tests(home, work)
             erofs_tests(home, work)
             compose_tests(home, work)
+            network_tests(home, work)
             engine_tests(home, work)
         else:
             print('SKIP: container runs need', lib.ALPINE)

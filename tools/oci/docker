@@ -19,6 +19,7 @@ sys.modules.setdefault('docker_cli', sys.modules[__name__])   # For build.py.
 import fmt  # noqa: E402
 import images  # noqa: E402
 import layer_images  # noqa: E402
+import network  # noqa: E402
 import registry  # noqa: E402
 import runspec  # noqa: E402
 import runtime  # noqa: E402
@@ -406,8 +407,10 @@ UNSUPPORTED = {
     '--userns': 'no user namespaces', '--gpus': 'use --isolate-device', '--runtime': 'only the ELF runtime exists',
     '--sysctl': 'sysctls need privileges', '--ulimit': 'not supported', '--oom-kill-disable': 'no cgroups',
     '--init': 'no PID namespace: an init cannot adopt the container\'s orphans',
-    '--cgroupns': 'no cgroups', '--cgroup-parent': 'no cgroups', '--link': 'shared host network: use localhost',
-    '--ip': 'shared host network', '--mac-address': 'shared host network',
+    '--cgroupns': 'no cgroups', '--cgroup-parent': 'no cgroups',
+    '--link': 'legacy links: put the containers on a user-defined network (docker network create)',
+    '--mac-address': 'container addresses are loopback addresses: there is no MAC',
+    '--ip6': 'container addresses are IPv4 loopback addresses',
 }
 
 
@@ -430,7 +433,9 @@ def run_parser(prog):
     p.add_argument('-p', '--publish', action='append', default=[])
     p.add_argument('-P', '--publish-all', action='store_true')
     p.add_argument('--expose', action='append', default=[])
-    p.add_argument('--network', '--net', default='host')
+    p.add_argument('--network', '--net', default='bridge')
+    p.add_argument('--network-alias', '--net-alias', action='append', default=[])
+    p.add_argument('--ip')
     p.add_argument('--add-host', action='append', default=[])
     p.add_argument('--dns', action='append', default=[])
     p.add_argument('-l', '--label', action='append', default=[])
@@ -470,7 +475,8 @@ def split_options(args, takes_value=None):
     non-option; everything after the image belongs to the command."""
     takes_value = takes_value or {'--name', '-e', '--env', '--env-file', '-v', '--volume', '--mount', '--tmpfs',
                    '-w', '--workdir', '-u', '--user', '-h', '--hostname', '--entrypoint', '-p',
-                   '--publish', '--expose', '--network', '--net', '--add-host', '--dns', '-l',
+                   '--publish', '--expose', '--network', '--net', '--network-alias', '--net-alias',
+                   '--ip', '--add-host', '--dns', '-l',
                    '--label', '--restart', '--stop-signal', '--stop-timeout', '--pull',
                    '--platform', '--isolate-device', '-a', '--attach', '--sig-proxy',
                    '--log-driver', '--cidfile'}
@@ -494,8 +500,6 @@ def new_record(st, a, image_id, image_text):
     config = st.image_info(image_id)['config'].get('config', {})
     if a.platform and a.platform not in ('linux/arm64', 'linux/arm64/v8'):
         raise Fail(f'only linux/arm64 images can run here, not {a.platform}')
-    if a.network not in ('host', 'default', 'bridge'):
-        raise Fail(f'--network {a.network} is not supported: containers share the host network')
     if a.read_only and a.in_place:
         raise Fail('--read-only and --in-place exclude each other')
     if a.cow and (a.read_only or a.in_place):
@@ -504,13 +508,22 @@ def new_record(st, a, image_id, image_text):
         import engine
         engine.socket_guard(st, [v.split(':')[0] for v in a.volume] +
                             [parse_mount(m)[1] or '' for m in a.mount], True)
-    for spec in a.publish:
-        ports = spec.split('/')[0].split(':')
-        if len(ports) < 2 or ports[-1] != ports[-2]:
-            raise Fail(f'-p {spec} is not supported: containers share the host network, a port is '
-                       'published only as itself (-p N:N: the program listens on host port N)')
-    if a.publish_all and config.get('ExposedPorts'):
-        raise Fail('-P is not supported: containers share the host network')
+    publish = list(a.publish)
+    if a.network == 'host':
+        for spec in publish:
+            ports = spec.split('/')[0].split(':')
+            if len(ports) < 2 or ports[-1] != ports[-2]:
+                raise Fail(f'-p {spec}: with --network host a port is published only as itself '
+                           '(-p N:N: the program listens on host port N)')
+    else:
+        if a.publish_all:
+            # -P: every exposed TCP port on a free host port.
+            for key in list(config.get('ExposedPorts') or {}) + list(a.expose):
+                port, _, proto = str(key).partition('/')
+                if (proto or 'tcp') == 'tcp':
+                    publish.append(port)
+        for spec in publish:
+            network.parse_publish(spec)
     cid = st.new_id()
     entrypoint = config.get('Entrypoint')
     cmd = config.get('Cmd')
@@ -550,7 +563,8 @@ def new_record(st, a, image_id, image_text):
     hosts = []
     for item in a.add_host:
         name, _, ip = item.partition(':') if '=' not in item else item.partition('=')
-        hosts.append([name, '127.0.0.1' if ip == 'host-gateway' else ip])
+        hosts.append([name, ('127.0.0.1' if a.network == 'host' else network.HOST_ALIAS)
+                      if ip == 'host-gateway' else ip])
     labels = dict(config.get('Labels') or {})
     for item in a.label:
         key, _, value = item.partition('=')
@@ -558,7 +572,7 @@ def new_record(st, a, image_id, image_text):
     name = a.name or random_name(st)
     if not all(c.isalnum() or c in '_.-' for c in name):
         raise Fail(f'Invalid container name ({name}), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed')
-    return {
+    record = {
         'Id': cid, 'Name': name, 'Created': store_mod.now(), 'Image': image_id, 'ImageName': image_text,
         'Config': {'Hostname': a.hostname or cid[:12], 'User': a.user if a.user is not None else config.get('User', ''),
                    'Env': env, 'Entrypoint': entrypoint, 'Cmd': cmd,
@@ -571,10 +585,12 @@ def new_record(st, a, image_id, image_text):
                        'InPlace': a.in_place, 'Isolate': a.isolate, 'IsolateDevices': a.isolate_device,
                        'Owners': a.owners, 'Cow': a.cow,
                        'RestartPolicy': restart, 'Tmpfs': tmpfs, 'ExtraHosts': hosts, 'Dns': a.dns,
-                       'PortBindings': a.publish},
+                       'PortBindings': publish},
         'State': {'Status': 'created', 'Running': False, 'Pid': 0, 'ExitCode': 0,
                   'StartedAt': None, 'FinishedAt': None, 'RestartCount': 0},
     }
+    network.attach_new(st, record, a.network, a.network_alias, a.ip)
+    return record
 
 
 ADJECTIVES = 'brave calm eager fancy gentle happy jolly keen lucid merry nifty proud quirky sharp tender vivid witty zen'.split()
@@ -727,7 +743,7 @@ def container_row(st, record, no_trunc=False):
     return {'ID': record['Id'] if no_trunc else record['Id'][:12], 'Image': image,
             'Command': f'"{command}"', 'CreatedAt': record['Created'],
             'RunningFor': fmt.ago(record['Created']), 'Status': status_text(record),
-            'State': record['State']['Status'], 'Ports': ', '.join(record['HostConfig'].get('PortBindings') or []),
+            'State': record['State']['Status'], 'Ports': network.describe_ports(record),
             'Names': record['Name'], 'Labels': ','.join(f'{k}={v}' for k, v in (cfg.get('Labels') or {}).items()),
             'Mounts': ','.join(b[1] for b in record['HostConfig']['Binds'])}
 
@@ -802,7 +818,8 @@ def container_inspect(st, record):
         'Driver': 'elf-copy' if not (host.get('ReadonlyRootfs') or host.get('InPlace')) else 'elf-image',
         'Platform': 'linux',
         'HostConfig': {'Binds': [f'{s}:{d}' + (':ro' if m == 'ro' else '') for s, d, m in host['Binds']],
-                       'AutoRemove': host.get('AutoRemove', False), 'NetworkMode': 'host',
+                       'AutoRemove': host.get('AutoRemove', False), 'NetworkMode': network.mode(record),
+                       'PortBindings': host.get('PortBindings') or [],
                        'ReadonlyRootfs': host.get('ReadonlyRootfs', False),
                        'RestartPolicy': host.get('RestartPolicy'), 'Tmpfs': {t: '' for t in host.get('Tmpfs') or []},
                        'ExtraHosts': [f'{n}:{i}' for n, i in host.get('ExtraHosts') or []],
@@ -823,8 +840,25 @@ def container_inspect(st, record):
                    'Entrypoint': cfg.get('Entrypoint'), 'Labels': cfg.get('Labels', {}),
                    'StopSignal': cfg.get('StopSignal'), 'ExposedPorts': cfg.get('ExposedPorts', {}),
                    'Volumes': cfg.get('Volumes', {})},
-        'NetworkSettings': {'Networks': {'host': {}}},
+        'NetworkSettings': network_settings(st, record),
     }
+
+
+def network_settings(st, record):
+    ip = network.address(st, record)
+    nets = (record.get('NetworkSettings') or {}).get('Networks') or {}
+    m = network.mode(record)
+    if m in ('host', 'none'):
+        nets = {m: {}}
+    out_nets = {}
+    for name, n in nets.items():
+        out_nets[name] = {'IPAddress': ip if name not in ('host', 'none') else '', 'IPPrefixLen': 9 if ip else 0,
+                          'Gateway': '', 'Aliases': n.get('Aliases') or None, 'NetworkID': n.get('NetworkID', name),
+                          'MacAddress': '', 'EndpointID': record['Id'][:32] if ip else ''}
+    running = record['State']['Status'] in ('running', 'restarting')
+    return {'IPAddress': ip, 'IPPrefixLen': 9 if ip else 0, 'Gateway': '', 'MacAddress': '',
+            'Ports': ((record.get('NetworkSettings') or {}).get('Ports') or {}) if running else {},
+            'Networks': out_nets}
 
 
 def cmd_inspect(st, args, kind=None):
@@ -924,6 +958,7 @@ def cmd_rename(st, args):
         record = st.resolve_container(a.container)
         record['Name'] = a.name
         st.save_container(record)
+    network.refresh(st)
 
 
 # ---------------------------------------------------------------- volumes
@@ -1112,6 +1147,121 @@ def cmd_prune(st, kind, args):
     print(f'Total reclaimed space: {images.human_size(freed)}')
 
 
+# ---------------------------------------------------------------- networks
+def cmd_network(st, args):
+    if not args:
+        raise Fail('Usage: docker network COMMAND (connect, create, disconnect, inspect, ls, prune, rm)')
+    sub, rest = args[0], args[1:]
+    if sub == 'create':
+        p = parser('network create')
+        p.add_argument('-d', '--driver', default='bridge')
+        p.add_argument('--label', action='append', default=[])
+        p.add_argument('--internal', action='store_true')
+        p.add_argument('--attachable', action='store_true')
+        p.add_argument('-o', '--opt', action='append', default=[])
+        p.add_argument('--subnet', action='append', default=[])
+        p.add_argument('name')
+        a = p.parse_args(rest)
+        if a.subnet:
+            raise Fail('--subnet is not supported: container addresses come from 127.128.0.0/9')
+        spec = network.create(st, a.name, a.driver, dict(l.partition('=')[::2] for l in a.label),
+                              a.internal, a.attachable, dict(o.partition('=')[::2] for o in a.opt))
+        print(spec['Id'])
+    elif sub in ('ls', 'list'):
+        p = parser('network ls')
+        p.add_argument('-q', '--quiet', action='store_true')
+        p.add_argument('--no-trunc', action='store_true')
+        p.add_argument('--format')
+        p.add_argument('-f', '--filter', action='append', default=[])
+        a = p.parse_args(rest)
+        rows = []
+        for n in network.networks(st).values():
+            rows.append({'ID': n['Id'] if a.no_trunc else n['Id'][:12], 'Name': n['Name'],
+                         'Driver': n['Driver'], 'Scope': 'local', 'Labels': n.get('Labels') or {}})
+        for f in a.filter:
+            key, _, value = f.partition('=')
+            if key == 'name':
+                rows = [r for r in rows if value in r['Name']]
+            elif key == 'label':
+                k, _, v = value.partition('=')
+                rows = [r for r in rows if k in r['Labels'] and (not v or r['Labels'][k] == v)]
+            elif key == 'driver':
+                rows = [r for r in rows if r['Driver'] == value]
+        if a.quiet:
+            for r in rows:
+                print(r['ID'])
+        elif not (a.format and fmt.print_formatted(a.format, rows)):
+            print(fmt.table([[r['ID'], r['Name'], r['Driver'], r['Scope']] for r in rows],
+                            ['NETWORK ID', 'NAME', 'DRIVER', 'SCOPE']))
+    elif sub == 'inspect':
+        p = parser('network inspect')
+        p.add_argument('-f', '--format')
+        p.add_argument('name', nargs='+')
+        a = p.parse_args(rest)
+        out = [network.inspect(st, n) for n in a.name]
+        if a.format:
+            for n in out:
+                print(fmt.render(a.format, n))
+        else:
+            print(json.dumps(out, indent=4))
+    elif sub == 'rm' or sub == 'remove':
+        p = parser('network rm')
+        p.add_argument('-f', '--force', action='store_true')
+        p.add_argument('name', nargs='+')
+        a = p.parse_args(rest)
+        for n in a.name:
+            print(network.remove(st, n)['Name'])
+    elif sub == 'connect':
+        p = parser('network connect')
+        p.add_argument('--alias', action='append', default=[])
+        p.add_argument('--ip')
+        p.add_argument('network')
+        p.add_argument('container')
+        a = p.parse_args(rest)
+        network.connect(st, st.resolve_container(a.container), a.network, a.alias)
+    elif sub == 'disconnect':
+        p = parser('network disconnect')
+        p.add_argument('-f', '--force', action='store_true')
+        p.add_argument('network')
+        p.add_argument('container')
+        a = p.parse_args(rest)
+        network.disconnect(st, st.resolve_container(a.container), a.network)
+    elif sub == 'prune':
+        p = parser('network prune')
+        p.add_argument('-f', '--force', action='store_true')
+        p.add_argument('--filter', action='append', default=[])
+        a = p.parse_args(rest)
+        confirm(a.force, 'This will remove all custom networks not used by at least one container.')
+        gone = []
+        for n in list(network.networks(st).values()):
+            if n['Name'] not in network.BUILTIN and not network.users(st, n['Name']):
+                network.remove(st, n['Name'])
+                gone.append(n['Name'])
+        if gone:
+            print('Deleted Networks:\n' + '\n'.join(gone))
+    else:
+        raise Fail(f'docker network {sub}: unknown command')
+
+
+def cmd_port(st, args):
+    p = parser('port', 'List port mappings or a specific mapping for the container')
+    p.add_argument('container')
+    p.add_argument('port', nargs='?')
+    a = p.parse_args(args)
+    record = runtime.refresh(st, st.resolve_container(a.container))
+    ports = network_settings(st, record)['Ports']
+    want = a.port and (a.port if '/' in a.port else a.port + '/tcp')
+    found = False
+    for key, bindings in ports.items():
+        if want and key != want:
+            continue
+        for b in bindings or []:
+            found = True
+            print(f'{b["HostIp"]}:{b["HostPort"]}' if want else f'{key} -> {b["HostIp"]}:{b["HostPort"]}')
+    if want and not found:
+        raise Fail(f'no public port \'{a.port}\' published for {record["Name"]}')
+
+
 # ---------------------------------------------------------------- registry auth
 def cmd_login(st, args):
     p = parser('login', 'Log in to a registry')
@@ -1191,7 +1341,7 @@ COMMANDS = {
     'restart': lambda st, a: cmd_stop(st, a, restart=True), 'kill': cmd_kill, 'wait': cmd_wait,
     'rm': cmd_rm, 'ps': cmd_ps, 'exec': cmd_exec, 'cp': cmd_cp, 'logs': cmd_logs, 'rename': cmd_rename,
     'volume': cmd_volume, 'login': cmd_login, 'logout': cmd_logout, 'version': cmd_version,
-    'info': cmd_info, 'system': cmd_system,
+    'info': cmd_info, 'system': cmd_system, 'network': cmd_network, 'port': cmd_port,
     'build': lambda st, a: build_commands(st, a, 'build'),
     'commit': lambda st, a: build_commands(st, a, 'commit'),
     'diff': lambda st, a: build_commands(st, a, 'diff'),
@@ -1203,7 +1353,7 @@ COMMANDS['container'] = group('container', {
     'exec': cmd_exec, 'cp': cmd_cp, 'logs': cmd_logs, 'rename': cmd_rename,
     'inspect': lambda st, a: cmd_inspect(st, a, 'container'),
     'prune': lambda st, a: cmd_prune(st, 'container', a), 'commit': COMMANDS['commit'],
-    'diff': COMMANDS['diff']})
+    'diff': COMMANDS['diff'], 'port': cmd_port})
 COMMANDS['image'] = group('image', {
     'ls': cmd_images, 'list': cmd_images, 'pull': cmd_pull, 'push': COMMANDS['push'], 'rm': cmd_rmi,
     'tag': cmd_tag, 'history': cmd_history, 'save': cmd_save, 'load': cmd_load,

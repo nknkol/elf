@@ -162,6 +162,10 @@ typedef struct payload_config {
     /* R6 layer images (lazy_layer.h): lower i is the cache of this erofs
      * image (--lower-image after its --lower); empty: a plain directory. */
     char lower_image[CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
+    /* Container networks (net_view.h): the container's address (host
+     * order; 0: sockets as they are) and its peers file. */
+    uint32_t net_addr;
+    char net_peers[CONFIG_MAX_PATH];
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
 } payload_config_t;

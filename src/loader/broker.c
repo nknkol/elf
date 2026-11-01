@@ -12,6 +12,7 @@
 #include "loader.h"
 #include "broker_proto.h"
 #include "lazy_layer.h"
+#include "net_view.h"
 
 #define TREES (CONFIG_MAX_BINDS + 5 + CONFIG_MAX_LOWERS)
 #define PATH_BYTES 4096
@@ -711,6 +712,54 @@ static long lazy_mount_request(struct call *c)
 	return rc;
 }
 
+/* Container networks (net_view.h): the pool address an IPv4 or IPv4-mapped
+ * IPv6 address names, else 0. */
+static uint32_t pool_address(const unsigned char *address, uint32_t length)
+{
+	if (!address || length < 8)
+		return 0;
+	int family = address[0] | address[1] << 8;
+	const unsigned char *ip = NULL;
+	static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+	if (family == AF_INET)
+		ip = address + 4;
+	else if (family == AF_INET6 && length >= 24) {
+		int same = 1;
+		for (int i = 0; i < 12; i++)
+			same = same && address[8 + i] == mapped[i];
+		if (same)
+			ip = address + 20;
+	}
+	if (!ip)
+		return 0;
+	uint32_t v = (uint32_t)ip[0] << 24 | (uint32_t)ip[1] << 16 | (uint32_t)ip[2] << 8 | ip[3];
+	return net_pool_address(v) ? v : 0;
+}
+
+/* bind of another container's address, or connect to a pool address that
+ * is neither the container's own nor a peer's: refused. */
+static long network_check(long nr, const unsigned char *address, uint32_t length)
+{
+	if (!broker_cfg || !broker_cfg->net_addr)
+		return 0;
+	uint32_t ip = pool_address(address, length);
+	if (!ip || ip == broker_cfg->net_addr)
+		return 0;
+	if (nr == __NR_bind)
+		return -99; /* EADDRNOTAVAIL */
+	if (broker_cfg->net_peers[0]) {
+		long fd = sys(__NR_openat, AT_FDCWD, (long)broker_cfg->net_peers, O_CLOEXEC_, 0, 0, 0);
+		if (fd >= 0) {
+			char text[4096];
+			long n = sys(__NR_read, fd, (long)text, sizeof(text), 0, 0, 0);
+			sys(__NR_close, fd, 0, 0, 0, 0, 0);
+			if (n > 0 && net_peer_in(text, (unsigned long)n, ip))
+				return 0;
+		}
+	}
+	return -111; /* ECONNREFUSED */
+}
+
 static long execute(struct call *c, long nr)
 {
 	long *a = c->a;
@@ -988,6 +1037,9 @@ static long execute(struct call *c, long nr)
 			rc = -1 /* EPERM */;
 			break;
 		}
+		rc = network_check(nr, address, length);
+		if (rc < 0)
+			break;
 		rc = sys(nr, c->fd[0], (long)address, length, 0, 0, 0);
 		break;
 	}

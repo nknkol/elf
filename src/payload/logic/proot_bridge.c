@@ -8,6 +8,12 @@
 #ifndef AF_UNIX
 #define AF_UNIX 1 /* linux/socket.h does not export address families. */
 #endif
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
 #include <stddef.h>
 #include <errno.h>
 #include <string.h>
@@ -17,6 +23,7 @@
 #include "fake_ids.h"
 #include "container_state.h"
 #include "union_view.h"
+#include "net_view.h"
 #ifdef GUARDED
 #include "fd_runtime.h"
 #include "fs_policy.h"
@@ -1629,6 +1636,23 @@ static long socket_address(Bridge *b, long number, long a[6])
     } else {
         name = (const void *)a[sending ? 4 : 1];
         length = (unsigned int)a[sending ? 5 : 2];
+    }
+    /* Container networks: an IPv4/IPv6 address moves onto the container's
+     * own loopback address (net_view.h). */
+    uint16_t family = 0;
+    if (name && length >= 2) memcpy(&family, name, 2);
+    if (net_enabled() && (family == AF_INET || family == AF_INET6)) {
+        unsigned char moved[128];
+        unsigned moved_length;
+        long rc = net_address(number, a[0], name, (unsigned)length, moved, &moved_length);
+        if (rc < 0) return rc;
+        if (message) {
+            b->message.name = moved;
+            b->message.name_length = (int)moved_length;
+            return raw_syscall(number, a[0], (long)&b->message, a[2], 0, 0, 0);
+        }
+        if (sending) return raw_syscall(number, a[0], a[1], a[2], a[3], (long)moved, moved_length);
+        return raw_syscall(number, a[0], (long)moved, moved_length, 0, 0, 0);
     }
     size_t prefix = offsetof(struct sockaddr_un, sun_path);
     if (!name || length <= prefix || length > sizeof(b->address))

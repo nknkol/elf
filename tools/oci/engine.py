@@ -5,7 +5,7 @@ tools use instead of the command line (docker-py, testcontainers, Docker
 SDK for Go, devcontainer CLI): ping, version, info; images (list, inspect,
 pull, tag, remove); containers (create, start, stop, restart, kill, wait,
 remove, list, inspect, logs, attach, archive get/put/head); exec (create,
-start, inspect); volumes; networks (host only). Responses follow Engine API
+start, inspect); volumes; networks (container networks, network.py). Responses follow Engine API
 1.43; streams use the multiplexed frame format unless the container has a
 TTY, and hijack the connection when the client asks to upgrade.
 
@@ -96,15 +96,23 @@ def image_summary(st, image_id):
             'Labels': (info['config'].get('config') or {}).get('Labels') or {}, 'Containers': -1}
 
 
-def ports_of(record):
+def ports_of(st, record):
+    """NetworkSettings.Ports: what the running container's forwarders bound."""
+    return cli().network_settings(st, record)['Ports']
+
+
+def port_bindings(record):
+    """HostConfig.PortBindings in the Engine's form."""
     out = {}
+    import network
     for spec in record['HostConfig'].get('PortBindings') or []:
-        body, _, proto = spec.partition('/')
-        port = body.split(':')[-1]
-        out[f'{port}/{proto or "tcp"}'] = [{'HostIp': '0.0.0.0', 'HostPort': port}]
-    for key in record['Config'].get('ExposedPorts') or {}:
-        port, _, proto = key.partition('/')
-        out.setdefault(f'{port}/{proto or "tcp"}', [{'HostIp': '0.0.0.0', 'HostPort': port}])
+        try:
+            parsed = network.parse_publish(spec)
+        except Exception:
+            continue
+        for ip, hp, cp, proto in parsed:
+            out.setdefault(f'{cp}/{proto}', []).append({'HostIp': '' if ip == '0.0.0.0' else ip,
+                                                        'HostPort': str(hp) if hp else ''})
     return out
 
 
@@ -112,23 +120,25 @@ def container_summary(st, record):
     cfg, host = record['Config'], record['HostConfig']
     command = ' '.join(shlex.quote(c) for c in (cfg.get('Entrypoint') or []) + (cfg.get('Cmd') or []))
     ports = []
-    for key, bindings in ports_of(record).items():
+    for key, bindings in ports_of(st, record).items():
         port, _, proto = key.partition('/')
-        ports.append({'IP': '0.0.0.0', 'PrivatePort': int(port), 'PublicPort': int(port), 'Type': proto})
+        for b in bindings or []:
+            ports.append({'IP': b['HostIp'], 'PrivatePort': int(port), 'PublicPort': int(b['HostPort']),
+                          'Type': proto})
+    settings = cli().network_settings(st, record)
     return {'Id': record['Id'], 'Names': ['/' + record['Name']], 'Image': record['ImageName'],
             'ImageID': 'sha256:' + record['Image'], 'Command': command,
             'Created': unix_time(record['Created']), 'Ports': ports, 'Labels': cfg.get('Labels') or {},
             'State': record['State']['Status'], 'Status': cli().status_text(record),
-            'HostConfig': {'NetworkMode': 'host'},
-            'NetworkSettings': {'Networks': {'host': {'IPAddress': '127.0.0.1', 'Gateway': ''}}},
+            'HostConfig': {'NetworkMode': record['HostConfig'].get('NetworkMode') or 'host'},
+            'NetworkSettings': {'Networks': settings['Networks']},
             'Mounts': [{'Type': 'bind' if s.startswith('/') else 'volume', 'Source': s, 'Destination': d,
                         'RW': m != 'ro'} for s, d, m in host['Binds']]}
 
 
 def container_inspect(st, record):
     out = cli().container_inspect(st, record)
-    ports = ports_of(record)
-    out['HostConfig']['PortBindings'] = ports
+    out['HostConfig']['PortBindings'] = port_bindings(record)
     out['HostConfig'].setdefault('LogConfig', {'Type': 'json-file', 'Config': {}})
     out['HostConfig'].setdefault('Privileged', False)
     out['HostConfig'].setdefault('Mounts', [])
@@ -136,10 +146,9 @@ def container_inspect(st, record):
     out['Config'].setdefault('AttachStdout', True)
     out['Config'].setdefault('AttachStderr', True)
     out.setdefault('LogPath', str(st.container_dir(record['Id']) / 'log'))
-    out['NetworkSettings'] = {'Ports': ports, 'IPAddress': '127.0.0.1', 'Gateway': '',
-                              'Networks': {'host': {'IPAddress': '127.0.0.1', 'Gateway': '',
-                                                    'NetworkID': 'host', 'Aliases': None}}}
-    out['Config']['ExposedPorts'] = {k: {} for k in ports}
+    exposed = dict(out['Config'].get('ExposedPorts') or {})
+    exposed.update({k: {} for k in out['HostConfig']['PortBindings']})
+    out['Config']['ExposedPorts'] = exposed
     out['State']['Health'] = None
     out.pop('Health', None)
     return out
@@ -224,11 +233,12 @@ def create_container(st, body, name=None):
     for key, bindings in (host.get('PortBindings') or {}).items():
         port, _, proto = key.partition('/')
         for bnd in bindings or [{}]:
-            published = (bnd or {}).get('HostPort') or port
-            if str(published) != port:
-                raise APIError(400, f'port {key} -> {published}: containers share the host network, a port '
-                               'is published only as itself')
-            args += ['-p', f'{port}:{port}' + (f'/{proto}' if proto and proto != 'tcp' else '')]
+            bnd = bnd or {}
+            hp, hip = str(bnd.get('HostPort') or ''), bnd.get('HostIp') or ''
+            args += ['-p', (f'{hip}:' if hip else '') + (f'{hp}:' if hp or hip else '') + port +
+                     (f'/{proto}' if proto and proto != 'tcp' else '')]
+    if host.get('PublishAllPorts'):
+        args.append('-P')
     policy = host.get('RestartPolicy') or {}
     if policy.get('Name'):
         name_ = policy['Name']
@@ -244,8 +254,15 @@ def create_container(st, body, name=None):
     for d in host.get('Dns') or []:
         args += ['--dns', d]
     mode = host.get('NetworkMode') or 'default'
-    if mode not in ('default', 'bridge', 'host'):
-        warnings.append(f'network mode {mode} ignored: containers share the host network')
+    endpoints = (body.get('NetworkingConfig') or {}).get('EndpointsConfig') or {}
+    if mode == 'default' and endpoints:
+        mode = next(iter(endpoints))
+    args += ['--network', mode]
+    for alias in (endpoints.get(mode) or {}).get('Aliases') or []:
+        args += ['--network-alias', alias]
+    ipam = (endpoints.get(mode) or {}).get('IPAMConfig') or {}
+    if ipam.get('IPv4Address'):
+        args += ['--ip', ipam['IPv4Address']]
     if host.get('Privileged'):
         raise APIError(400, 'privileged containers need kernel privileges an app does not have')
     for key in ('CapAdd', 'Devices', 'Memory', 'NanoCpus', 'CpuShares', 'PidMode', 'IpcMode', 'Ulimits',
@@ -997,35 +1014,64 @@ def volume_delete(h, name):
     h.send_empty(204)
 
 
-HOST_NETWORK = {'Name': 'host', 'Id': 'host', 'Created': '0001-01-01T00:00:00Z', 'Scope': 'local',
-                'Driver': 'host', 'EnableIPv6': False, 'Internal': False, 'Attachable': False,
-                'IPAM': {'Driver': 'default', 'Config': []}, 'Containers': {}, 'Options': {}, 'Labels': {}}
+def network_view(st, name):
+    import network
+    spec = network.inspect(st, name)
+    spec['Id'] = spec['Id'] if len(spec['Id']) > 12 else spec['Id']
+    return spec
 
 
 @route('GET', r'/networks')
 def networks_list(h):
-    h.send_json(200, [dict(HOST_NETWORK, Name=n, Id=n) for n in ('host', 'bridge')])
+    import network
+    h.send_json(200, [network.inspect(h.st, n) for n in network.networks(h.st)])
 
 
 @route('GET', r'/networks/([^/]+)')
 def network_get(h, name):
-    if name not in ('host', 'bridge'):
-        raise APIError(404, f'network {name} not found')
-    h.send_json(200, dict(HOST_NETWORK, Name=name, Id=name))
+    try:
+        h.send_json(200, network_view(h.st, name))
+    except store_mod.StoreError as e:
+        raise APIError(404, str(e)) from None
 
 
 @route('POST', r'/networks/create')
 def network_create(h):
-    h.body_bytes()
-    raise APIError(501, 'networks are not supported: containers share the host network')
+    import network
+    body = h.body_json()
+    try:
+        spec = network.create(h.st, body.get('Name'), body.get('Driver') or 'bridge', body.get('Labels') or {},
+                              body.get('Internal'), body.get('Attachable'), body.get('Options') or {},
+                              check=body.get('CheckDuplicate', True))
+    except store_mod.StoreError as e:
+        raise APIError(409 if 'exists' in str(e) else 400, str(e)) from None
+    h.send_json(201, {'Id': spec['Id'], 'Warning': ''})
+
+
+@route('DELETE', r'/networks/([^/]+)')
+def network_delete(h, name):
+    import network
+    try:
+        network.remove(h.st, name)
+    except store_mod.StoreError as e:
+        raise APIError(404 if 'not found' in str(e) else 409, str(e)) from None
+    h.send_empty(204)
 
 
 @route('POST', r'/networks/([^/]+)/(connect|disconnect)')
 def network_connect(h, name, action):
-    h.body_bytes()
-    if name in ('host', 'bridge'):
-        return h.send_empty(200)
-    raise APIError(404, f'network {name} not found')
+    import network
+    body = h.body_json()
+    try:
+        record = h.st.resolve_container(body.get('Container') or '')
+        if action == 'connect':
+            aliases = ((body.get('EndpointConfig') or {}).get('Aliases')) or []
+            network.connect(h.st, record, name, aliases)
+        else:
+            network.disconnect(h.st, record, name)
+    except store_mod.StoreError as e:
+        raise APIError(404 if 'not found' in str(e) or 'No such' in str(e) else 400, str(e)) from None
+    h.send_empty(200)
 
 
 # ---------------------------------------------------------------- server

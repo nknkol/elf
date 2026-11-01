@@ -8,6 +8,7 @@
 #include "proot_bridge.h"
 #include "container_state.h"
 #include "union_view.h"
+#include "net_view.h"
 #include "fake_ids.h"
 #include "host_syscall.h"
 #ifdef GUARDED
@@ -169,5 +170,18 @@ static long dispatch_here(long sys_no, pt_regs *regs)
     if (ret >= 0 && capacity)
         proot_socket_name(sys_no, sys_no == __NR_accept || sys_no == __NR_accept4 ? ret : a[0],
                           (void *)a[1], (unsigned *)a[2], capacity);
+    /* Container networks: ports of the container's addresses as the guest
+     * bound them (net_view.h). */
+    if (ret >= 0 && net_enabled()) {
+        if (named && a[1] && a[2])
+            net_reverse((void *)a[1], *(unsigned *)a[2] < capacity ? *(unsigned *)a[2] : capacity);
+        else if (sys_no == __NR_recvfrom && a[4] && a[5])
+            net_reverse((void *)a[4], *(unsigned *)a[5]);
+        else if (sys_no == __NR_recvmsg && a[1]) {
+            void *msg_name = *(void **)a[1];
+            int msg_length = *(int *)((char *)a[1] + 8);
+            if (msg_name && msg_length > 0) net_reverse(msg_name, (unsigned)msg_length);
+        }
+    }
     return ret;
 }

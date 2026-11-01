@@ -25,7 +25,7 @@
 /* Script levels the kernel follows (exec_binprm allows five rewrites
  * before ELOOP): the script plus four script interpreters. */
 #define SCRIPT_DEPTH 5
-#define CHAIN_EXTRA (72 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2 + CONFIG_MAX_LOWERS * 4)
+#define CHAIN_EXTRA (76 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2 + CONFIG_MAX_LOWERS * 4)
 #define CHAIN_ARGS (EXEC_ARGS + CHAIN_EXTRA)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
@@ -51,6 +51,7 @@ typedef struct {
     char case_folds[CONFIG_MAX_BINDS * 11];
     char owners[CONFIG_OWNERS * 24];
     char mount_table_fd[16], owner_db_fd[16];
+    char net_addr[16];
 #ifdef GUARDED
     char fd_state[24];
 #endif
@@ -407,6 +408,23 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
         if (cfg->lower_image[i][0]) {
             s->argv[pos++] = "--lower-image";
             s->argv[pos++] = (char *)cfg->lower_image[i];
+        }
+    }
+    if (cfg->net_addr) {
+        char *o = s->net_addr;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            unsigned part = (cfg->net_addr >> shift) & 255;
+            if (part >= 100) *o++ = (char)('0' + part / 100);
+            if (part >= 10) *o++ = (char)('0' + part / 10 % 10);
+            *o++ = (char)('0' + part % 10);
+            if (shift) *o++ = '.';
+        }
+        *o = 0;
+        s->argv[pos++] = "--net-addr";
+        s->argv[pos++] = s->net_addr;
+        if (cfg->net_peers[0]) {
+            s->argv[pos++] = "--net-peers";
+            s->argv[pos++] = (char *)cfg->net_peers;
         }
     }
     for (int i = 0; i < cfg->bind_count; i++) {

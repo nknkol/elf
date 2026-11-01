@@ -445,6 +445,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-11-01 Docker/OCI R6 层镜像（[OCI](OCI.md)“R6 实现记录”的层镜像一节）：每层一个未压缩 erofs 文件（`tools/oci/erofs.py` 写入与读取），loader `--lower CACHE --lower-image IMAGE` 在合并视图查找时按目录展开缓存（`src/payload/logic/lazy_layer.c`，payload 与 loader 共用；隔离模式由 broker 的 `BROKER_LAZY_PATH` 展开），普通文件为占位文件、读之前原地填充；payload ABI 25。`docker image erofs [--prune]`，`--cow` 容器以层镜像为下层，层按 diff_id 共享。`make check-oci` 127→138，`test_union.py` 加层镜像下层的四种组合。
 2026-11-01 Docker/OCI R6 层镜像的限制补齐：stat 结果里的占位标记在返回前改掉（atime 显示为 mtime、st_blocks 按大小计，不触发填充）；openat2 返回的新 fd 指向占位文件时按 fd 路径补填（`RESOLVE_BENEATH` 由内核查找的情形，两种构建、常规与 `--isolate`）；FIFO 直接以本名建，HarmonyOS 应用存储上也能展开。`test_union.py` 加上这三项验收。
 2026-11-01 Docker/OCI R6 `mount -o loop`（[OCI](OCI.md)“R6 实现记录”的 mount -o loop 一节）：`--emulate-mounts` 下模拟 `/dev/loop-control` 与 `/dev/loop0`–`7`（memfd 代表设备，ioctl 按 FD 认设备，绑定记在共享挂载表），`mount -t erofs /dev/loopN`（或镜像文件）建成只读合并视图、镜像按需展开到挂载 scratch；生成 `/proc/filesystems`；隔离模式新增 `BROKER_LAZY_MOUNT`（broker 核对缓存可写、镜像可读后按 FD 展开），并修正 broker 里按 x86 写的 `O_DIRECTORY`/`O_TMPFILE`。挂载表 52 KiB，payload ABI 26。新增 `test/proot/test_loop.py`。
+2026-11-01 Docker/OCI 网络与副本（[OCI](OCI.md)“网络与副本”）：每个容器分到 127.128.0.0/9 里自己的回环地址（loader `--net-addr`、`--net-peers`，`src/payload/logic/net_view.c`）：bind 通配/127.0.0.1 改为容器地址，127.0.0.1 是容器自己，127.127.0.1 是宿主，池地址只连 peers，1024 以下端口映射到 61000+p 并在返回的地址里换回；`--isolate` 下 broker 执行同一规则。docker：bridge/host/none/自定义网络（`docker network`）、`container:`、`-p`/`-P` 转发进程、`docker port`、hosts 按网络写名字与别名；compose：项目网络、别名、network_mode、`deploy.replicas`/`scale`/`--scale`、`compose scale`；Engine API 的 networks。payload ABI 27。新增 `test/proot/test_net.py`。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -504,4 +505,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 1. 实际 agent/brew 工具链在 `--isolate` 下的端到端验证（第 6 项）。
 2. 带回 FD 的隔离调用（open）是否值得再优化（第 1 项）。
-3. Docker/OCI：R1–R7 已完成（R6 含层镜像与容器内 `mount -o loop`；R7 的 Engine API 是 SDK 常用的子集，见 [OCI](OCI.md)）。
+3. Docker/OCI：R1–R7 已完成（R6 含层镜像与容器内 `mount -o loop`；R7 含 compose 的网络与副本数；R7 的 Engine API 是 SDK 常用的子集，见 [OCI](OCI.md)）。
