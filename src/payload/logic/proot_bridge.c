@@ -2210,6 +2210,17 @@ static long bridge_run(long number, long args[6], const struct proot_open_origin
         }
         optimism_begin(b, &o);
         ret = dispatch(b, number, args, origin);
+        /* Isolation: a directory opened here keeps the guest name it was
+         * opened by, for the listing filter. What the broker hands out
+         * need not name it on the host (a denied root's traversable
+         * directories are synthesized, see broker.c). */
+#ifdef GUARDED
+        if (number == __NR_openat && ret >= 0 && g_payload_config.isolate && b->guest[0] == '/') {
+            struct stat dir;
+            if (!raw_syscall(__NR_fstat, ret, (long)&dir, 0, 0, 0, 0) && (dir.st_mode & S_IFMT) == S_IFDIR)
+                cached_dir_name((int)ret, b->guest, &dir, true);
+        }
+#endif
         bool again = optimism_retry(b, &o, ret);
         bridge_release(b);
         if (!again) {

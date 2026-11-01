@@ -13,10 +13,10 @@
 - Both backends show the same view (`test/fs_policy/agent_launch.py` compares
   their output; `agent_brew.py` runs harmonybrew python3 and git under both).
   The denied root's placeholder directories are traversable in both. The
-  broker lets the guest pass through the ancestors of mount targets and
-  list one only when it holds nothing but the names the view shows (the
-  skeleton root does: its marker now lives beside it as
-  `<state>/root.elf-skeleton`); otherwise the listing is refused.
+  broker lets the guest pass through the ancestors of mount targets; their
+  listings come from directories it synthesized at start with only the
+  names the view shows (docs/ISOLATION.md), never from the real ones. The
+  launcher's marker lives beside the root as `<state>/root.elf-skeleton`.
 - Difference: datagram UNIX sockets are refused by the broker (a datagram may
   go to any name), so HarmonyOS hilog logging reports "Can't create socket"
   under the broker backend; the program goes on.

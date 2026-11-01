@@ -85,12 +85,16 @@ remap_file_pages、MAP_FIXED 的 mmap、mremap、SHM_REMAP 的 shmat 都拒绝�
 
 ### 拒绝根上的经过与列目录
 
-根为 `d`（拒绝）时，bind 目标的各级祖先目录仍可“经过”：stat、access、chdir、O_PATH 打开都放行（与 guarded 构建的
-FS_TRAVERSE 相同）。“读取名字”是另一种能力：以读方式打开（拿到真实目录 FD 就能直接 getdents64，payload 的过滤
-可以被绕过）和 inotify 监视，只在该目录里**只有视图本来就显示的名字**时放行——它下面各个 bind 的下一级名字，根上
-再加 exec helper 的固定名 `.elf-exec`；否则返回 EACCES，不依赖 guest 内的过滤。broker 启动时按自己那份配置算出
-这些目录（dev/ino）与允许的名字，并逐个列一次决定能否读取。agent 启动器的骨架根满足条件（标记文件已移到根旁边）；
-一般的真实根若还有别的名字，就只能经过、不能列出。验收：`test/isolation/traverse.py`（经 payload 打开、从 payload
+根为 `d`（拒绝）时，bind 目标的各级祖先目录仍可“经过”：access、chdir、O_PATH 打开作用于真实目录（与 guarded 构建的
+FS_TRAVERSE 相同）。它们的名字**从不从真实目录读出**：真实目录 FD 只要还在 guest 手里，getdents64 就能看到它现在和
+以后的任何名字，payload 的过滤可以被绕过，启动时检查一次内容也不能约束以后。所以以读方式打开和 stat 都由一个合成
+目录代答：broker 启动时在 glue 目录下建一个私有目录 `elf-traverse-<pid>`（guest 在 glue 下只能碰 `proot-glue-*`），
+为每个可经过的目录放一份占位：它下面各个 bind 的下一级名字（中间级为目录，末级按 bind 来源的类型），根上再加
+exec helper 的固定名 `.elf-exec`，此外什么都没有，之后也不再变化。inotify 监视一律拒绝。合成目录建不成时，读取一律
+拒绝。broker 退出时删除它，被杀死的 broker 留下的由下次启动按 pid 清掉。payload 在隔离模式下为它打开的目录记下打开
+时的 guest 名字（按 FD 与 dev/ino），列目录的过滤因此不依赖 FD 的宿主名字。
+验收：`test/isolation/traverse.py`（经 payload 打开、从 payload 自己的 svc 直接 getdents64；持有 FD 期间宿主新增的名字
+不出现；三种根：有隐藏文件、`/mnt` 里有隐藏文件、骨架根）。
 自己的 svc 直接 getdents64）。
 
 过滤器装在 loader 跳到程序之前，跨 exec 继承；与 `--seccomp-backstop` 可同时使用（TRAP 优先于

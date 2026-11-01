@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""A denied root under --isolate (docs/ISOLATION.md, "执行可信链" and the
-broker's traversal rule; part of the application sandbox's acceptance
-suite).
+"""A denied root under --isolate (docs/ISOLATION.md, "拒绝根上的经过与列目录";
+part of the application sandbox's acceptance suite).
 
 The root is denied ('d'), a volume is mounted at /mnt/vol. The broker lets
-the guest pass through /, /mnt (stat, chdir) to reach the volume. Reading
-the names of such a directory is a capability of its own: the probe opens
-it through the payload (the broker answers) and lists the FD from the
+the guest pass through /, /mnt (stat, chdir) to reach the volume. The
+names of such a directory are never read from it: the probe opens it
+through the payload (the broker answers) and lists the FD from the
 payload's own svc, skipping the payload's filter.
 
-Expected, guarded build with --isolate:
-  - a root that also holds a hidden file: stat of / and chdir to /mnt
-    succeed, the volume's file reads; opening / for reading and an inotify
-    watch on / are refused (EACCES), so the hidden name never reaches the
-    guest; the same for /mnt when it holds a hidden name;
-  - a skeleton root (only the mount's ancestors and the exec helper):
-    the listing works and shows only those names."""
+Expected, guarded build with --isolate, for a root with a hidden file, one
+with a hidden file in /mnt, and a skeleton root:
+  - stat of / and chdir to /mnt succeed, the volume's file reads;
+  - listing / shows exactly ".elf-exec" and "mnt", listing /mnt exactly
+    "vol": never a hidden name;
+  - a name the host adds while the guest holds the FD does not show up
+    when the guest lists that FD afterwards;
+  - an inotify watch on them is refused (EACCES)."""
 import os
 import shutil
 import subprocess
@@ -86,17 +86,27 @@ with tempfile.TemporaryDirectory(prefix='iso-traverse-', dir=lib.mode_capable())
         v, _, out = run(root, 'h', 'open', '/mnt/vol/f', '0')
         check(f'{case}: the volume reads', v.get('open') == 0 and 'volume-data' in out, out)
         for path in ('/', '/mnt'):
+            shown = {'.elf-exec', 'mnt'} if path == '/' else {'vol'}
             v, names, out = run(root, 'h', 'rawlist', path)
-            hidden = case == 'hidden' and path == '/' or case == 'hidden-in-mnt' and path == '/mnt'
-            if hidden:
-                check(f'{case}: listing {path} from a broker FD is refused', v.get('rawlist') == EACCES and
-                      names is None and 'hidden-secret' not in out, out)
-                v, _, out = run(root, 'h', 'inotify', path)
-                check(f'{case}: inotify on {path} is refused', v.get('inotify') == EACCES, out)
-            else:
-                shown = {'.elf-exec', 'mnt'} if path == '/' else {'vol'}
-                check(f'{case}: listing {path} shows only the view\'s names',
-                      v.get('rawlist') == 0 and names is not None and set(names) - {'.', '..'} == shown, out)
+            check(f'{case}: listing {path} from a broker FD shows only the view\'s names',
+                  v.get('rawlist') == 0 and names is not None and set(names) - {'.', '..'} == shown, out)
+            v, _, out = run(root, 'h', 'inotify', path)
+            check(f'{case}: inotify on {path} is refused', v.get('inotify') == EACCES, out)
+        # A name added while the guest holds the FD.
+        p = subprocess.Popen([str(loader), *lib.ISOLATE_EXTRA, '--isolate', '--mode', 'container',
+                              '--root', str(root), '-v', f'{vol}:/mnt/vol', '--guard-file-access', 'dw',
+                              '--allow-stdio-output', '--allow-stream-input', '--', './.elf-exec', 'h',
+                              'rawlistwait', '/'],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             cwd='/')
+        first = p.stdout.readline()
+        (root / 'added-later').write_text('x')
+        out, err = p.communicate('go\n', timeout=60)
+        (root / 'added-later').unlink()
+        _, names = parse(first + out)
+        check(f'{case}: a name added later does not show in the held FD',
+              first.strip() == 'rawlist 0' and names is not None and 'added-later' not in names and
+              set(names) - {'.', '..'} == {'.elf-exec', 'mnt'}, first + out + err)
 
 if failures:
     print(f'{len(failures)} FAILED:', *failures, sep='\n  ')

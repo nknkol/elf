@@ -179,26 +179,36 @@ static int identity(int fd, const char *name, int flags, unsigned long *dev, uns
 /* A denied root may still be walked to reach the mounts in it: the
  * directories of the root that are strict ancestors of a bind's guest
  * destination (the guarded build's FS_TRAVERSE, fs_policy.c). Passing
- * through one (stat, access, chdir, O_PATH) is allowed; reading its names
- * (an open for reading, which getdents64 can list directly, or an inotify
- * watch) only when the directory holds nothing but the names the view
- * shows anyway: the next component of each bind below it, and at the root
- * the loader's exec helper (".elf-exec", a fixed name). A launcher's
- * skeleton root is such a directory; a real root with other names is not,
- * and its listing is refused rather than left to the payload's filter.
- * Taken from the broker's own copy of the configuration, by dev/ino. */
+ * through one (access, chdir, O_PATH) uses the real directory. Its names
+ * are never read from it: a real directory FD would show, through
+ * getdents64 and for as long as it is held, whatever names it has now or
+ * gets later. Opening it for reading, and stat, are answered from a
+ * synthesized directory instead: one the broker made at start in a private
+ * directory of the glue base (the guest reaches only proot-glue-* there),
+ * holding a placeholder for each name the view shows (the next component
+ * of each bind below it, and at the root the exec helper ".elf-exec"), and
+ * nothing else, ever. inotify watches on them are refused. Without that
+ * private directory, reading them is refused. Taken from the broker's own
+ * copy of the configuration, by dev/ino. */
 #define TRAVERSE_MAX (CONFIG_MAX_BINDS * 4)
 #define TRAVERSE_NAMES (CONFIG_MAX_BINDS * 4)
 static struct {
 	unsigned long dev, ino;
-	int listable;
-	char path[PATH_BYTES];
+	int synth; /* O_PATH FD of the synthesized directory, or -1 */
 } traverse[TRAVERSE_MAX];
 static int traverse_count;
-static struct { int dir; char name[256]; } traverse_names[TRAVERSE_NAMES];
+static struct { int dir, is_dir; char name[256]; } traverse_names[TRAVERSE_NAMES];
 static int traverse_name_count;
+static char synth_base[PATH_BYTES];
 
-static void add_traverse(const char *root, const char *guest)
+static int same_name(const char *a, const char *b)
+{
+	size_t n = z_strlen(a);
+	return n == z_strlen(b) && !z_strncmp(a, b, n);
+}
+
+/* host: the bind's host path (the type of its final placeholder). */
+static void add_traverse(const char *root, const char *guest, const char *host)
 {
 	char path[PATH_BYTES];
 	size_t r = z_strlen(root), g = z_strlen(guest);
@@ -207,6 +217,9 @@ static void add_traverse(const char *root, const char *guest)
 	z_memcpy(path, root, r);
 	while (r > 1 && path[r - 1] == '/')
 		r--;
+	struct stat hs;
+	int host_dir = sys(__NR_newfstatat, AT_FDCWD, (long)host, (long)&hs, 0, 0, 0) < 0 ||
+		       (hs.st_mode & 0170000) == 0040000;
 	for (size_t i = 0; i < g; i++) {
 		if (guest[i] != '/' || (i && guest[i - 1] == '/'))
 			continue;
@@ -236,66 +249,155 @@ static void add_traverse(const char *root, const char *guest)
 				continue;
 			traverse[k].dev = st.st_dev;
 			traverse[k].ino = st.st_ino;
-			copy_cstr(traverse[k].path, sizeof(traverse[k].path), path);
+			traverse[k].synth = -1;
 			traverse_count++;
 		}
-		if (traverse_name_count < TRAVERSE_NAMES) {
+		int known = 0;
+		for (int j = 0; j < traverse_name_count; j++)
+			known |= traverse_names[j].dir == k && !z_strncmp(traverse_names[j].name, guest + c, e - c) &&
+				 !traverse_names[j].name[e - c];
+		if (!known && traverse_name_count < TRAVERSE_NAMES) {
 			traverse_names[traverse_name_count].dir = k;
+			traverse_names[traverse_name_count].is_dir = e < g || host_dir;
 			z_memcpy(traverse_names[traverse_name_count].name, guest + c, e - c);
 			traverse_names[traverse_name_count++].name[e - c] = 0;
 		}
 	}
 }
 
-static int same_name(const char *a, const char *b)
+static void append_number(char *out, size_t size, unsigned long value)
 {
-	size_t n = z_strlen(a);
-	return n == z_strlen(b) && !z_strncmp(a, b, n);
+	char digits[24];
+	int d = 0;
+	do
+		digits[d++] = (char)('0' + value % 10);
+	while ((value /= 10));
+	size_t n = z_strlen(out);
+	while (d && n + 1 < size)
+		out[n++] = digits[--d];
+	out[n] = 0;
 }
 
-static int traverse_shown(int k, const char *name, int root)
+/* Removes dir/name (the synthesized trees: at most three levels). */
+static void remove_entry(int dir, const char *name, int depth)
 {
-	if (root && same_name(name, ".elf-exec"))
-		return 1;
-	for (int i = 0; i < traverse_name_count; i++)
-		if (traverse_names[i].dir == k && same_name(traverse_names[i].name, name))
-			return 1;
-	return 0;
-}
-
-/* After every bind is known: which traversable directories hold only the
- * names they show (anything unreadable counts as not). */
-static void traverse_classify(const char *root)
-{
-	struct stat rs;
-	int have_root = sys(__NR_newfstatat, AT_FDCWD, (long)root, (long)&rs, 0, 0, 0) == 0;
-	for (int k = 0; k < traverse_count; k++) {
-		int is_root = have_root && rs.st_dev == traverse[k].dev && rs.st_ino == traverse[k].ino;
-		int fd = (int)sys(__NR_openat, AT_FDCWD, (long)traverse[k].path,
-				  O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
-		if (fd < 0)
-			continue;
-		struct stat st;
-		int ok = sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) == 0 &&
-			 st.st_dev == traverse[k].dev && st.st_ino == traverse[k].ino;
-		char buffer[4096];
-		long n;
-		while (ok && (n = sys(__NR_getdents64, fd, (long)buffer, sizeof(buffer), 0, 0, 0)) != 0) {
-			if (n < 0) {
-				ok = 0;
+	if (sys(__NR_unlinkat, dir, (long)name, 0, 0, 0, 0) == 0 || depth > 3)
+		return;
+	int fd = (int)sys(__NR_openat, dir, (long)name, O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+	if (fd >= 0) {
+		sys(__NR_fchmod, fd, 0700, 0, 0, 0, 0);
+		/* A few passes (removing while listing may skip names); "." and
+		 * ".." are always listed, so a pass that removes nothing ends it. */
+		for (int pass = 0; pass < 4; pass++) {
+			char buffer[2048];
+			long n;
+			int removed = 0;
+			sys(__NR_lseek, fd, 0, 0 /* SEEK_SET */, 0, 0, 0);
+			while ((n = sys(__NR_getdents64, fd, (long)buffer, sizeof(buffer), 0, 0, 0)) > 0)
+				for (long off = 0; off < n;) {
+					unsigned short reclen = *(unsigned short *)(buffer + off + 16);
+					const char *child = buffer + off + 19;
+					if (!same_name(child, ".") && !same_name(child, "..")) {
+						remove_entry(fd, child, depth + 1);
+						removed = 1;
+					}
+					off += reclen;
+				}
+			if (!removed)
 				break;
-			}
-			for (long off = 0; off < n;) {
-				unsigned short reclen = *(unsigned short *)(buffer + off + 16);
-				const char *name = buffer + off + 19;
-				if (!same_name(name, ".") && !same_name(name, "..") && !traverse_shown(k, name, is_root))
-					ok = 0;
-				off += reclen;
-			}
 		}
 		sys(__NR_close, fd, 0, 0, 0, 0, 0);
-		traverse[k].listable = ok;
 	}
+	sys(__NR_unlinkat, dir, (long)name, AT_REMOVEDIR, 0, 0, 0);
+}
+
+/* Synthesized directories of brokers that are gone (killed before their
+ * cleanup): "elf-traverse-<pid>" with no such process. */
+static void remove_stale(int base)
+{
+	char buffer[2048];
+	long n;
+	while ((n = sys(__NR_getdents64, base, (long)buffer, sizeof(buffer), 0, 0, 0)) > 0)
+		for (long off = 0; off < n;) {
+			unsigned short reclen = *(unsigned short *)(buffer + off + 16);
+			const char *name = buffer + off + 19;
+			off += reclen;
+			if (z_strncmp(name, "elf-traverse-", 13) || !name[13])
+				continue;
+			unsigned long pid = 0;
+			const char *p = name + 13;
+			while (*p >= '0' && *p <= '9')
+				pid = pid * 10 + (unsigned long)(*p++ - '0');
+			if (*p || !pid || sys(__NR_kill, (long)pid, 0, 0, 0, 0, 0) != -3 /* ESRCH */)
+				continue;
+			remove_entry(base, name, 0);
+		}
+}
+
+static void traverse_synthesize(const char *glue, const char *root)
+{
+	if (!traverse_count || !glue[0])
+		return;
+	int traverse_root_index = -1;
+	struct stat rs;
+	if (sys(__NR_newfstatat, AT_FDCWD, (long)root, (long)&rs, 0, 0, 0) == 0)
+		for (int k = 0; k < traverse_count; k++)
+			if (traverse[k].dev == rs.st_dev && traverse[k].ino == rs.st_ino)
+				traverse_root_index = k;
+	int base = (int)sys(__NR_openat, AT_FDCWD, (long)glue, O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0);
+	if (base < 0)
+		return;
+	remove_stale(base);
+	char name[64] = "elf-traverse-";
+	append_number(name, sizeof(name), (unsigned long)sys(__NR_getpid, 0, 0, 0, 0, 0, 0));
+	remove_entry(base, name, 0);
+	if (sys(__NR_mkdirat, base, (long)name, 0700, 0, 0, 0) < 0) {
+		sys(__NR_close, base, 0, 0, 0, 0, 0);
+		return;
+	}
+	int top = (int)sys(__NR_openat, base, (long)name, O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+	if (top >= 0) {
+		copy_cstr(synth_base, sizeof(synth_base), glue);
+		size_t n = z_strlen(synth_base);
+		if (n + 1 + z_strlen(name) + 1 < sizeof(synth_base)) {
+			synth_base[n] = '/';
+			copy_cstr(synth_base + n + 1, sizeof(synth_base) - n - 1, name);
+		}
+		for (int k = 0; k < traverse_count; k++) {
+			char sub[24] = "";
+			append_number(sub, sizeof(sub), (unsigned long)k);
+			if (sys(__NR_mkdirat, top, (long)sub, 0700, 0, 0, 0) < 0)
+				continue;
+			int dir = (int)sys(__NR_openat, top, (long)sub, O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+			if (dir < 0)
+				continue;
+			int ok = 1;
+			for (int j = 0; j < traverse_name_count; j++) {
+				if (traverse_names[j].dir != k)
+					continue;
+				long rc = traverse_names[j].is_dir
+					? sys(__NR_mkdirat, dir, (long)traverse_names[j].name, 0555, 0, 0, 0)
+					: sys(__NR_mknodat, dir, (long)traverse_names[j].name, 0100444, 0, 0, 0);
+				ok &= rc == 0;
+			}
+			if (ok && traverse_root_index == k)
+				ok = sys(__NR_mknodat, dir, (long)".elf-exec", 0100555, 0, 0, 0) == 0;
+			sys(__NR_fchmod, dir, 0555, 0, 0, 0, 0);
+			sys(__NR_close, dir, 0, 0, 0, 0, 0);
+			if (ok)
+				traverse[k].synth = (int)sys(__NR_openat, top, (long)sub,
+							     O_PATH_ | O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+		}
+		sys(__NR_close, top, 0, 0, 0, 0, 0);
+	}
+	sys(__NR_close, base, 0, 0, 0, 0, 0);
+}
+
+static void traverse_cleanup(void)
+{
+	if (!synth_base[0])
+		return;
+	remove_entry(AT_FDCWD, synth_base, 0);
 }
 
 static void add_tree(const char *path, char access)
@@ -599,13 +701,22 @@ static int traverse_index(const struct target *t)
 	return -1;
 }
 
-/* A target of a denied tree that passed check(): reading its names too. */
-static int traverse_read(const struct target *t)
+/* A target of a denied tree that passed check() and is read (opened for
+ * reading, stat): the synthesized directory stands in for it. */
+static int traverse_substitute(struct target *t)
 {
 	if (t->access != 'd')
 		return 0;
 	int k = traverse_index(t);
-	return k >= 0 && traverse[k].listable ? 0 : -EACCES_;
+	if (k < 0 || traverse[k].synth < 0)
+		return -EACCES_;
+	int fd = (int)sys(__NR_fcntl, traverse[k].synth, 1030 /* F_DUPFD_CLOEXEC */, 3, 0, 0, 0);
+	if (fd < 0)
+		return fd;
+	release(t);
+	t->dir = fd;
+	t->name[0] = 0;
+	return 0;
 }
 
 static int check(const struct target *t, int write)
@@ -926,7 +1037,7 @@ static long execute(struct call *c, long nr)
 		if (rc >= 0)
 			rc = check(&t, write);
 		if (rc >= 0 && !(flags & O_PATH_))
-			rc = traverse_read(&t);
+			rc = traverse_substitute(&t);
 		else if (rc == -EACCES_ && (c->magic & BROKER_MAGIC(1)))
 			rc = held_access(c->fd[0], flags);
 		if (rc < 0)
@@ -967,6 +1078,8 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(flags & AT_SYMLINK_NOFOLLOW) || (c->magic & BROKER_MAGIC(1)), &t);
 		if (rc >= 0)
 			rc = check(&t, 0);
+		if (rc >= 0)
+			rc = traverse_substitute(&t);
 		if (rc < 0)
 			break;
 		int f = AT_SYMLINK_NOFOLLOW | (t.name[0] ? 0 : AT_EMPTY_PATH);
@@ -1153,8 +1266,8 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(a[2] & IN_DONT_FOLLOW_), &t);
 		if (rc >= 0)
 			rc = check(&t, 0);
-		if (rc >= 0)
-			rc = traverse_read(&t);
+		if (rc >= 0 && t.access == 'd')
+			rc = -EACCES_; /* a traversable directory's names are not watched */
 		if (rc >= 0)
 			rc = on_object(&t, nr, c->fd[0], a[2] & ~IN_DONT_FOLLOW_, 0, 0, 2);
 		break;
@@ -1473,8 +1586,8 @@ static void broker_run(int control, const payload_config_t *cfg)
 	if (access[0] == 'd')
 		for (int i = 0; i < cfg->bind_count; i++)
 			if (access[i + 1] != 'd')
-				add_traverse(cfg->root[0] ? cfg->root : "/", cfg->binds[i].src);
-	traverse_classify(cfg->root[0] ? cfg->root : "/");
+				add_traverse(cfg->root[0] ? cfg->root : "/", cfg->binds[i].src, cfg->binds[i].dst);
+	traverse_synthesize(cfg->glue_dir, cfg->root[0] ? cfg->root : "/");
 	/* R6: the root's lower layers are never written (copy-up goes to the root). */
 	for (int i = 0; i < cfg->lower_count; i++)
 		add_tree(cfg->lower[i], access[0] == 'd' ? 'd' : 'r');
@@ -1492,8 +1605,10 @@ static void broker_run(int control, const payload_config_t *cfg)
 		long n = sys(__NR_recvmsg, control, (long)&m, MSG_CMSG_CLOEXEC, 0, 0, 0);
 		if (n == -4)
 			continue;
-		if (n <= 0)
+		if (n <= 0) {
+			traverse_cleanup();
 			z_exit(0); /* Every guest process is gone. */
+		}
 		struct cmsghdr *h = CMSG_FIRSTHDR(&m);
 		if (!h || h->cmsg_type != SCM_RIGHTS)
 			continue;
