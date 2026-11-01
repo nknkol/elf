@@ -247,42 +247,57 @@ def from_meta(upper, lower, meta, db):
     return paths
 
 
-def mkdirs(upper, lower, guest):
-    """Makes the guest directory in the upper, parents included (modes of
-    the lower's directories kept); whiteouts on the way removed."""
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def mkdirs_fd(upper, lower, guest):
+    """FD of the guest directory in the upper, made as needed with its
+    parents (modes of the lower's directories kept, whiteouts on the way
+    removed: a directory made over one is opaque). Every step works under
+    the upper's root FD and never follows a link, so a link the container
+    put in the upper cannot send it outside (ELOOP/ENOTDIR instead)."""
     root = Root(upper, lower)
     parts = [p for p in PurePosixPath(guest).parts if p != '/']
-    for i in range(1, len(parts) + 1):
-        sub = '/' + '/'.join(parts[:i])
-        host, layer = root.locate(sub)
-        target = Path(upper).joinpath(*parts[:i])
-        if layer == 0:
-            continue
-        if layer:
-            if not host.is_dir() or host.is_symlink():
-                raise NotADirectoryError(sub)
-            target.mkdir()
-            target.chmod(stat.S_IMODE(host.stat().st_mode) | 0o700)
-            continue
-        whiteout = target.parent / ('.wh.' + target.name)
-        target.mkdir()
-        if os.path.lexists(whiteout):
-            whiteout.unlink()
-            (target / OPAQUE).touch()
-    return Path(upper).joinpath(*parts)
+    fd = os.open(upper, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for i, name in enumerate(parts, 1):
+            sub = '/' + '/'.join(parts[:i])
+            host, layer = root.locate(sub)
+            made, opaque, mode = False, False, 0o755
+            if layer != 0:
+                if layer:
+                    if not is_dir(host):
+                        raise NotADirectoryError(sub)
+                    mode = stat.S_IMODE(os.lstat(host).st_mode) | 0o700
+                else:
+                    try:
+                        os.unlink('.wh.' + name, dir_fd=fd)
+                        opaque = True
+                    except FileNotFoundError:
+                        pass
+                os.mkdir(name, 0o700, dir_fd=fd)
+                made = True
+            try:
+                nxt = os.open(name, DIR_FLAGS, dir_fd=fd)
+            except OSError:
+                raise NotADirectoryError(sub) from None
+            os.close(fd)
+            fd = nxt
+            if made:
+                os.chmod(fd, mode)
+            if opaque:
+                os.close(os.open(OPAQUE, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                                 dir_fd=fd))
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
-def writable(upper, lower, host):
-    """For docker cp into the container: the upper's path for a host path
-    the merged view resolved (a lower directory is made in the upper)."""
-    host = Path(host)
-    for layer, _ in lowers(lower):
-        try:
-            rel = host.relative_to(layer)
-        except ValueError:
-            continue
-        return mkdirs(upper, lower, '/' + str(rel)) if host.is_dir() else Path(upper) / rel
-    return host
+def mkdirs(upper, lower, guest):
+    """mkdirs_fd for callers that want the path."""
+    os.close(mkdirs_fd(upper, lower, guest))
+    return Path(upper).joinpath(*[p for p in PurePosixPath(guest).parts if p != '/'])
 
 
 def apply(upper, dest):

@@ -785,16 +785,16 @@ def container_top(h, name):
     h.send_json(200, {'Titles': ['PID', 'CMD'], 'Processes': procs})
 
 
-def path_stat(host, name):
-    st_ = os.lstat(host)
-    mode = st_.st_mode & 0o777
-    if os.path.isdir(host) and not os.path.islink(host):
+def path_stat(found, name):
+    """found: a guestfs.Entry."""
+    mode = found.mode & 0o777
+    if found.kind == 'd':
         mode |= 1 << 31
-    if os.path.islink(host):
+    if found.kind == 'l':
         mode |= 1 << 27
-    stat_json = {'name': name, 'size': st_.st_size, 'mode': mode,
-                 'mtime': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(st_.st_mtime)),
-                 'linkTarget': os.readlink(host) if os.path.islink(host) else ''}
+    stat_json = {'name': name, 'size': found.size, 'mode': mode,
+                 'mtime': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(found.mtime)),
+                 'linkTarget': found.link or ''}
     return base64.b64encode(json.dumps(stat_json).encode()).decode()
 
 
@@ -811,11 +811,11 @@ def archive(h, name):
         raise APIError(400, 'path is required')
     view = runtime.guest_view(h.st, r)
     parts = view.resolve(path, follow=True)
-    host, present = view.host(parts, fill=True)
-    if not present:
+    found = view.stat(parts)
+    if found is None:
         raise APIError(404, f'Could not find the file {path} in container {name}')
     base = Path(path.rstrip('/')).name or '/'
-    header = {'X-Docker-Container-Path-Stat': path_stat(host, base)}
+    header = {'X-Docker-Container-Path-Stat': path_stat(found, base)}
     if h.command == 'HEAD':
         h.send_response(200)
         h.common_headers()
@@ -850,8 +850,7 @@ def archive_put(h, name):
         raise APIError(404 if not view.exists(parts) else 400, f'destination {path} must be a directory')
     data = h.body_bytes()
     with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as tar:
-        guestfs.copy(guestfs.tar_walk(tar),
-                     guestfs.DirSink(view.open_dir(parts), runtime.lower_of(h.st, r) is not None))
+        guestfs.copy(guestfs.tar_walk(tar), guestfs.GuestSink(view, parts))
     h.send_empty(200)
 
 

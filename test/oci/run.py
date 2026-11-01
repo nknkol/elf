@@ -115,6 +115,18 @@ def docker(home, *args, input=None, timeout=300, env=None, text=True):
                           env=dict(os.environ, ELF_OCI_HOME=str(home), **(env or {})))
 
 
+def group_members(pgid):
+    out = []
+    for entry in os.listdir('/proc'):
+        if entry.isdigit():
+            try:
+                if int(Path(f'/proc/{entry}/stat').read_text().rsplit(')', 1)[1].split()[2]) == pgid:
+                    out.append(int(entry))
+            except OSError:
+                pass
+    return out
+
+
 def proc_start(pid):
     try:
         return int(Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
@@ -1089,19 +1101,40 @@ def run_tests(home, work, isolate):
           not any(victim_dir.iterdir()) and p3.stdout == 'copied\nfile\ntree\n',
           'cp into the container replaces its symlinks, never follows them to the host' + tag,
           p.stderr + p2.stderr + p3.stdout + p3.stderr)
-    # exec -d processes are the container's: they end when it stops.
+    # A volume inside the copied tree gets its part (as the container sees
+    # it); a read-only volume refuses.
+    mvol, rovol = work / ('mvol' + suffix), work / ('rovol' + suffix)
+    mvol.mkdir()
+    rovol.mkdir()
+    mname = 'mnt' + suffix
+    docker(home, 'run', *mode, '--name', mname, '-u', 'root', '-v', f'{mvol}:/srv/sub', '-v', f'{rovol}:/srv/ro:ro',
+           img, 'true')
+    mcdir = home / 'containers' / docker(home, 'inspect', '-f', '{{.Id}}', mname).stdout.strip()
+    p = docker(home, 'cp', str(work / 'cptree') + '/.', f'{mname}:/srv')
+    p2 = docker(home, 'cp', str(work / 'cpfile'), f'{mname}:/srv/ro/')
+    check(p.returncode == 0 and (mvol / 'f').read_text() == 'tree\n' and
+          not (mcdir / 'rootfs/srv/sub/f').exists() and p2.returncode != 0 and not any(rovol.iterdir()),
+          'cp into the container writes a volume inside the tree to its source; a read-only volume refuses' + tag,
+          p.stderr + p2.stderr)
+    docker(home, 'rm', mname)
+    # exec -d processes are the container's: they end when it stops, also
+    # background jobs left by an exec whose shell has exited.
     cdir = home / 'containers' / docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
     p = docker(home, 'exec', '-d', name, 'sh', '-c', 'while :; do sleep 0.2; done')
+    p = docker(home, 'exec', '-d', name, 'sh', '-c', 'sleep 300 & exit 0')
+    time.sleep(1)
     execs = json.loads((cdir / 'execs.json').read_text()) if (cdir / 'execs.json').exists() else []
+    left_behind = [pid for pid, _ in execs if proc_start(pid) is None and group_members(pid)]
     p = docker(home, 'stop', name)          # StopSignal SIGUSR1 from the image.
     p2 = docker(home, 'inspect', '-f', '{{.State.Status}} {{.State.ExitCode}}', name)
     p3 = docker(home, 'logs', name)
     check(p2.stdout.strip() == 'exited 9' and 'started' in p3.stdout and 'got-usr1' in p3.stdout,
           'stop sends the StopSignal; logs kept' + tag, p2.stdout + p3.stdout + p.stderr)
     time.sleep(0.3)
-    check(len(execs) == 1 and all(not Path(f'/proc/{pid}').exists() or proc_start(pid) != start
-                                  for pid, start in execs) and not (cdir / 'execs.json').exists(),
-          'exec -d processes end with the container' + tag, execs)
+    check(len(execs) == 2 and len(left_behind) == 1 and
+          not any(group_members(pid) for pid, start in execs) and not (cdir / 'execs.json').exists(),
+          'exec -d processes and the background jobs they leave end with the container' + tag,
+          [execs, left_behind])
     p = docker(home, 'exec', '-d', name, 'true')
     check(p.returncode != 0, 'no exec in a stopped container' + tag, p.stderr)
     docker(home, 'rm', name)

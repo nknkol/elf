@@ -40,24 +40,82 @@ def kind_of(mode):
     return 'd' if stat.S_ISDIR(mode) else 'l' if stat.S_ISLNK(mode) else 'f' if stat.S_ISREG(mode) else 'o'
 
 
-def reader(host):
-    return lambda: open(host, 'rb', opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW | os.O_CLOEXEC))
+def open_root(path):
+    """An area's root (the rootfs, a layer, a bind's source: the host's own
+    paths, followed); a bind of a single file opens the file."""
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except NotADirectoryError:
+        return os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+
+
+def open_parent(root, rel):
+    """FD of the directory holding rel[-1], each component opened from the
+    area's root with O_NOFOLLOW (a link swapped in fails, ELOOP/ENOTDIR)."""
+    fd = open_root(root)
+    try:
+        for name in rel[:-1]:
+            nxt = os.open(name, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def entry_at(root, rel, parts):
+    """(Entry, fd) of rel under an area's root: a directory or file is
+    opened (never through a link) and described by fstat of that FD, so
+    what is read is what was looked at; fd is None for others."""
+    if not rel:
+        fd = open_root(root)
+        link = None
+    else:
+        pfd = open_parent(root, rel)
+        try:
+            name = rel[-1]
+            st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+            fd, link = None, None
+            if stat.S_ISLNK(st.st_mode):
+                link = os.readlink(name, dir_fd=pfd)
+            elif stat.S_ISDIR(st.st_mode):
+                fd = os.open(name, DIR_FLAGS, dir_fd=pfd)
+            elif stat.S_ISREG(st.st_mode):
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=pfd)
+        finally:
+            os.close(pfd)
+    try:
+        st = os.fstat(fd) if fd is not None else st
+    except BaseException:
+        os.close(fd)
+        raise
+    kind = kind_of(st.st_mode)
+    if kind not in ('d', 'f') and fd is not None:
+        os.close(fd)
+        fd = None
+    return Entry(list(parts), kind, stat.S_IMODE(st.st_mode), st.st_mtime, st.st_size, link,
+                 (lambda: os.fdopen(os.dup(fd), 'rb')) if kind == 'f' else None), fd
 
 
 def entry(host, parts):
+    """An entry of the host's own files (copies into the container)."""
     st = os.lstat(host)
     kind = kind_of(st.st_mode)
     return Entry(list(parts), kind, stat.S_IMODE(st.st_mode), st.st_mtime, st.st_size,
-                 os.readlink(host) if kind == 'l' else None, reader(host))
+                 os.readlink(host) if kind == 'l' else None, lambda: open(host, 'rb'))
 
 
 class View:
     """A container's files as its processes see them: view is a rootfs or
-    (upper, lower); binds are (host source, guest destination)."""
+    (upper, lower); binds are (host source, guest destination[, mode]).
+    Lookups decide by path which area (bind, rootfs, layer) shows a name;
+    every read and write then starts at that area's root FD."""
 
-    def __init__(self, view, binds):
+    def __init__(self, view, binds, readonly_root=False):
         self.view = view
-        self.binds = [(str(s), '/' + d.strip('/')) for s, d in binds]
+        self.readonly_root = readonly_root
+        self.binds = [(str(b[0]), '/' + b[1].strip('/'), b[2] if len(b) > 2 else 'rw') for b in binds]
         if isinstance(view, tuple):
             self.upper, self.lower = Path(view[0]), view[1]
             self.root = union.Root(*view)
@@ -66,59 +124,72 @@ class View:
 
     def resolve(self, path, follow=True):
         """Canonical parts of a guest path (symlinks resolved in the view)."""
-        return runspec.guest_parts(self.view, self.binds, path, follow)
+        return runspec.guest_parts(self.view, [b[:2] for b in self.binds], path, follow)
 
     def bind(self, parts):
-        """(source, parts under it) of the bind holding parts, or None."""
+        """(source, parts under it, mode) of the bind holding parts, or None."""
         guest = '/' + '/'.join(parts)
         best = None
-        for src, dst in self.binds:
+        for b in self.binds:
+            dst = b[1]
             if guest == dst or dst == '/' or guest.startswith(dst + '/'):
                 if best is None or len(dst) > len(best[1]):
-                    best = (src, dst)
+                    best = b
         if not best:
             return None
-        return Path(best[0]), [p for p in guest[len(best[1]):].split('/') if p]
+        return Path(best[0]), [p for p in guest[len(best[1]):].split('/') if p], best[2]
 
-    def host(self, parts, fill=False):
-        """(host path, whether the view shows it); fill: a layer image's
-        file is filled first."""
+    def anchor(self, parts, fill=False):
+        """(area root, parts under it) of what the view shows at parts, or
+        None; fill: a layer image's file is filled first."""
         b = self.bind(parts)
         if b:
-            host = b[0].joinpath(*b[1])
-        elif self.root is None:
-            host = self.rootfs.joinpath(*parts)
-        else:
-            host, layer = self.root.locate('/' + '/'.join(parts))
-            if layer is None:
-                return host, False
-            if fill and layer:
-                self.root.fill(host, layer)
-        return host, os.path.lexists(host)
+            return b[0], b[1]
+        if self.root is None:
+            return self.rootfs, list(parts)
+        host, layer = self.root.locate('/' + '/'.join(parts))
+        if layer is None:
+            return None
+        if fill and layer:
+            self.root.fill(host, layer)
+        return self.root.layers[layer][0], list(parts)
+
+    def open_entry(self, parts, top=()):
+        """(Entry, fd) of canonical parts, or None when the view has none."""
+        a = self.anchor(parts, fill=True)
+        if a is None:
+            return None
+        try:
+            return entry_at(a[0], a[1], top)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as e:
+            raise StoreError(f'/{"/".join(parts)} changed while copying: {e}') from None
+
+    def stat(self, parts):
+        got = self.open_entry(parts)
+        if got is None:
+            return None
+        if got[1] is not None:
+            os.close(got[1])
+        return got[0]
 
     def exists(self, parts):
-        return self.host(parts)[1]
+        return self.stat(parts) is not None
 
     def is_dir(self, parts):
-        host, present = self.host(parts)
-        if not present:
-            return False
-        b = self.bind(parts)
-        if b and not b[1]:
-            return os.path.isdir(host)   # (a bind's source may be a link on the host)
-        return union.is_dir(host)
+        e = self.stat(parts)
+        return e is not None and e.kind == 'd'
 
-    def listdir(self, parts):
-        b = self.bind(parts)
-        if b:
-            names = set(os.listdir(b[0].joinpath(*b[1])))
-        elif self.root is None:
-            names = set(os.listdir(self.rootfs.joinpath(*parts)))
+    def listdir(self, parts, fd):
+        """Names in the directory at parts (fd: the one open_entry opened)."""
+        if self.bind(parts) or self.root is None:
+            names = set(os.listdir(fd))
         else:
             names = self.merged(parts)
         guest = '/' + '/'.join(parts)
-        for _, dst in self.binds:
-            d = PurePosixPath(dst)
+        for b in self.binds:
+            d = PurePosixPath(b[1])
             if d.name and str(d.parent) == guest:
                 names.add(d.name)
         if not parts:
@@ -131,52 +202,99 @@ class View:
         self.root.locate('/' + rel)    # (expands it in the layers that show it)
         names = set()
         for k, (layer, image) in enumerate(self.root.layers):
-            p = layer.joinpath(*parts)
-            if not union.is_dir(p):
-                continue
             if image is not None:
                 try:
                     self.root.expand(k, rel)
                 except Exception:   # noqa: BLE001  (not a directory of that image)
                     continue
-            names.update(n for n in os.listdir(p) if not union.marker(n))
+            try:
+                e, fd = entry_at(layer, parts, ())
+            except OSError:
+                continue
+            try:
+                if e.kind == 'd':
+                    names.update(n for n in os.listdir(fd) if not union.marker(n))
+            finally:
+                if fd is not None:
+                    os.close(fd)
         return {n for n in names if self.root.locate('/' + '/'.join(parts + [n]))[1] is not None}
 
     def walk(self, parts, top):
         """Entries of the tree at canonical parts, named top/...; top empty:
         the directory's contents only."""
-        host, present = self.host(parts, fill=True)
-        if not present:
+        got = self.open_entry(parts, top)
+        if got is None:
             return
+        e, fd = got
         try:
-            e = entry(host, top)
-        except FileNotFoundError:
-            return
-        if top:
-            yield e
-        if e.kind == 'd':
-            for name in self.listdir(parts):
-                yield from self.walk(parts + [name], top + [name])
+            if top:
+                yield e
+            names = self.listdir(parts, fd) if e.kind == 'd' else []
+        finally:
+            if fd is not None:
+                os.close(fd)
+        for name in names:
+            yield from self.walk(parts + [name], top + [name])
 
-    def open_dir(self, parts):
-        """A directory FD to write into canonical guest directory parts (in a
-        --cow container, the upper's, made as needed)."""
+    def write_area(self, parts):
+        """(area root, parts under it, whether it is an upper) to write
+        canonical parts into; a read-only bind or root refuses."""
         b = self.bind(parts)
         if b:
-            area, rest = b
-        elif self.root is not None:
-            union.mkdirs(self.upper, self.lower, '/' + '/'.join(parts))
-            area, rest = self.upper, parts
-        else:
-            area, rest = self.rootfs, parts
-        fd = os.open(area, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        root = unpack.Rootfs(fd=fd)
-        try:
-            return root.open_dir(rest)
-        except OSError as e:
-            raise StoreError(f'destination /{"/".join(parts)} changed while copying: {e}') from None
-        finally:
-            root.close()
+            if b[2] == 'ro':
+                raise StoreError(f'/{"/".join(parts)} is on a read-only volume')
+            return b[0], b[1], False
+        if self.root is not None:
+            return self.upper, list(parts), True
+        if self.readonly_root:
+            raise StoreError("the container's root filesystem is read-only")
+        return self.rootfs, list(parts), False
+
+
+class GuestSink:
+    """Writes entries under the canonical guest directory base: each one
+    goes to the area that shows its path (a bind inside the copy is
+    written in its source, as the container sees it); a mount point itself
+    is kept."""
+
+    def __init__(self, view, base):
+        self.view, self.base = view, list(base)
+        self.sinks = {}
+        root, rel, upper = view.write_area(self.base)
+        if upper and self.base:   # the base and its parents in the upper
+            try:
+                os.close(union.mkdirs_fd(view.upper, view.lower, '/' + '/'.join(self.base)))
+            except OSError as e:
+                raise StoreError(f'/{"/".join(self.base)}: {e}') from None
+
+    def sink(self, root, upper):
+        key = str(root)
+        if key not in self.sinks:
+            self.sinks[key] = DirSink(os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC), upper)
+        return self.sinks[key]
+
+    def put(self, e):
+        guest = self.base + e.parts
+        root, rel, upper = self.view.write_area(guest)
+        if not rel:
+            if e.kind == 'd':
+                return
+            raise StoreError(f'cannot overwrite the mount point /{"/".join(guest)}')
+        if e.kind == 'h':   # its target was written in this copy, maybe in another area
+            lroot, lrel, lupper = self.view.write_area(self.base + e.link)
+            if not lrel:
+                raise StoreError(f'hard link {"/".join(e.parts)} to a mount point')
+            try:
+                fd = self.sink(lroot, lupper).root.open_file(lrel)
+            except OSError:
+                raise StoreError(f'hard link {"/".join(e.parts)} to missing {"/".join(e.link)}') from None
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            e = e._replace(kind='f', mode=mode, open=lambda: os.fdopen(fd, 'rb'))
+        self.sink(root, upper).put(e._replace(parts=rel))
+
+    def finish(self):
+        for s in self.sinks.values():
+            s.finish()
 
 
 def host_walk(path, top):

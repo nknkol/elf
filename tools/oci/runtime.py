@@ -35,6 +35,27 @@ def proc_start_time(pid):
     return int(data.rsplit(')', 1)[1].split()[19])
 
 
+def group_alive(pgid, start):
+    """Whether the process group an exec started (its leader pgid, with
+    that start time) still has processes. The leader may be gone while its
+    children remain; a pid is not given out again while a group of that id
+    exists, so a leader pid now held by another process means the group
+    emptied."""
+    now = proc_start_time(pgid)
+    if now is not None:
+        return now == start
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        try:
+            fields = Path(f'/proc/{entry}/stat').read_text().rsplit(')', 1)[1].split()
+        except OSError:
+            continue
+        if int(fields[2]) == pgid:
+            return True
+    return False
+
+
 def alive(state):
     pid = state.get('Pid') or 0
     return pid > 0 and proc_start_time(pid) == state.get('PidStart')
@@ -73,17 +94,20 @@ def exec_spawn(st, cid, launch):
             raise StoreError(f'Container {cid[:12]} is not running')
         proc = launch()
         path = st.container_dir(cid) / 'execs.json'
-        execs = [e for e in store_mod.read_json(path, []) if proc_start_time(e[0]) == e[1]]
+        execs = [e for e in store_mod.read_json(path, []) if group_alive(e[0], e[1])]
         execs.append([proc.pid, proc_start_time(proc.pid)])
         store_mod.write_json(path, execs)
     return proc
 
 
 def exec_done(st, cid, pid):
+    """The exec's first process ended: its group stays registered while
+    processes it left (background jobs) remain."""
     with st.lock():
         path = st.container_dir(cid) / 'execs.json'
         if path.exists():
-            store_mod.write_json(path, [e for e in store_mod.read_json(path, []) if e[0] != pid])
+            store_mod.write_json(path, [e for e in store_mod.read_json(path, [])
+                                        if e[0] != pid or group_alive(e[0], e[1])])
 
 
 def end_execs(st, cid):
@@ -103,7 +127,7 @@ def end_execs_locked(st, cid):
         st.save_container(record)
     path = cdir / 'execs.json'
     for pid, start in store_mod.read_json(path, []):
-        if proc_start_time(pid) != start:
+        if not group_alive(pid, start):
             continue
         for kill_ in (os.killpg, os.kill):   # (the group may not be made yet)
             try:
@@ -575,7 +599,8 @@ def container_path(st, record, path, follow=True):
 
 def guest_view(st, record):
     """The container's files as its processes see them (guestfs.View)."""
-    return guestfs.View(view_of(st, record), [(b[0], b[1]) for b in all_binds(st, record)])
+    return guestfs.View(view_of(st, record), all_binds(st, record),
+                        readonly_root=bool(record['HostConfig'].get('ReadonlyRootfs')))
 
 
 def host_target(dest, is_dir, name, contents):
@@ -637,13 +662,12 @@ def cp(st, src, dest, archive_mode=False):
         guestfs.copy(view.walk(parts, top), guestfs.DirSink(fd))
         return
     view = guest_view(st, dest_c)
-    upper = lower_of(st, dest_c) is not None
     if src_path == '-':
         parts = view.resolve(dest_path, follow=True)
         if not view.is_dir(parts):
             raise StoreError(f'destination "{dest_path}" must be a directory')
         with tarfile.open(fileobj=sys.stdin.buffer, mode='r|*') as tar:
-            guestfs.copy(guestfs.tar_walk(tar), guestfs.DirSink(view.open_dir(parts), upper))
+            guestfs.copy(guestfs.tar_walk(tar), guestfs.GuestSink(view, parts))
         return
     src_host = Path(src_path)
     if not os.path.lexists(src_host):
@@ -653,7 +677,7 @@ def cp(st, src, dest, archive_mode=False):
         raise StoreError(f'{src_path} is not a directory')
     name = Path(os.path.abspath(src_host)).name
     directory, top = guest_target(view, dest_path, is_dir, name, contents)
-    guestfs.copy(guestfs.host_walk(src_host, top), guestfs.DirSink(view.open_dir(directory), upper))
+    guestfs.copy(guestfs.host_walk(src_host, top), guestfs.GuestSink(view, directory))
 
 
 def logs(st, record, follow=False, tail=None):
