@@ -83,6 +83,16 @@ remap_file_pages、MAP_FIXED 的 mmap、mremap、SHM_REMAP 的 shmat 都拒绝�
 放行选中设备路径常量的 openat。验收：`test/isolation/device.py` 的过滤器、exec、broker 三组检查在
 `--isolate` 与 `--isolate --isolate-device` 下都跑。
 
+### 拒绝根上的经过与列目录
+
+根为 `d`（拒绝）时，bind 目标的各级祖先目录仍可“经过”：stat、access、chdir、O_PATH 打开都放行（与 guarded 构建的
+FS_TRAVERSE 相同）。“读取名字”是另一种能力：以读方式打开（拿到真实目录 FD 就能直接 getdents64，payload 的过滤
+可以被绕过）和 inotify 监视，只在该目录里**只有视图本来就显示的名字**时放行——它下面各个 bind 的下一级名字，根上
+再加 exec helper 的固定名 `.elf-exec`；否则返回 EACCES，不依赖 guest 内的过滤。broker 启动时按自己那份配置算出
+这些目录（dev/ino）与允许的名字，并逐个列一次决定能否读取。agent 启动器的骨架根满足条件（标记文件已移到根旁边）；
+一般的真实根若还有别的名字，就只能经过、不能列出。验收：`test/isolation/traverse.py`（经 payload 打开、从 payload
+自己的 svc 直接 getdents64）。
+
 过滤器装在 loader 跳到程序之前，跨 exec 继承；与 `--seccomp-backstop` 可同时使用（TRAP 优先于
 ERRNO：未改写的调用先交给 payload，再经 broker 执行）。
 

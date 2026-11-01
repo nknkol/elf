@@ -178,13 +178,25 @@ static int identity(int fd, const char *name, int flags, unsigned long *dev, uns
 
 /* A denied root may still be walked to reach the mounts in it: the
  * directories of the root that are strict ancestors of a bind's guest
- * destination (the guarded build's FS_TRAVERSE, fs_policy.c) can be opened
- * and examined, never written; their listings are filtered by the payload
- * to the exposed names. Taken from the broker's own copy of the
- * configuration, by dev/ino. */
+ * destination (the guarded build's FS_TRAVERSE, fs_policy.c). Passing
+ * through one (stat, access, chdir, O_PATH) is allowed; reading its names
+ * (an open for reading, which getdents64 can list directly, or an inotify
+ * watch) only when the directory holds nothing but the names the view
+ * shows anyway: the next component of each bind below it, and at the root
+ * the loader's exec helper (".elf-exec", a fixed name). A launcher's
+ * skeleton root is such a directory; a real root with other names is not,
+ * and its listing is refused rather than left to the payload's filter.
+ * Taken from the broker's own copy of the configuration, by dev/ino. */
 #define TRAVERSE_MAX (CONFIG_MAX_BINDS * 4)
-static unsigned long traverse[TRAVERSE_MAX][2];
+#define TRAVERSE_NAMES (CONFIG_MAX_BINDS * 4)
+static struct {
+	unsigned long dev, ino;
+	int listable;
+	char path[PATH_BYTES];
+} traverse[TRAVERSE_MAX];
 static int traverse_count;
+static struct { int dir; char name[256]; } traverse_names[TRAVERSE_NAMES];
+static int traverse_name_count;
 
 static void add_traverse(const char *root, const char *guest)
 {
@@ -198,7 +210,8 @@ static void add_traverse(const char *root, const char *guest)
 	for (size_t i = 0; i < g; i++) {
 		if (guest[i] != '/' || (i && guest[i - 1] == '/'))
 			continue;
-		/* guest[0..i) is a strict ancestor ("" is the root). */
+		/* guest[0..i) is a strict ancestor ("" is the root); the name
+		 * below it is guest[i+1..end of component). */
 		size_t n = r;
 		if (i) {
 			if (r == 1)
@@ -207,17 +220,81 @@ static void add_traverse(const char *root, const char *guest)
 			n += i;
 		}
 		path[n] = 0;
+		size_t c = i + 1, e = c;
+		while (e < g && guest[e] != '/')
+			e++;
 		struct stat st;
-		if (sys(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) < 0 ||
+		if (e == c || e - c >= sizeof(traverse_names[0].name) ||
+		    sys(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) < 0 ||
 		    (st.st_mode & 0170000) != 0040000)
 			continue;
-		int known = 0;
-		for (int k = 0; k < traverse_count; k++)
-			known |= traverse[k][0] == st.st_dev && traverse[k][1] == st.st_ino;
-		if (!known && traverse_count < TRAVERSE_MAX) {
-			traverse[traverse_count][0] = st.st_dev;
-			traverse[traverse_count++][1] = st.st_ino;
+		int k = 0;
+		while (k < traverse_count && !(traverse[k].dev == st.st_dev && traverse[k].ino == st.st_ino))
+			k++;
+		if (k == traverse_count) {
+			if (traverse_count == TRAVERSE_MAX)
+				continue;
+			traverse[k].dev = st.st_dev;
+			traverse[k].ino = st.st_ino;
+			copy_cstr(traverse[k].path, sizeof(traverse[k].path), path);
+			traverse_count++;
 		}
+		if (traverse_name_count < TRAVERSE_NAMES) {
+			traverse_names[traverse_name_count].dir = k;
+			z_memcpy(traverse_names[traverse_name_count].name, guest + c, e - c);
+			traverse_names[traverse_name_count++].name[e - c] = 0;
+		}
+	}
+}
+
+static int same_name(const char *a, const char *b)
+{
+	size_t n = z_strlen(a);
+	return n == z_strlen(b) && !z_strncmp(a, b, n);
+}
+
+static int traverse_shown(int k, const char *name, int root)
+{
+	if (root && same_name(name, ".elf-exec"))
+		return 1;
+	for (int i = 0; i < traverse_name_count; i++)
+		if (traverse_names[i].dir == k && same_name(traverse_names[i].name, name))
+			return 1;
+	return 0;
+}
+
+/* After every bind is known: which traversable directories hold only the
+ * names they show (anything unreadable counts as not). */
+static void traverse_classify(const char *root)
+{
+	struct stat rs;
+	int have_root = sys(__NR_newfstatat, AT_FDCWD, (long)root, (long)&rs, 0, 0, 0) == 0;
+	for (int k = 0; k < traverse_count; k++) {
+		int is_root = have_root && rs.st_dev == traverse[k].dev && rs.st_ino == traverse[k].ino;
+		int fd = (int)sys(__NR_openat, AT_FDCWD, (long)traverse[k].path,
+				  O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
+		if (fd < 0)
+			continue;
+		struct stat st;
+		int ok = sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) == 0 &&
+			 st.st_dev == traverse[k].dev && st.st_ino == traverse[k].ino;
+		char buffer[4096];
+		long n;
+		while (ok && (n = sys(__NR_getdents64, fd, (long)buffer, sizeof(buffer), 0, 0, 0)) != 0) {
+			if (n < 0) {
+				ok = 0;
+				break;
+			}
+			for (long off = 0; off < n;) {
+				unsigned short reclen = *(unsigned short *)(buffer + off + 16);
+				const char *name = buffer + off + 19;
+				if (!same_name(name, ".") && !same_name(name, "..") && !traverse_shown(k, name, is_root))
+					ok = 0;
+				off += reclen;
+			}
+		}
+		sys(__NR_close, fd, 0, 0, 0, 0, 0);
+		traverse[k].listable = ok;
 	}
 }
 
@@ -508,23 +585,32 @@ static int resolve(const char *input, int follow, struct target *t)
 	}
 }
 
-static int traversable(const struct target *t)
+static int traverse_index(const struct target *t)
 {
 	struct stat st;
 	if (!traverse_count || t->dir < 0 ||
 	    sys(__NR_newfstatat, t->dir, (long)t->name, (long)&st,
 		AT_SYMLINK_NOFOLLOW | (t->name[0] ? 0 : AT_EMPTY_PATH), 0, 0) < 0 ||
 	    (st.st_mode & 0170000) != 0040000)
-		return 0;
+		return -1;
 	for (int k = 0; k < traverse_count; k++)
-		if (traverse[k][0] == st.st_dev && traverse[k][1] == st.st_ino)
-			return 1;
-	return 0;
+		if (traverse[k].dev == st.st_dev && traverse[k].ino == st.st_ino)
+			return k;
+	return -1;
+}
+
+/* A target of a denied tree that passed check(): reading its names too. */
+static int traverse_read(const struct target *t)
+{
+	if (t->access != 'd')
+		return 0;
+	int k = traverse_index(t);
+	return k >= 0 && traverse[k].listable ? 0 : -EACCES_;
 }
 
 static int check(const struct target *t, int write)
 {
-	if (t->access == 'd' && !write && traversable(t))
+	if (t->access == 'd' && !write && traverse_index(t) >= 0)
 		return 0;
 	if (t->access == 'd' || t->access == 'g')
 		return -ENOENT_;
@@ -839,6 +925,8 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(flags & O_NOFOLLOW) && !((flags & O_CREAT_) && (flags & 0200)), &t);
 		if (rc >= 0)
 			rc = check(&t, write);
+		if (rc >= 0 && !(flags & O_PATH_))
+			rc = traverse_read(&t);
 		else if (rc == -EACCES_ && (c->magic & BROKER_MAGIC(1)))
 			rc = held_access(c->fd[0], flags);
 		if (rc < 0)
@@ -1065,6 +1153,8 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(a[2] & IN_DONT_FOLLOW_), &t);
 		if (rc >= 0)
 			rc = check(&t, 0);
+		if (rc >= 0)
+			rc = traverse_read(&t);
 		if (rc >= 0)
 			rc = on_object(&t, nr, c->fd[0], a[2] & ~IN_DONT_FOLLOW_, 0, 0, 2);
 		break;
@@ -1384,6 +1474,7 @@ static void broker_run(int control, const payload_config_t *cfg)
 		for (int i = 0; i < cfg->bind_count; i++)
 			if (access[i + 1] != 'd')
 				add_traverse(cfg->root[0] ? cfg->root : "/", cfg->binds[i].src);
+	traverse_classify(cfg->root[0] ? cfg->root : "/");
 	/* R6: the root's lower layers are never written (copy-up goes to the root). */
 	for (int i = 0; i < cfg->lower_count; i++)
 		add_tree(cfg->lower[i], access[0] == 'd' ? 'd' : 'r');

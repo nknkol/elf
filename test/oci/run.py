@@ -1182,6 +1182,31 @@ def run_tests(home, work, isolate):
           (mvol / 'g').read_text() == 'volfile\n',
           'cp of a bind source onto itself (or through an alias) keeps its content' + tag,
           p.stderr + p2.stderr + p3.stderr)
+    # User binds of the container's own etc files cover them, inside and for
+    # docker cp alike: reads, copies out, updates, and a read-only one refuses.
+    uhosts, uhostname, uresolv = (work / (n + suffix) for n in ('u-hosts', 'u-hostname', 'u-resolv'))
+    uhosts.write_text('10.9.8.7 user-hosts\n')
+    uhostname.write_text('user-hostname\n')
+    uresolv.write_text('nameserver 10.9.8.6\n')
+    ename = 'etcbind' + suffix
+    p0 = docker(home, 'run', *mode, '--name', ename, '-v', f'{uhosts}:/etc/hosts',
+                '-v', f'{uhostname}:/etc/hostname:ro', '-v', f'{uresolv}:/etc/resolv.conf', img,
+                'cat /etc/hosts /etc/hostname /etc/resolv.conf')
+    outs = {}
+    for etc_name in ('hosts', 'hostname', 'resolv.conf'):
+        p = docker(home, 'cp', f'{ename}:/etc/{etc_name}', str(work / f'out-{etc_name}{suffix}'))
+        outs[etc_name] = (work / f'out-{etc_name}{suffix}').read_text() if p.returncode == 0 else p.stderr
+    (work / 'new-hosts').write_text('10.1.1.1 updated\n')
+    p = docker(home, 'cp', str(work / 'new-hosts'), f'{ename}:/etc/hosts')
+    p2 = docker(home, 'cp', str(work / 'new-hosts'), f'{ename}:/etc/hostname')
+    check(p0.stdout == '10.9.8.7 user-hosts\nuser-hostname\nnameserver 10.9.8.6\n' and
+          outs == {'hosts': '10.9.8.7 user-hosts\n', 'hostname': 'user-hostname\n',
+                   'resolv.conf': 'nameserver 10.9.8.6\n'} and
+          p.returncode == 0 and uhosts.read_text() == '10.1.1.1 updated\n' and
+          p2.returncode != 0 and uhostname.read_text() == 'user-hostname\n',
+          'user binds of /etc/hosts, hostname, resolv.conf: the container and docker cp agree' + tag,
+          [p0.stdout, p0.stderr, outs, p.stderr, p2.stderr])
+    docker(home, 'rm', ename)
     # --read-only: a writable file bind in a read-only directory updates; the
     # root's own files still refuse.
     rname = 'rofile' + suffix

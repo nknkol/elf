@@ -69,7 +69,8 @@ class LaunchTests(unittest.TestCase):
     def test_skeleton_contains_only_mountpoints(self):
         root = launch.prepare_state(self.compiled)
         self.assertEqual(sorted(p.name for p in root.iterdir()),
-                         ['.elf-skeleton', 'dev', 'home', 'opt', 'tmp', 'workspace'])
+                         ['dev', 'home', 'opt', 'tmp', 'workspace'])
+        self.assertTrue((self.state/launch.MARKER).is_file())
         self.assertTrue((root/'dev/null').is_file())
         self.assertTrue((root/'opt/brew').is_dir())
         self.assertEqual((self.state/'home').stat().st_mode & 0o777, 0o700)

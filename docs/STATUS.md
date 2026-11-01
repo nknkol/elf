@@ -16,8 +16,8 @@
 | Docker/OCI `tools/oci/` | R1–R6 与 compose 网络、副本已实现（[OCI.md](OCI.md)）；宿主侧 Python，容器运行期间监视进程与 `-p` 转发器常驻 |
 
 **验收基线**（HarmonyOS 真机 HAD-W32，2026-11-01）：`make check` 282、`make check-guarded` 172、
-`make check-isolation` 205（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑）、
-`make check-oci` 184（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18，
+`make check-isolation` 222（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑）、
+`make check-oci` 186（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18，
 `test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过。
 
 **已知限制**

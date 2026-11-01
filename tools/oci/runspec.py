@@ -111,7 +111,8 @@ def guest_host(rootfs, binds, parts):
     best = None
     for src, dst in binds:
         if guest == dst or guest.startswith(dst.rstrip('/') + '/'):
-            if best is None or len(dst) > len(best[1]):
+            # Of equal destinations the later wins, as in the loader.
+            if best is None or len(dst) >= len(best[1]):
                 best = (src, dst)
     if best:
         rest = guest[len(best[1]):].lstrip('/')

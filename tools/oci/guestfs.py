@@ -134,7 +134,9 @@ class View:
         for b in self.binds:
             dst = b[1]
             if guest == dst or dst == '/' or guest.startswith(dst + '/'):
-                if best is None or len(dst) > len(best[1]):
+                # The longest destination; of equal ones the later, as the
+                # loader's binding table (a later bind covers an earlier).
+                if best is None or len(dst) >= len(best[1]):
                     best = b
         if not best:
             return None

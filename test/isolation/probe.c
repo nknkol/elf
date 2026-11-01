@@ -7,6 +7,7 @@
  *
  *   probe h|d open PATH FLAGS        open (octal flags); prints data= on success
  *   probe h|d stat|lstat|readlink|list|chdir|statfs|getxattr PATH
+ *   probe h   rawlist PATH           open through the payload, getdents64 from its svc
  *   probe h|d mkdir|unlink|rmdir|chmod|chown|utime|truncate|setxattr PATH
  *   probe h|d rename|link|symlink A B
  *   probe h|d exec PATH              execve (h) or execveat by path (d)
@@ -146,6 +147,23 @@ static void list(const char *path)
     if (fd < 0) return;
     char buf[4096];
     long n = sc(__NR_getdents64, fd, (long)buf, sizeof(buf), 0, 0, 0);
+    printf("names=");
+    for (long off = 0; off < n;) {
+        unsigned short reclen = *(unsigned short *)(buf + off + 16);
+        printf("%s,", buf + off + 19);
+        off += reclen;
+    }
+    printf("\n");
+}
+
+/* The FD the broker hands out, listed without the payload's filter. */
+static void rawlist(const char *path)
+{
+    long fd = hooked(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_DIRECTORY, 0, 0, 0);
+    report("rawlist", fd < 0 ? fd : 0);
+    if (fd < 0) return;
+    char buf[4096];
+    long n = via(__NR_getdents64, fd, (long)buf, sizeof(buf), 0, 0, 0);
     printf("names=");
     for (long off = 0; off < n;) {
         unsigned short reclen = *(unsigned short *)(buf + off + 16);
@@ -679,6 +697,7 @@ int main(int argc, char **argv)
     const char *op = argv[2], *p = argc > 3 ? argv[3] : 0, *q = argc > 4 ? argv[4] : 0;
     if (!strcmp(op, "open")) open_read("open", p, (int)strtol(q, 0, 8));
     else if (!strcmp(op, "list")) list(p);
+    else if (!strcmp(op, "rawlist")) rawlist(p);
     else if (!strcmp(op, "exec")) {
         char *args[] = {(char *)p, 0}, *env[] = {0};
         long rc = direct ? via(281, AT_FDCWD, (long)p, (long)args, (long)env, 0, 0)

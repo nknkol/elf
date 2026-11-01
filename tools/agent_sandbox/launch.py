@@ -41,7 +41,10 @@ ProfileError = plan.ProfileError
 MAX_BINDS = 64  # CONFIG_MAX_BINDS in src/payload/include/config.h
 MAX_ENVS = 512  # LOADER_MAX_ENVS in src/loader/loader.h
 MAX_VALUE = 255  # CONFIG_MAX_PATH including NUL
-MARKER = '.elf-skeleton'
+# Beside the root, not in it: the root holds nothing but mountpoints (and
+# the helper), so the broker may let the guest list it (src/loader/broker.c).
+MARKER = 'root.elf-skeleton'
+OLD_MARKER = '.elf-skeleton'   # inside the root, by earlier launchers
 HELPER = '.elf-exec'
 
 
@@ -99,11 +102,11 @@ def prepare_state(compiled):
             Path(mount['source']).mkdir(mode=0o700, parents=True, exist_ok=True)
     root = state / 'root'
     if root.exists():
-        if not (root / MARKER).is_file():
+        if not (state / MARKER).is_file() and not (root / OLD_MARKER).is_file():
             raise ProfileError(f'{root} exists and was not created by this launcher')
         shutil.rmtree(root)
     root.mkdir(mode=0o755, parents=True)
-    (root / MARKER).write_text('mountpoint skeleton; recreated on every launch\n')
+    (state / MARKER).write_text('marks root/ as the launcher\'s mountpoint skeleton, recreated on every launch\n')
     for mount in compiled['mounts']:
         node = root / mount['target'].lstrip('/')
         node.parent.mkdir(mode=0o755, parents=True, exist_ok=True)

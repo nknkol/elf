@@ -612,8 +612,9 @@ def container_path(st, record, path, follow=True):
 def guest_view(st, record):
     """The container's files as its processes see them (guestfs.View)."""
     etc = st.container_dir(record['Id']) / 'etc'
-    # The container's own etc files are binds as in runspec.build (host
-    # /proc, /sys and devices are left out: not the container's files).
+    # The container's own etc files are binds as in runspec.build, before
+    # the user's (a user bind of the same file covers them there and here;
+    # host /proc, /sys and devices are left out: not the container's files).
     own = [(str(etc / name), f'/etc/{name}', 'rw') for name in ('hosts', 'hostname', 'resolv.conf')]
     return guestfs.View(view_of(st, record), own + all_binds(st, record),
                         readonly_root=bool(record['HostConfig'].get('ReadonlyRootfs')))
