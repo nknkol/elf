@@ -88,13 +88,15 @@ remap_file_pages、MAP_FIXED 的 mmap、mremap、SHM_REMAP 的 shmat 都拒绝�
 根为 `d`（拒绝）时，bind 目标的各级祖先目录仍可“经过”：access、chdir、O_PATH 打开作用于真实目录（与 guarded 构建的
 FS_TRAVERSE 相同）。它们的名字**从不从真实目录读出**：真实目录 FD 只要还在 guest 手里，getdents64 就能看到它现在和
 以后的任何名字，payload 的过滤可以被绕过，启动时检查一次内容也不能约束以后。所以以读方式打开和 stat 都由一个合成
-目录代答：broker 启动时在 glue 目录下建一个私有目录 `elf-traverse-<pid>`（guest 在 glue 下只能碰 `proot-glue-*`），
+目录代答（判断按打开到的对象：路径打开前按目标替换，任何非 O_PATH 打开之后再对结果 fstat，是可经过目录就关掉、改开合成
+目录，所以经持有 FD 的魔链接重开、held-FD 回退等任何途径都拿不到真实目录）：broker 启动时在 glue 目录下建一个私有目录 `elf-traverse-<pid>`（guest 在 glue 下只能碰 `proot-glue-*`），
 为每个可经过的目录放一份占位：它下面各个 bind 的下一级名字（中间级为目录，末级按 bind 来源的类型），根上再加
 exec helper 的固定名 `.elf-exec`，此外什么都没有，之后也不再变化。inotify 监视一律拒绝。合成目录建不成时，读取一律
 拒绝。broker 退出时删除它，被杀死的 broker 留下的由下次启动按 pid 清掉。payload 在隔离模式下为它打开的目录记下打开
 时的 guest 名字（按 FD 与 dev/ino），列目录的过滤因此不依赖 FD 的宿主名字。
 验收：`test/isolation/traverse.py`（经 payload 打开、从 payload 自己的 svc 直接 getdents64；持有 FD 期间宿主新增的名字
-不出现；三种根：有隐藏文件、`/mnt` 里有隐藏文件、骨架根）。
+不出现；以 O_PATH 持有真实目录后经 `/proc/self/fd/N` 与伪造的魔链接请求重开；三种根：有隐藏文件、`/mnt` 里有隐藏文件、
+骨架根）。
 自己的 svc 直接 getdents64）。
 
 过滤器装在 loader 跳到程序之前，跨 exec 继承；与 `--seccomp-backstop` 可同时使用（TRAP 优先于

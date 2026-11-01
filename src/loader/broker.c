@@ -701,6 +701,30 @@ static int traverse_index(const struct target *t)
 	return -1;
 }
 
+/* What was actually opened for reading, however it was named (a path, the
+ * magic link of a held FD, a held-FD fallback): a traversable directory is
+ * closed and its synthesized copy opened instead (or EACCES). */
+static void fd_path(char *out, int fd);
+static long traverse_opened(long fd, int flags)
+{
+	struct stat st;
+	if (fd < 0 || !traverse_count || sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) < 0 ||
+	    (st.st_mode & 0170000) != 0040000)
+		return fd;
+	int k = 0;
+	while (k < traverse_count && !(traverse[k].dev == st.st_dev && traverse[k].ino == st.st_ino))
+		k++;
+	if (k == traverse_count)
+		return fd;
+	sys(__NR_close, fd, 0, 0, 0, 0, 0);
+	if (traverse[k].synth < 0)
+		return -EACCES_;
+	char magic[32];
+	fd_path(magic, traverse[k].synth);
+	return sys(__NR_openat, AT_FDCWD, (long)magic,
+		   (flags & ~(O_NOFOLLOW | O_ACCMODE_ | O_CREAT_ | O_TRUNC_)) | O_CLOEXEC_, 0, 0, 0);
+}
+
 /* A target of a denied tree that passed check() and is read (opened for
  * reading, stat): the synthesized directory stands in for it. */
 static int traverse_substitute(struct target *t)
@@ -1036,10 +1060,10 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(flags & O_NOFOLLOW) && !((flags & O_CREAT_) && (flags & 0200)), &t);
 		if (rc >= 0)
 			rc = check(&t, write);
-		if (rc >= 0 && !(flags & O_PATH_))
-			rc = traverse_substitute(&t);
 		else if (rc == -EACCES_ && (c->magic & BROKER_MAGIC(1)))
 			rc = held_access(c->fd[0], flags);
+		if (rc >= 0 && !(flags & O_PATH_) && !(c->magic & BROKER_MAGIC(1)))
+			rc = traverse_substitute(&t);
 		if (rc < 0)
 			break;
 		if ((c->magic & BROKER_MAGIC(1)) || !t.name[0]) {
@@ -1056,6 +1080,8 @@ static long execute(struct call *c, long nr)
 			sys(__NR_close, rc, 0, 0, 0, 0, 0);
 			rc = -EACCES_;
 		}
+		if (rc >= 0 && !(flags & O_PATH_))
+			rc = traverse_opened(rc, flags);
 		if (rc >= 0) {
 			c->answer_fd = (int)rc;
 			rc = 0;

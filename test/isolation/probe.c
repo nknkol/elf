@@ -9,6 +9,8 @@
  *   probe h|d stat|lstat|readlink|list|chdir|statfs|getxattr PATH
  *   probe h   rawlist PATH           open through the payload, getdents64 from its svc
  *   probe h   rawlistwait PATH       the same, listing after a line on stdin
+ *   probe h   reopen PATH            O_PATH open, then reopen by /proc/self/fd/N and by a
+ *                                    forged magic-link request; each listed from the svc
  *   probe h|d mkdir|unlink|rmdir|chmod|chown|utime|truncate|setxattr PATH
  *   probe h|d rename|link|symlink A B
  *   probe h|d exec PATH              execve (h) or execveat by path (d)
@@ -474,6 +476,51 @@ static void forge(const char *out, const char *ro, const char *rw, const char *s
 
 /* The harness kills the broker processes between "ready" and the line it
  * then writes to stdin. */
+static void list_fd(const char *label, long fd)
+{
+    report(label, fd < 0 ? fd : 0);
+    if (fd < 0) return;
+    char buf[4096];
+    long n = via(__NR_getdents64, fd, (long)buf, sizeof(buf), 0, 0, 0);
+    printf("%s-names=", label);
+    for (long off = 0; off < n;) {
+        unsigned short reclen = *(unsigned short *)(buf + off + 16);
+        printf("%s,", buf + off + 19);
+        off += reclen;
+    }
+    printf("\n");
+}
+
+/* A real directory held as O_PATH, opened again for reading. */
+static void reopen(const char *path)
+{
+    long held = hooked(__NR_openat, AT_FDCWD, (long)path, O_PATH | O_DIRECTORY, 0, 0, 0);
+    report("held", held < 0 ? held : 0);
+    if (held < 0) return;
+    char magic[64];
+    snprintf(magic, sizeof(magic), "/proc/self/fd/%ld", held);
+    list_fd("reopen-proc", hooked(__NR_openat, AT_FDCWD, (long)magic, O_RDONLY | O_DIRECTORY, 0, 0, 0));
+    payload_config_t *cfg = payload_config();
+    if (!cfg || !cfg->isolate) return;
+    int pair[2];
+    via(__NR_socketpair, AF_UNIX, SOCK_SEQPACKET, 0, (long)pair, 0, 0);
+    char hello = 'c', control[CMSG_SPACE(sizeof(int))];
+    struct iovec io = {&hello, 1};
+    struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = control,
+                       .msg_controllen = sizeof(control)};
+    struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+    h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(h), &pair[1], sizeof(int));
+    via(__NR_sendmsg, cfg->isolate_fd, (long)&m, 0, 0, 0, 0);
+    close(pair[1]);
+    struct broker_request *r = calloc(1, BROKER_MESSAGE_MAX);
+    size_t n = with_paths(r, __NR_openat, "", 1, 0, 0);
+    r->args[0] = AT_FDCWD; r->args[2] = O_RDONLY | O_DIRECTORY; r->flags = BROKER_MAGIC(1); r->fds = 1;
+    int fds[1] = {(int)held};
+    long rc = request(pair[0], r, n, fds, 1, 0, 0);
+    list_fd("reopen-forged", rc >= 1000 ? rc - 1000 : rc);
+}
+
 static void after_broker_gone(const char *path)
 {
     struct stat st;
@@ -704,6 +751,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "list")) list(p);
     else if (!strcmp(op, "rawlist")) rawlist(p, 0);
     else if (!strcmp(op, "rawlistwait")) rawlist(p, 1);
+    else if (!strcmp(op, "reopen")) reopen(p);
     else if (!strcmp(op, "exec")) {
         char *args[] = {(char *)p, 0}, *env[] = {0};
         long rc = direct ? via(281, AT_FDCWD, (long)p, (long)args, (long)env, 0, 0)

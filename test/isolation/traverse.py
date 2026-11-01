@@ -15,7 +15,10 @@ with a hidden file in /mnt, and a skeleton root:
     "vol": never a hidden name;
   - a name the host adds while the guest holds the FD does not show up
     when the guest lists that FD afterwards;
-  - an inotify watch on them is refused (EACCES)."""
+  - an inotify watch on them is refused (EACCES);
+  - a real directory held as O_PATH and opened again through its magic
+    link (through the payload, and by a forged broker request) gives the
+    synthesized copy or nothing, never the real names."""
 import os
 import shutil
 import subprocess
@@ -92,6 +95,30 @@ with tempfile.TemporaryDirectory(prefix='iso-traverse-', dir=lib.mode_capable())
                   v.get('rawlist') == 0 and names is not None and set(names) - {'.', '..'} == shown, out)
             v, _, out = run(root, 'h', 'inotify', path)
             check(f'{case}: inotify on {path} is refused', v.get('inotify') == EACCES, out)
+        # A real directory held as O_PATH (passing through), opened again by
+        # its magic link, through the payload and by a forged request.
+        for path in ('/', '/mnt'):
+            shown = {'.elf-exec', 'mnt'} if path == '/' else {'vol'}
+            p = subprocess.run([str(loader), *lib.ISOLATE_EXTRA, '--isolate', '--mode', 'container',
+                                '--root', str(root), '-v', f'{vol}:/mnt/vol', '--guard-file-access', 'dw',
+                                '--allow-stdio-output', '--', './.elf-exec', 'h', 'reopen', path],
+                               capture_output=True, text=True, timeout=60, cwd='/')
+            out = p.stdout + p.stderr
+            values = {}
+            listed = {}
+            for line in p.stdout.splitlines():
+                key, sep, rest = line.partition('-names=')
+                if sep:
+                    listed[key] = {n for n in rest.split(',') if n} - {'.', '..'}
+                elif ' ' in line:
+                    k, _, v = line.rpartition(' ')
+                    values[k] = int(v) if v.lstrip('-').isdigit() else v
+            for how in ('reopen-proc', 'reopen-forged'):
+                ok = values.get('held') == 0 and how in values and (
+                    (values[how] == 0 and listed.get(how) == shown) or
+                    (values[how] != 0 and how not in listed))
+                check(f'{case}: {path} held as O_PATH, {how}: only the view\'s names or refused',
+                      ok and 'hidden-secret' not in out, out)
         # A name added while the guest holds the FD.
         p = subprocess.Popen([str(loader), *lib.ISOLATE_EXTRA, '--isolate', '--mode', 'container',
                               '--root', str(root), '-v', f'{vol}:/mnt/vol', '--guard-file-access', 'dw',
