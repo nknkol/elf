@@ -899,6 +899,57 @@ CMD ["hello"]
 '''
 
 
+def saved_layers(home, image, work):
+    """[{path: TarInfo}] of every layer of a saved image."""
+    archive = work / 'layers-save.tar'
+    p = docker(home, 'save', '-o', str(archive), image)
+    assert p.returncode == 0, p.stderr
+    out = []
+    with tarfile.open(archive) as outer:
+        manifest = json.load(outer.extractfile('manifest.json'))
+        for name in manifest[0]['Layers']:
+            blob = outer.extractfile(name).read()
+            if blob[:2] == b'\x1f\x8b':
+                blob = gzip.decompress(blob)
+            with tarfile.open(fileobj=io.BytesIO(blob)) as layer:
+                out.append({m.name.rstrip('/'): m for m in layer})
+    archive.unlink()
+    return out
+
+
+def upper_build_tests(home, work, ctx):
+    """R6: RUN writes an upper over the stage rootfs; the upper is the layer."""
+    (ctx / 'Dockerfile.upper').write_text(
+        'FROM test/alpine:1\nUSER root\nWORKDIR /\n'
+        'RUN rm -r /media && mkdir -p /srv/old && echo a > /srv/a && echo keep > /etc/keep\n'
+        'RUN rm -r /srv && mkdir /srv && echo b > /srv/b && chown 123:45 /srv/b && chmod 4755 /srv/b\n'
+        'COPY one.txt /srv/\n'
+        'RUN cat /srv/one.txt /srv/b > /srv/c && rm /etc/keep\n'
+        'RUN true\n')
+    p = docker(home, 'build', '-q', '-f', str(ctx / 'Dockerfile.upper'), '-t', 'test/upper:1', str(ctx),
+               timeout=600)
+    check(p.returncode == 0, 'build (upper): builds', p.stdout[-800:] + p.stderr[-800:])
+    if p.returncode:
+        return
+    p = docker(home, 'run', '--rm', 'test/upper:1',
+               'ls /srv; cat /srv/c; test -e /media || echo media-gone; test -e /etc/keep || echo keep-gone')
+    check(p.stdout == 'b\nc\none.txt\n1\nb\nmedia-gone\nkeep-gone\n', 'build (upper): merged result',
+          p.stdout + p.stderr)
+    found = saved_layers(home, 'test/upper:1', work)
+    base = len(found) - 4  # RUN, RUN, COPY, RUN; WORKDIR / exists (RUN true makes no layer)
+    l1, l2, l3, l4 = found[base:]
+    check('.wh.media' in l1 and 'srv/a' in l1 and 'srv/old' in l1 and 'etc/keep' in l1 and
+          not any(k.startswith('bin/') for k in l1),
+          'build (upper): RUN layer = the upper (whiteout, new files, nothing untouched)', sorted(l1))
+    b = l2.get('srv/b')
+    check('srv/.wh..wh..opq' in l2 and b is not None and (b.uid, b.gid) == (123, 45) and b.mode & 0o4000 and
+          'srv/a' not in l2, 'build (upper): rm -r then mkdir gives an opaque directory; chown, setuid kept',
+          {k: (v.uid, v.gid, oct(v.mode)) for k, v in l2.items()})
+    check(set(l3) == {'srv', 'srv/one.txt'}, 'build (upper): COPY after RUN (snapshot kept current)', sorted(l3))
+    check(set(l4) == {'srv', 'srv/c', 'etc', 'etc/.wh.keep'}, 'build (upper): RUN after COPY', sorted(l4))
+    docker(home, 'rmi', '-f', 'test/upper:1')
+
+
 def build_tests(home, work):
     ctx = work / 'ctx'
     (ctx / 'src').mkdir(parents=True)
@@ -956,6 +1007,7 @@ def build_tests(home, work):
     p = docker(home, 'build', '-f', str(ctx / 'Dockerfile.fail'), str(ctx), timeout=600)
     check(p.returncode == 1 and 'returned a non-zero code: 3' in p.stderr, 'build: a failing RUN fails the build',
           p.stderr[-300:])
+    upper_build_tests(home, work, ctx)
     # Export and re-import: the same diff_ids.
     p = docker(home, 'save', '-o', str(work / 'built.tar'), 'test/built:1')
     layers_before = docker(home, 'inspect', '-f', '{{json .RootFS.Layers}}', 'test/built:1').stdout

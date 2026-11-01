@@ -194,3 +194,101 @@ def apply(upper, dest):
             else:
                 shutil.copy2(s, d)
     walk(upper, dest)
+
+
+def diff_entries(upper):
+    """The layer an upper holds, for build (R6: RUN writes the upper, so no
+    scan): (changed paths, deleted paths, opaque directories), guest paths."""
+    changed, deleted, opaque = [], [], []
+
+    def walk(host, guest):
+        names = sorted(os.listdir(host))
+        if OPAQUE in names:
+            opaque.append(guest or '/')
+        for name in names:
+            path = guest + '/' + name
+            if marker(name):
+                if not name.startswith('.wh..'):
+                    deleted.append(guest + '/' + name[4:])
+                continue
+            if path in layers.IGNORED:
+                continue
+            changed.append(path)
+            if is_dir(Path(host, name)):
+                walk(os.path.join(host, name), path)
+    walk(str(upper), '')
+    return changed, deleted, opaque
+
+
+def merge(upper, dest):
+    """Moves the upper into dest, the lower it ran on (build): renames on the
+    same file system, so nothing is copied; markers are applied and dropped.
+    The upper is consumed."""
+    upper, dest = Path(upper), Path(dest)
+
+    def remove(path):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            path.unlink()
+
+    def strip(top):
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in filenames + dirnames:
+                if marker(name):
+                    remove(Path(dirpath, name))
+            dirnames[:] = [d for d in dirnames if not marker(d)]
+
+    def walk(src, out):
+        names = sorted(os.listdir(src))
+        if OPAQUE in names:
+            for child in os.listdir(out):
+                remove(out / child)
+        for name in names:
+            s, d = src / name, out / name
+            if marker(name):
+                if name != OPAQUE and not name.startswith('.wh..'):
+                    remove(out / name[4:])
+                continue
+            if is_dir(s) and is_dir(d) and not (s / OPAQUE).exists():
+                walk(s, d)
+                shutil.copystat(s, d, follow_symlinks=False)
+                continue
+            remove(d)
+            os.rename(s, d)
+            if is_dir(d):
+                strip(d)
+    walk(upper, dest)
+    shutil.rmtree(upper, ignore_errors=True)
+
+
+def owner_view(upper, lower, db, known):
+    """guest_view after a build RUN without walking the lower: records of
+    lower files are named by known ({(dev, ino): path}, from owners.from_meta)
+    and the rest must be in the upper; a record of neither (a lower file
+    without a meta.json entry chowned in place) falls back to the full walk."""
+    import owners
+    records = owners.read(db)
+    if not records:
+        return {}
+    view, seen = {}, set()
+    for dirpath, dirnames, filenames in os.walk(str(upper)):
+        dirnames[:] = [d for d in dirnames if not marker(d)]
+        guest = '/' + os.path.relpath(dirpath, str(upper)).lstrip('.').lstrip('/')
+        for name in dirnames + [f for f in filenames if not marker(f)]:
+            st = os.lstat(os.path.join(dirpath, name))
+            key = (st.st_dev, st.st_ino)
+            seen.add(key)
+            r = records.get(key)
+            if r:
+                view[guest.rstrip('/') + '/' + name] = (r[0] or 0, r[1] or 0, r[2])
+    root = Root(upper, lower)
+    for key, r in records.items():
+        if key in seen:
+            continue
+        p = known.get(key)
+        if p is None:
+            return guest_view(upper, lower, db)
+        if root.locate(p)[1] == 1:
+            view[p] = (r[0] or 0, r[1] or 0, r[2])
+    return view

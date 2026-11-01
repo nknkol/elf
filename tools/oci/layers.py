@@ -82,16 +82,17 @@ def kinds(before, after):
     return sorted(((k, p) for p, k in out.items()), key=lambda x: x[1])
 
 
-def write_layer(root, changed, deleted, out_path, modes=None, owners=None):
+def write_layer(root, changed, deleted, out_path, modes=None, owners=None, opaque=()):
     """Writes the plain layer tar; returns its diff_id. Parent directories
     of changed entries are included (as Docker does). modes and owners
-    (meta.json, R5) give what the host does not hold; the rest is root's."""
+    (meta.json, R5) give what the host does not hold; the rest is root's.
+    opaque: directories whose lower contents the layer hides (.wh..wh..opq)."""
     if not callable(root):  # union.Root (R6) maps names itself
         root = Path(root)
     modes = modes or {}
     owners = owners or {}
     entries = set(changed)
-    for p in list(changed) + list(deleted):
+    for p in list(changed) + list(deleted) + [o for o in opaque if o != '/']:
         parent = os.path.dirname(p)
         while parent not in ('', '/'):
             entries.add(parent)
@@ -109,6 +110,7 @@ def write_layer(root, changed, deleted, out_path, modes=None, owners=None):
     with open(out_path, 'wb') as raw:
         with tarfile.open(fileobj=Hashing(raw), mode='w|', format=tarfile.PAX_FORMAT) as tar:
             whiteouts = {os.path.dirname(p) + '/.wh.' + os.path.basename(p) for p in deleted}
+            whiteouts |= {o.rstrip('/') + '/.wh..wh..opq' for o in opaque}
             for p in sorted(entries | whiteouts):
                 name = p.lstrip('/')
                 if p in whiteouts:
@@ -131,6 +133,40 @@ def write_layer(root, changed, deleted, out_path, modes=None, owners=None):
                 elif info.isdir() or info.issym():
                     tar.addfile(info)
     return 'sha256:' + h.hexdigest()
+
+
+def update(snapshot, root, changed, deleted, opaque=()):
+    """A scan() kept current after changes at known paths (build: the
+    paths a RUN's upper held), without walking the rest of root."""
+    root = str(root)
+
+    def drop(prefix, keep_self=False):
+        for p in [p for p in snapshot if p.startswith(prefix + '/') or (p == prefix and not keep_self)]:
+            del snapshot[p]
+    for p in deleted:
+        drop(p)
+    for p in opaque:  # what was below is gone; the upper's entries are in changed
+        drop('' if p == '/' else p, keep_self=True)
+    for p in sorted(changed):
+        try:
+            st = os.lstat(root + p)
+        except OSError:
+            drop(p)
+            continue
+        mode = st.st_mode
+        if stat.S_ISDIR(mode):
+            if snapshot.get(p, ('d',))[0] != 'd':
+                drop(p)
+            snapshot[p] = ('d', 0, 0, stat.S_IMODE(mode), '')
+            continue
+        drop(p)
+        if stat.S_ISLNK(mode):
+            snapshot[p] = ('l', 0, st.st_mtime_ns, 0, os.readlink(root + p))
+        elif stat.S_ISREG(mode):
+            snapshot[p] = ('f', st.st_size, st.st_mtime_ns, stat.S_IMODE(mode), '')
+        else:
+            snapshot[p] = ('o', 0, 0, 0, '')
+    return snapshot
 
 
 def compress(st, plain_path):

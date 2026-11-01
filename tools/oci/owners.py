@@ -71,9 +71,10 @@ def read(path):
 
 def from_meta(rootfs, meta, path):
     """The database of a container's rootfs copy from its image's meta.json
-    (owners and modes the unpacking recorded)."""
+    (owners and modes the unpacking recorded). Returns {(dev, ino): path}
+    of the recorded files."""
     rootfs = str(rootfs)
-    records = {}
+    records, paths = {}, {}
     keys = set(meta.get('owners', {})) | set(meta.get('modes', {}))
     for key in keys:
         try:
@@ -85,7 +86,9 @@ def from_meta(rootfs, meta, path):
         if stat.S_ISLNK(st.st_mode):
             mode = None
         records[(st.st_dev, st.st_ino)] = (uid, gid, mode)
+        paths[(st.st_dev, st.st_ino)] = key
     create(path, records)
+    return paths
 
 
 def guest_view(rootfs, path):

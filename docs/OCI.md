@@ -305,7 +305,7 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
 
 **层计算**：没有 overlayfs，每条指令前后各扫描一遍工作 rootfs，按大小、mtime、模式比较（必要时比哈希）；新增与修改的
 文件打进层 tar，删除的写成 `.wh.` 标记。大 rootfs 每步多几秒到十几秒。`commit` 与 `diff` 用同一机制。R6 之后，
-指令直接写合并视图的上层，上层就是这一层，不再扫描。
+`RUN` 直接写合并视图的上层，上层就是这一层，不再扫描（见“R6 实现记录”的 build 一节）；`COPY`/`ADD`/`WORKDIR` 仍按快照比较。
 
 **缓存**：键为“上一层 id + 指令文本 + `COPY`/`ADD` 源的内容哈希”，命中即复用。
 
@@ -533,12 +533,24 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
   显示该文件的那一层读取，新镜像的 rootfs 是镜像副本应用上层；`cp` 进容器写到上层（下层目录先在上层建立）；`inspect` 的
   GraphDriver 多出 UpperDir、LowerDir。复制式容器照旧可用，仍是默认。
 
+### build 写上层（2026-11-01）
+
+- `RUN` 以阶段的工作 rootfs 为下层、一个新建的空目录为上层运行（`--root UPPER --lower ROOTFS`）。结束后上层就是这一层：
+  上层的条目是新增或修改的路径，`.wh.<名字>` 是删除，`.wh..wh..opq` 写成层里的不透明标记（`rm -r d && mkdir d`），
+  不再前后各扫描一遍 rootfs。层写完后上层用改名移入工作 rootfs（同一文件系统，不复制），标记应用后丢弃。`RUN` 失败时
+  工作 rootfs 不变。
+- 属主（R5）：数据库仍按工作 rootfs 的 inode 从 meta.json 建立，`from_meta` 同时给出 inode→路径；结束后上层逐项查记录，
+  下层的记录按这张表命名，所以不遍历下层。只有“meta.json 里没有、在下层原地 chown 的文件”这种记录对不上时才退回整树遍历。
+- `COPY`、`ADD`、`WORKDIR` 仍直接写工作 rootfs 并按快照比较；`RUN` 之后快照按上层的路径就地更新（不透明目录先清掉原子树），
+  只有 `RUN` 的 Dockerfile 一次也不扫描。缓存命中照旧应用缓存层。
+- 验收：`make check-oci` 121→127（`RUN` 层只含上层内容、whiteout、不透明目录、chown 与 setuid 进层、`RUN` 后 `COPY`、
+  `COPY` 后 `RUN` 的层各自正确）。python:3.13-slim 上 5 条 `RUN` 的构建 2.9 s→2.0 s，rootfs 越大省得越多。
+
 ### 与设计的差别
 
 - **没有层镜像**（erofs/squashfs、按需展开）与 `mount -o loop`：共享与写时复制只需要已展开的镜像 rootfs，它本来就只有一份；
   层镜像要在 payload 与 broker 里各实现一个文件系统读取器加按需展开的缓存，收益只是能放在大小写不敏感的存储上、少占展开
   空间。需要时再做。
-- **build 仍按扫描计算层**：RUN 还在复制式工作 rootfs 上执行；改成直接写合并视图的上层留待之后。
 - **下层不按层拆分**：docker 的下层是展开后的整个镜像 rootfs（一层）；loader 支持多层，`build` 与按层共享还没有用上。
 - **inode**：复制上来后 st_ino 改变（overlayfs 会保持）；已打开的下层 FD 继续读旧内容；硬链接复制后各自独立（本机本来就
   不能建硬链接）。overlay 挂载的上层里的 whiteout 在根的视图里看不见（真实 overlayfs 里是字符设备，可见）。

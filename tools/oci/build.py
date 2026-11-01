@@ -1,8 +1,10 @@
 """docker build, commit, diff, push (docs/OCI.md, R3).
 
 Each stage works in its own copy of the base rootfs. RUN executes under
-elfloader in that copy; every instruction that may change files is
-bracketed by two snapshots, and the difference is the instruction's layer.
+elfloader with that copy as the read-only lower and a fresh upper (R6):
+the upper is the instruction's layer and is then moved into the copy.
+COPY, ADD and WORKDIR write the copy directly and are bracketed by two
+snapshots (kept current across RUNs), whose difference is the layer.
 The cache key of an instruction is its parent's key, the instruction text
 after substitution and the content hash of COPY/ADD sources; a hit applies
 the cached layer instead of running the instruction."""
@@ -522,23 +524,33 @@ class Builder:
                     s.snapshot = None
                 s.history.append(cached['history'])
             else:
-                if s.snapshot is None:
+                if s.snapshot is None and ins.cmd != 'RUN':
                     s.snapshot = layers.scan(s.rootfs)
                 meta_before = json.loads(json.dumps(s.meta))
-                prepare()
-                after = layers.scan(s.rootfs)
-                changed, deleted = layers.changes(s.snapshot, after)
+                upper = prepare()
+                opaque = ()
+                if upper is not None:
+                    # R6: RUN wrote an upper over the stage rootfs; the upper
+                    # is the layer (already moved into the rootfs).
+                    changed, deleted, opaque = upper
+                    after = (layers.update(s.snapshot, s.rootfs, changed, deleted, opaque)
+                             if s.snapshot is not None else None)
+                else:
+                    if s.snapshot is None:
+                        s.snapshot = layers.scan(s.rootfs)
+                    after = layers.scan(s.rootfs)
+                    changed, deleted = layers.changes(s.snapshot, after)
                 # chown/chmod alone (R5) change a path for the layer too.
                 changed = sorted(set(changed) | {p for p in layers.owner_changes(meta_before, s.meta)
-                                                 if p in after})
+                                                 if os.path.lexists(str(s.rootfs) + p)})
                 created = store_mod.now()
                 history = {'created': created, 'created_by': self.created_by(ins),
                            'comment': 'elf-oci build'}
                 entry = {'history': history}
-                if changed or deleted:
+                if changed or deleted or opaque:
                     plain = self.work / f'layer-{key}.tar'
                     diff_id = layers.write_layer(s.rootfs, changed, deleted, plain, s.meta.get('modes'),
-                                                 s.meta.get('owners'))
+                                                 s.meta.get('owners'), opaque)
                     digest, size = layers.compress(self.st, plain)
                     plain.unlink()
                     layer = {'mediaType': images.OCI_LAYER_GZIP, 'digest': digest, 'size': size}
@@ -690,6 +702,12 @@ class Builder:
         def act():
             cdir = self.work / f'run-{s.index}-{self.step}'
             cdir.mkdir()
+            # R6: RUN writes an upper over the stage rootfs (the loader's
+            # --lower); the upper is the instruction's layer, no scans.
+            upper = cdir / 'upper'
+            upper.mkdir()
+            shutil.copystat(s.rootfs, upper)
+            view = (upper, s.rootfs)
             runspec.write_etc(cdir, 'buildkitsandbox')
             binds = [m['bind'](cdir) for m in mounts]
             env = [f'{k}={v}' for k, v in s.args.items()] + list(s.config.get('Env') or [])
@@ -699,21 +717,30 @@ class Builder:
             runspec.install_helper(s.rootfs)
             # An inherited WORKDIR the rootfs lacks is made, as Docker does.
             cwd = s.config.get('WorkingDir') or '/'
-            if cwd != '/' and not runspec.guest_resolve(s.rootfs, [(b[0], b[1]) for b in binds], cwd).is_dir():
-                runspec.make_guest_dirs(s.rootfs, [(b[0], b[1]) for b in binds], cwd)
+            bind_pairs = [(b[0], b[1]) for b in binds]
+            if cwd != '/' and not runspec.guest_resolve(view, bind_pairs, cwd).is_dir():
+                if any(cwd == d or cwd.startswith(d.rstrip('/') + '/') for _, d in bind_pairs):
+                    runspec.make_guest_dirs(view, bind_pairs, cwd)
+                else:
+                    union.mkdirs(upper, s.rootfs, cwd)
             # R5: chown/chmod in RUN are recorded and go into the layer.
-            owners_mod.from_meta(s.rootfs, s.meta, cdir / 'owners.db')
-            argv, _ = runspec.build(record, s.rootfs, cdir, isolate=self.isolate, command=command)
+            known = owners_mod.from_meta(s.rootfs, s.meta, cdir / 'owners.db')
+            argv, _ = runspec.build(record, upper, cdir, isolate=self.isolate, command=command,
+                                    lower=s.rootfs)
             proc = subprocess.run(argv, cwd=str(s.rootfs), stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL if self.quiet else None,
                                   env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
             (s.rootfs / runspec.HELPER).unlink(missing_ok=True)
+            result = None
             if not proc.returncode:
-                owners_mod.update_meta(s.meta, owners_mod.guest_view(s.rootfs, cdir / 'owners.db'))
+                owners_mod.update_meta(s.meta, union.owner_view(upper, s.rootfs, cdir / 'owners.db', known))
+                result = union.diff_entries(upper)
+                union.merge(upper, s.rootfs)
             store_mod.remove(cdir)
             if proc.returncode:
                 shown = json.dumps(command) if form else ' '.join(command[:-1]) + ' ' + command[-1]
                 raise BuildError(f"The command '{shown}' returned a non-zero code: {proc.returncode}")
+            return result
         return extra, act
 
     def mount_spec(self, text, s, ins):
