@@ -117,6 +117,15 @@ long union_getdents(int fd, void *buffer, unsigned long count, long ret);
  * next). 0 or -errno. */
 long union_lazy_fill(const struct union_view *u, const char *host);
 
+/* fd (a new one: openat2, whose lookup the kernel may do itself) refers
+ * to a layer image placeholder: filled. 0 or -errno. */
+long union_lazy_fd(int fd);
+
+/* After a successful fstat/newfstatat/statx: a layer image placeholder
+ * looks filled (atime the mtime, blocks of its size), so the mark that
+ * tells the cache protocol a file is unfilled never reaches the guest. */
+void union_lazy_stat(long number, const long *args);
+
 /* A whiteout or opaque marker name. */
 static inline bool union_hidden_name(const char *name)
 {

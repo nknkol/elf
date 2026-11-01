@@ -555,11 +555,14 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
   压缩与 chunk 布局的文件拒绝（EOPNOTSUPP）。
 - **按需展开**（`src/payload/include/lazy_layer.h` 写明协议，C 与 Python 各实现一份）：层的目录是缓存目录。合并视图查找时，
   在镜像层里找到的每个目录先展开一级：建出全部子项（子目录为空、未展开；符号链接；FIFO；普通文件为占位文件），完成后放
-  `.wh..elf-lazy` 标记；每个子项先以 `.wh..elf-lazy-tmp` 建好再改名，存在的名字一定完整；展开在目录的 flock 下进行。
+  `.wh..elf-lazy` 标记；每个子项先以 `.wh..elf-lazy-tmp` 建好再改名，存在的名字一定完整（FIFO 没有内容，直接以本名建：
+  HarmonyOS 的应用存储拒绝对 FIFO 改名、chmod 和改时间，模式取镜像的、受 umask 影响）；展开在目录的 flock 下进行。
   占位文件是稀疏文件，大小、模式、mtime 与镜像相同，atime 设为远未来的标记值（relatime 不会改写它；写不进标记的文件系统
   直接报错，不会把占位当内容）。内容在读之前**原地**填充（同一 inode，R5 按 inode 记的属主不受影响）：只读 open、exec
-  （含解释器、PT_INTERP、库）、复制上来之前。stat 直接由内核回答（大小、模式、时间都对；st_blocks 在填充前为 0）。
-  设备与 socket 跳过（与展开 tar 相同），存储拒绝的 FIFO 也跳过，硬链接展开成各自的文件。
+  （含解释器、PT_INTERP、库）、复制上来之前，以及 openat2 返回的新 fd（`RESOLVE_BENEATH` 的查找由内核做，或在其他内核上
+  直接放行：按 fd 自身的路径补填）。stat 由内核回答、不触发填充，返回前把占位标记改掉：atime 显示为 mtime，st_blocks 按
+  大小计（fstat/newfstatat/statx），guest 看不到标记。设备与 socket 跳过（与展开 tar 相同），存储拒绝 FIFO 时也跳过，
+  硬链接展开成各自的文件。
 - **路径安全**：缓存内逐级 `O_NOFOLLOW` 打开，镜像里的符号链接不会把展开引到缓存之外；名字含 `/`、`.`、`..` 或越界的
   目录块都按损坏镜像处理。
 - **loader**：`--lower CACHE --lower-image IMAGE`（可与普通 `--lower` 混用，共 8 层），子 loader 收到同样的参数。首个程序、
@@ -575,14 +578,16 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
   `commit` 的新 rootfs、只读与原地容器）从 blob 重新展开；`rmi` 与 `prune` 删除不再被引用的层镜像。
 - **验收**：`test/oci/erofs_check.py`（写入与读回、层 tar 的 whiteout/硬链接/setuid/设备/属主、缓存展开与原地填充、
   fsck.erofs 与 mkfs.erofs 互验）；`test/proot/test_union.py` 全部步骤再以层镜像作下层跑一遍（两种构建 × 常规与
-  `--isolate`：读过的文件已填充、其余仍是占位，镜像文件不变），并加上“执行下层里还没运行过的程序”一步；`make check-oci`
+  `--isolate`：读过的文件已填充、其余仍是占位，镜像文件不变；stat 占位文件看到填充后的时间与块数且不触发填充；openat2
+  `RESOLVE_BENEATH` 打开的文件已填充（HarmonyOS 上常规构建对 openat2 报 ENOSYS）；镜像里的 FIFO 在缓存里），并加上
+  “执行下层里还没运行过的程序”一步；`make check-oci`
   127→138（12 层镜像转成 7 个层镜像加一个底部链镜像，`--cow --owners` 与复制式容器看到的完全相同，常规与 `--isolate`；
   按需展开、写入进上层、diff、cp、commit、`--prune` 后 `--cow` 照常而复制式容器重新展开、`rmi` 回收层镜像）。
 - **真实镜像**（设备默认存储）：python:3.13-slim、node:lts-alpine、debian:bookworm-slim 三个镜像共 8 个层镜像，转换 11 s；
   `--cow` 运行 python 离线负载 4.4–4.7 s（`--isolate` 8.2 s），node、dpkg 正常；python 最大的 166 MB 层运行后缓存展开 144 MB
   （解释器读了大部分标准库），其余层只展开用到的部分（node 层 96 MB 中 4 MB）。
-- **限制**：占位文件的 atime 显示为标记值、st_blocks 为 0；guest 的 openat2 `RESOLVE_BENEATH` 不经合并视图，可能得到未填充的
-  占位文件；层镜像不放大小写不敏感的存储（缓存要区分大小写）。
+- **限制**：缓存要区分大小写，和展开的 rootfs 一样由 store 打开时的检查保证（大小写不敏感的位置直接拒绝）；HarmonyOS 应用
+  存储上 FIFO 的模式受 umask 影响、时间为展开时刻（存储拒绝事后修改）。
 
 ### 与设计的差别
 

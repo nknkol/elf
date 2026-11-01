@@ -443,6 +443,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-11-01 Docker/OCI R7（[OCI](OCI.md)“R7 实现记录”）：`docker compose`（`tools/oci/compose.py`，YAML 子集解析器 `yamlite.py`）：多文件与 override、extends、`.env` 与变量插值、profiles，服务建成带 `com.docker.compose.*` 标签的容器，与宿主共用网络（服务名在 /etc/hosts 指向 127.0.0.1），depends_on 的 healthy/completed 条件由 compose 执行检查，up（前台带前缀输出、`--exit-code-from`）、down、ps、logs、exec、run、build、config 等；配置哈希不变的服务不重建。`docker engine`（`engine.py`）：UNIX 套接字（0600）上的 Engine API 1.43 子集，images、containers（含 logs/attach 多路复用帧、wait、archive）、exec（劫持连接）、volumes、networks（仅 host），绑进 `--isolate` 容器默认拒绝。`make check-oci` 99→121 项全部通过；docker-py 7.2.0 对引擎跑通 run/exec_run/archive/logs/wait/volumes。
 2026-11-01 Docker/OCI build 写上层（[OCI](OCI.md)“R6 实现记录”的 build 一节）：`RUN` 以工作 rootfs 为下层、新建上层运行，上层直接成为这一层（whiteout、不透明目录），再改名移入工作 rootfs；不再前后扫描。属主记录按 inode→路径表命名，不遍历下层。`make check-oci` 121→127。
 2026-11-01 Docker/OCI R6 层镜像（[OCI](OCI.md)“R6 实现记录”的层镜像一节）：每层一个未压缩 erofs 文件（`tools/oci/erofs.py` 写入与读取），loader `--lower CACHE --lower-image IMAGE` 在合并视图查找时按目录展开缓存（`src/payload/logic/lazy_layer.c`，payload 与 loader 共用；隔离模式由 broker 的 `BROKER_LAZY_PATH` 展开），普通文件为占位文件、读之前原地填充；payload ABI 25。`docker image erofs [--prune]`，`--cow` 容器以层镜像为下层，层按 diff_id 共享。`make check-oci` 127→138，`test_union.py` 加层镜像下层的四种组合。
+2026-11-01 Docker/OCI R6 层镜像的限制补齐：stat 结果里的占位标记在返回前改掉（atime 显示为 mtime、st_blocks 按大小计，不触发填充）；openat2 返回的新 fd 指向占位文件时按 fd 路径补填（`RESOLVE_BENEATH` 由内核查找的情形，两种构建、常规与 `--isolate`）；FIFO 直接以本名建，HarmonyOS 应用存储上也能展开。`test_union.py` 加上这三项验收。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -502,4 +503,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 
 1. 实际 agent/brew 工具链在 `--isolate` 下的端到端验证（第 6 项）。
 2. 带回 FD 的隔离调用（open）是否值得再优化（第 1 项）。
-3. Docker/OCI：R1–R7 已完成（R6 不含层镜像；R7 的 Engine API 是 SDK 常用的子集，见 [OCI](OCI.md)）。
+3. Docker/OCI：R1–R7 已完成（R6 含层镜像，未做容器内 `mount -o loop`；R7 的 Engine API 是 SDK 常用的子集，见 [OCI](OCI.md)）。

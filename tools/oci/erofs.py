@@ -585,15 +585,19 @@ def expand(image, cache, rel=''):
                 elif kind == stat.S_IFLNK:
                     os.symlink(img.read(c), TMP, dir_fd=fd)
                 elif kind == stat.S_IFIFO:
-                    # Best effort: storage that refuses FIFOs skips them.
+                    # No content to complete, so made at its own name (some
+                    # storage, HarmonyOS app storage, refuses to rename one).
+                    # (HarmonyOS refuses any later change of a FIFO: the
+                    # mode is then the image's under the umask.)
                     try:
-                        os.mkfifo(TMP, perm & 0o777, dir_fd=fd)
-                        os.rename(TMP, child, src_dir_fd=fd, dst_dir_fd=fd)
+                        os.mkfifo(child, perm & 0o777, dir_fd=fd)
                     except OSError:
-                        try:
-                            os.unlink(TMP, dir_fd=fd)
-                        except OSError:
-                            pass
+                        continue   # storage that refuses FIFOs: skipped
+                    try:
+                        os.chmod(child, perm, dir_fd=fd)
+                        os.utime(child, ns=_times(c), dir_fd=fd, follow_symlinks=False)
+                    except OSError:
+                        pass
                     continue
                 elif kind == stat.S_IFREG:
                     f = os.open(TMP, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)

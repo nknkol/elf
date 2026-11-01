@@ -139,9 +139,20 @@ static long dispatch_here(long sys_no, pt_regs *regs)
         long again[6] = {a[0], a[1], a[2], a[3], a[4], a[5]};
         ret = DISPATCH(sys_no, again);
     }
+    /* R6: an openat2 lookup may be the kernel's own (RESOLVE_BENEATH, or
+     * passed through): a layer image placeholder is filled all the same. */
+    if (sys_no == __NR_openat2 && ret >= 0 && union_enabled()) {
+        long fill = union_lazy_fd((int)ret);
+        if (fill < 0) {
+            long close_args[6] = {ret, 0, 0, 0, 0, 0};
+            DISPATCH(__NR_close, close_args);
+            ret = fill;
+        }
+    }
     if (!ret) {
         fake_ids_stat_owner(sys_no, a);
         owners_stat(sys_no, a); /* R5: recorded owners and modes */
+        union_lazy_stat(sys_no, a); /* R6: layer image placeholders */
     }
     /* struct utsname: six 65-byte fields; sysname, nodename, release. */
     if (!ret && sys_no == __NR_uname && a[0]) {

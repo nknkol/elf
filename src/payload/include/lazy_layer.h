@@ -10,9 +10,10 @@
  *    directory (empty, unexpanded; mode | 0700 as copy-up makes it), a
  *    symlink, a FIFO (skipped where the storage refuses it), or a regular
  *    file. Devices and sockets are skipped, as unpacking skips them; hard
- *    links become separate files. Each child
- *    is made under LAZY_TMP and renamed into place, so a name that exists
- *    is complete.
+ *    links become separate files. Each child but a FIFO is made under
+ *    LAZY_TMP and renamed into place, so a name that exists is complete (a
+ *    FIFO has no content; it is made at its name, since some storage
+ *    refuses to rename one).
  *  - A regular file with content starts as a placeholder: sparse, with the
  *    image's size, mode and mtime, and an atime of LAZY_ATIME (far in the
  *    future, which relatime never replaces). Before its content is read it

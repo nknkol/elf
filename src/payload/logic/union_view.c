@@ -240,6 +240,74 @@ long union_lazy_fill(const struct union_view *u, const char *host)
     return lazy_call(u, i, host, 1);
 }
 
+static bool any_image(void)
+{
+    static int images = -1;
+    if (images < 0) {
+        int any = 0;
+        for (int i = 0; i < CONFIG_MAX_LOWERS; i++)
+            if (g_payload_config.lower_image[i][0]) any = 1;
+        images = any;
+    }
+    return images;
+}
+
+extern long raw_syscall(long, long, long, long, long, long, long);
+
+static long fd_host(int fd, char *host);
+
+long union_lazy_fd(int fd)
+{
+    if (!any_image()) return 0;
+    struct stat st;
+    if (raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) < 0 || (st.st_mode & S_IFMT_) != S_IFREG_ ||
+        !lazy_placeholder_times((long)st.st_atime, (long)st.st_atime_nsec))
+        return 0;
+    char host[PATH_MAX];
+    long rc = fd_host(fd, host);
+    if (rc < 0) return rc;
+    struct union_view u;
+    return union_root(&u) ? union_lazy_fill(&u, host) : 0;
+}
+
+void union_lazy_stat(long number, const long *a)
+{
+    if (!any_image()) return;
+    if (number == __NR_fstat || number == __NR_newfstatat) {
+        struct stat *st = (struct stat *)(number == __NR_fstat ? a[1] : a[2]);
+        if (!st || (st->st_mode & S_IFMT_) != S_IFREG_ ||
+            !lazy_placeholder_times((long)st->st_atime, (long)st->st_atime_nsec))
+            return;
+        st->st_atime = st->st_mtime;
+        st->st_atime_nsec = st->st_mtime_nsec;
+        st->st_blocks = (long)(((uint64_t)st->st_size + 4095) / 4096 * 8);
+    } else if (number == __NR_statx && a[4]) {
+        /* struct statx: mode at 28, size 40, blocks 48, atime 64, mtime 112
+         * (a timestamp: 64-bit seconds, 32-bit nanoseconds). */
+        unsigned char *b = (unsigned char *)a[4];
+        uint32_t mask, nsec;
+        uint16_t mode;
+        int64_t sec;
+        uint64_t size, blocks;
+        memcpy(&mask, b, 4);
+        memcpy(&mode, b + 28, 2);
+        memcpy(&sec, b + 64, 8);
+        memcpy(&nsec, b + 72, 4);
+        if (!(mask & 0x20 /* STATX_ATIME */) || (mode & S_IFMT_) != S_IFREG_ ||
+            !lazy_placeholder_times((long)sec, (long)nsec))
+            return;
+        if (mask & 0x40 /* STATX_MTIME */) {
+            memcpy(b + 64, b + 112, 8);
+            memcpy(b + 72, b + 120, 4);
+        }
+        if (mask & 0x400 /* STATX_BLOCKS */) {
+            memcpy(&size, b + 40, 8);
+            blocks = (size + 4095) / 4096 * 8;
+            memcpy(b + 48, &blocks, 8);
+        }
+    }
+}
+
 /* The walk of rel ("" for the top, else "/a/b"). below: also find out
  * whether a layer other than the upper has the final name. */
 static int walk(const struct union_view *u, const char *rel, struct union_hit *hit,

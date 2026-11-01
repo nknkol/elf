@@ -340,10 +340,13 @@ static long make_child(struct work *w, long dir, const char *name, const struct 
         if (rc < 0) return rc;
         break;
     case S_IFIFO_:
-        /* Best effort: storage that refuses FIFOs skips them. */
-        rc = sys(__NR_mknodat, dir, (long)LAZY_TMP, S_IFIFO_ | (mode & 0777), 0, 0, 0);
-        if (rc >= 0) rc = sys(__NR_renameat2, dir, (long)LAZY_TMP, dir, (long)name, 0, 0);
-        if (rc < 0) sys(__NR_unlinkat, dir, (long)LAZY_TMP, 0, 0, 0, 0);
+        /* No content to complete, so made at its own name (some storage,
+         * HarmonyOS app storage, refuses to rename one); storage that
+         * refuses FIFOs skips them. HarmonyOS refuses any later change of
+         * a FIFO: the mode is then the image's under the umask. */
+        if (sys(__NR_mknodat, dir, (long)name, S_IFIFO_ | (mode & 0777), 0, 0, 0) < 0) return 0;
+        sys(__NR_fchmodat, dir, (long)name, mode, 0, 0, 0);
+        sys(__NR_utimensat, dir, (long)name, (long)t, AT_SYMLINK_NOFOLLOW_, 0, 0);
         return 0;
     case S_IFREG_: {
         long fd = sys(__NR_openat, dir, (long)LAZY_TMP, O_WRONLY_ | O_CREAT_ | O_EXCL_ | O_CLOEXEC_, 0600, 0, 0);

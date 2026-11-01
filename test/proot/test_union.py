@@ -13,9 +13,13 @@ reads as its guest path and relative creation lands in the upper; a later
 run sees the same view. The lower tree is byte-for-byte unchanged. Both
 builds, plain and with --isolate, with the lower as a directory and as a
 layer image (erofs, expanded on demand into a cache: what is read is
-filled, the rest stays placeholders; the image file is unchanged)."""
+filled, the rest stays placeholders; the image file is unchanged; stat
+of a placeholder shows the times and blocks of a filled file and leaves it
+unfilled; a file opened by openat2 RESOLVE_BENEATH is filled; a FIFO of the
+image is in the cache)."""
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -88,7 +92,14 @@ with tempfile.TemporaryDirectory(prefix='union-', dir=lib.mode_capable()) as tmp
     # expanded on demand into a cache (a fresh one per run: the payload
     # expands it, or with --isolate the broker).
     image = Path(tmp, 'alpine.erofs')
-    erofs.from_dir(LOWER, image)
+    w = erofs.Writer(image)
+    try:
+        w.add_dir(LOWER)
+        w.put(['srv', 'pipe'], erofs.Node(stat.S_IFIFO | 0o640))
+        w.finish()
+    finally:
+        w.close()
+    probe = lib.build_probe(Path(__file__).with_name('beneath_probe.c'), Path(tmp, 'probe'))
     image_digest = hashlib.sha256(image.read_bytes()).hexdigest()
     runs = [(s, l, i, k) for s, l in lib.loaders() for i in ([], ['--isolate']) for k in ('dir', 'image')]
     for suffix, loader, isolate, kind in runs:
@@ -134,5 +145,38 @@ with tempfile.TemporaryDirectory(prefix='union-', dir=lib.mode_capable()) as tmp
             assert held and not erofs.placeholder(os.lstat(cache / 'bin/busybox')), \
                 (what, 'files read are filled, the others stay placeholders', len(held))
             assert (cache / 'bin/busybox').read_bytes() == (LOWER / 'bin/busybox').read_bytes(), what
+            # Placeholders the steps left: stat hides the mark, openat2 fills.
+            rels = sorted('/' + os.path.relpath(h, cache) for h in held
+                          if not (upper / os.path.relpath(h, cache)).exists())
+            def visible(rel):
+                parts = rel.strip('/').split('/')
+                for i in range(len(parts)):
+                    d = upper.joinpath(*parts[:i])
+                    if (d / ('.wh.' + parts[i])).exists() or (d / '.wh..wh..opq').exists():
+                        return False
+                return not rel.startswith('/dev/') and all(c.isalnum() or c in '/._-' for c in rel)
+            rels = [r for r in rels if visible(r)]
+            first, second = rels[0], rels[-1]
+            p = run(f'stat -c "%X %Y %b" {first}')
+            fields = p.stdout.split()
+            assert p.returncode == 0 and len(fields) == 3 and fields[0] == fields[1] and int(fields[2]) > 0, \
+                (what, 'stat of a placeholder', first, p.stdout, p.stderr[-2000:])
+            assert erofs.placeholder(os.lstat(cache / first.lstrip('/'))), (what, 'stat fills nothing', first)
+            shutil.copy2(probe, upper / 'probe')
+            parent, name = second.rsplit('/', 1)
+            p = run(f'/probe {parent or "/"} {name}')
+            # (The plain build on HarmonyOS reports openat2 as not
+            # implemented; the guarded build emulates RESOLVE_BENEATH.)
+            unsupported = p.stdout == 'beneath=-38\n' and suffix == '' and os.path.isdir('/data/storage/el2')
+            assert p.returncode == 0 and (p.stdout == 'beneath=0\n' or unsupported), \
+                (what, 'openat2 beneath', second, p.stdout, p.stderr[-2000:])
+            if not unsupported:
+                assert not erofs.placeholder(os.lstat(cache / second.lstrip('/'))) and \
+                    (cache / second.lstrip('/')).read_bytes() == (LOWER / second.lstrip('/')).read_bytes(), \
+                    (what, 'openat2 beneath fills', second)
+            os.unlink(upper / 'probe')
+            p = run('stat -c "%F %a" /srv/pipe')
+            assert p.stdout == 'fifo 640\n' and stat.S_ISFIFO(os.lstat(cache / 'srv/pipe').st_mode), \
+                (what, 'a FIFO of the image', p.stdout, p.stderr[-2000:])
         print('PASS: copy-on-write root (copy-up, whiteouts, opaque, EXDEV, listings, cwd):',
               loader.name, *isolate, kind)
