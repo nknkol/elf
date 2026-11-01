@@ -1,8 +1,8 @@
 # Docker/OCI 镜像支持
 
-**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主、R6 写时复制已实现（`tools/oci/docker`），在
-HarmonyOS 真机上通过验收（见文末“R1–R3 实现记录”“R4–R5 实现记录”“R6 实现记录”）；R6 中的层镜像（erofs/squashfs）与
-`mount -o loop` 没有做（理由见 R6 实现记录）；R7 仍是设计。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
+**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主、R6 写时复制、R7 compose 与 Engine API
+已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收（见文末各“实现记录”）；R6 中的层镜像（erofs/squashfs）与
+`mount -o loop` 没有做（理由见 R6 实现记录）。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
 
 ## 目标
 
@@ -76,6 +76,8 @@ docker run -d --name web --restart unless-stopped -v web-data:/data myapp
 docker logs -f web; docker exec -it web sh; docker stop web
 docker build -t myapp --build-arg VERSION=2 --secret id=npm,src=$HOME/.npmrc .
 docker save -o myapp.tar myapp; docker load -i myapp.tar
+docker compose up -d; docker compose logs -f; docker compose down -v
+docker engine &                              # Engine API: DOCKER_HOST=unix://$ELF_OCI_HOME/docker.sock
 ```
 
 环境变量：`ELF_OCI_HOME`（存储根）、`ELF_OCI_MIRROR`（Docker Hub 镜像站，如 `https://mirror.example`）、
@@ -98,6 +100,10 @@ tools/oci/
   runtime.py    容器生命周期：create/start/stop/kill/wait/rm、监视进程、exec、cp、logs
   layers.py     快照、差异、层 tar（build/commit/diff 共用）
   build.py      R3：Dockerfile 解析与执行、缓存、commit、diff、push
+  union.py      R6：--cow 容器的合并视图（diff、commit、cp、用户解析）
+  compose.py    R7：docker compose
+  yamlite.py    R7：compose 文件用到的 YAML 子集（设备上的 Python 没有 PyYAML）
+  engine.py     R7：Engine API（UNIX 套接字上的 HTTP 服务）
   fmt.py        表格、时间、--format 模板子集
 ```
 
@@ -374,7 +380,7 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
   属主天然随层保存。
 - **代价**：查找最多翻倍；大文件首次打开要展开；首次写要复制整个文件。按容器开启，复制式容器继续可用。
 
-## R7 compose 与 Engine API（按需）
+## R7 compose 与 Engine API（实现见文末“R7 实现记录”）
 
 - **compose**：解析 `compose.yaml` 与 `.env`（`${VAR}` 替换），按依赖顺序调用 R2 的命令。只能共用宿主网络：服务之间以
   `localhost:端口` 互访，服务名解析写进各容器的 `/etc/hosts` 指向 127.0.0.1；端口冲突的服务不能同时运行。
@@ -537,4 +543,56 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
 - **inode**：复制上来后 st_ino 改变（overlayfs 会保持）；已打开的下层 FD 继续读旧内容；硬链接复制后各自独立（本机本来就
   不能建硬链接）。overlay 挂载的上层里的 whiteout 在根的视图里看不见（真实 overlayfs 里是字符设备，可见）。
 - **guarded 的安全遍历**：路径落在下层时不经 mount 根的逐级 O_NOFOLLOW 遍历（下层只读，guest 不能在里面放符号链接）。
+
+## R7 实现记录（2026-11-01，HarmonyOS 真机）
+
+验收：`make check-oci` 99→121 项（compose 9 项、Engine API 13 项）全部通过；另用 docker-py 7.2.0（官方 Python SDK）
+对 `docker engine` 跑通 `containers.run`（前台取输出、非零退出码的 ContainerError）、后台运行、`exec_run`（含
+stdout/stderr 分流）、`put_archive`/`get_archive`、按标签过滤列表、流式 logs、wait、stop、remove、镜像列表、卷。
+
+### compose（`tools/oci/compose.py`）
+
+- **文件**：`compose.yaml`/`compose.yml`/`docker-compose.y(a)ml`，同目录的 override 文件，多个 `-f`（合并：映射合并，
+  ports/volumes 等列表追加，其余替换），`extends`。YAML 由 `yamlite.py` 解析（块映射与序列、引号与块标量、行内集合、
+  锚点/别名/`<<`；按 YAML 1.2，`yes` 是字符串，`0755` 按八进制），与 PyYAML 对拍过。
+- **变量**：`.env`（或 `--env-file`）、环境变量；`${VAR}`、`:-`、`-`、`:?`、`?`、`:+`、`+`、`$$`。项目名取 `-p`、
+  `COMPOSE_PROJECT_NAME`、`name`、目录名（规范为小写）。profiles（`--profile`、`COMPOSE_PROFILES`）。
+- **服务**：每个服务经与 `docker create` 相同的路径建成容器 `{项目}-{服务}-1`，带 `com.docker.compose.*` 标签（项目、
+  服务、编号、配置哈希）；由监视进程运行，与 `run -d` 相同。支持 image、build（context、dockerfile、
+  dockerfile_inline、args、target、labels、secrets）、command/entrypoint（字符串按 shell 规则拆分）、environment、
+  env_file、volumes（短/长写法；命名卷是 `{项目}_{名字}`，external 与 name 照规范）、tmpfs、ports、working_dir、user、
+  hostname、container_name、restart、labels、extra_hosts、dns、stop_signal、stop_grace_period、read_only、tty、
+  stdin_open、secrets 与 configs（file、environment、content）、healthcheck，以及扩展 `x-elf: {isolate, cow, owners}`。
+  需要命名空间或 cgroup 的键（networks、cap_add、mem_limit、deploy、init……）警告后忽略。
+- **网络**：与宿主共用。每个容器的 `/etc/hosts` 把所有服务名（和 container_name）指向 127.0.0.1，所以
+  `http://db:端口/` 可用；同一端口只能有一个服务监听。
+- **依赖**：按 depends_on 拓扑排序（有环报错）；`service_healthy` 由 compose 自己按 healthcheck（服务的或镜像的）
+  在容器里反复执行检查命令，`service_completed_successfully` 等待退出码 0。
+- **命令**：up（`-d`、`--build`、`--force-recreate`、`--no-recreate`、`--no-deps`、`--remove-orphans`、`--wait`、
+  前台模式带前缀输出、`--abort-on-container-exit`、`--exit-code-from`，Ctrl-C 停止）、create、down（`-v`、`--rmi`）、
+  ps、logs（`-f`、`--tail`）、exec、run（`--rm`、`--no-deps`、一次性容器）、start/stop/restart/kill/rm、build、
+  pull、config（`--services`、`--format json`）、images、port、top、ls、version。配置哈希不变的服务 up 时保留，改了才重建。
+- **差别**：没有项目网络、网络别名与服务间隔离；`deploy.replicas`/`scale` 只建一个；healthcheck 只在 compose 等待
+  依赖或 `--wait` 时执行（容器没有持续的健康状态，ps 不显示 healthy）。
+
+### Engine API（`tools/oci/engine.py`）
+
+- `docker engine [-H unix:///path]`：ThreadingUnixStreamServer 上的 HTTP/1.1，默认 `$ELF_OCI_HOME/docker.sock`，
+  0600；只接受 unix://（TCP 会把 API 暴露给网络）。SIGTERM/SIGINT 退出并删除套接字。路径前缀 `/v1.xx` 都接受，报告
+  API 1.43。
+- **接口**：`_ping`、`version`、`info`；images（json、`{name}/json`、create 即 pull、tag、DELETE）；containers
+  （create、json 带 all/filters(label、name、id、status、ancestor)/limit、`{id}/json`、start、stop、restart、kill、
+  wait（condition）、DELETE（force、v）、rename、logs（tail、follow）、attach、top、resize、archive 的 GET/HEAD/PUT）；
+  exec（create、start（Detach、Tty、AttachStdin）、json、resize）；volumes（列表、create、inspect、DELETE）；networks
+  （只有 host 与 bridge 两个名字，都是宿主网络；create 返回 501）。
+- **流**：没有 TTY 时用多路复用帧（8 字节头，stdout 1、stderr 2）；客户端请求 `Connection: Upgrade` 时以 101 劫持连接
+  （attach、exec start），否则以关闭连接结束响应。容器日志里 stdout 与 stderr 已合并，logs 都作为 stdout 帧；exec 的
+  两路分开。
+- **创建**：JSON 翻译成 `docker create` 的选项后走同一路径（校验、镜像配置、runtime.create），Cmd/Entrypoint 原样使用；
+  PortBindings 的 HostPort 为空或等于容器端口（发布为端口本身，inspect 的 NetworkSettings.Ports 照此报告），不同则 400；
+  Privileged 400；CapAdd、Memory 等进 Warnings；HostConfig 的 `Isolate`、`Cow`、`Owners` 是 ELF 的扩展。
+- **安全**：把引擎套接字（默认路径、`DOCKER_HOST`、正在服务的路径）绑进 `--isolate` 容器会被拒绝（API 与命令行都是），
+  除非设 `ELF_OCI_ALLOW_ENGINE_SOCKET=1`。不加 `--isolate` 的容器本来就以应用身份运行，绑进去不额外扩权。
+- **差别**：没有 build、commit、events、stats、export/import、swarm、plugins、networks 的创建；attach 只有输出（没有
+  向容器主进程写 stdin）；exec 实例只在引擎进程内存里。
 

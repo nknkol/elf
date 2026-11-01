@@ -697,6 +697,10 @@ class Builder:
                                  'Env': env, 'WorkingDir': s.config.get('WorkingDir') or '/'},
                       'HostConfig': {'Binds': binds, 'Owners': True}}
             runspec.install_helper(s.rootfs)
+            # An inherited WORKDIR the rootfs lacks is made, as Docker does.
+            cwd = s.config.get('WorkingDir') or '/'
+            if cwd != '/' and not runspec.guest_resolve(s.rootfs, [(b[0], b[1]) for b in binds], cwd).is_dir():
+                runspec.make_guest_dirs(s.rootfs, [(b[0], b[1]) for b in binds], cwd)
             # R5: chown/chmod in RUN are recorded and go into the layer.
             owners_mod.from_meta(s.rootfs, s.meta, cdir / 'owners.db')
             argv, _ = runspec.build(record, s.rootfs, cdir, isolate=self.isolate, command=command)

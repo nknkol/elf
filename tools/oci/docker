@@ -478,6 +478,10 @@ def new_record(st, a, image_id, image_text):
         raise Fail('--read-only and --in-place exclude each other')
     if a.cow and (a.read_only or a.in_place):
         raise Fail('--cow excludes --read-only and --in-place')
+    if a.isolate:
+        import engine
+        engine.socket_guard(st, [v.split(':')[0] for v in a.volume] +
+                            [parse_mount(m)[1] or '' for m in a.mount], True)
     for spec in a.publish:
         ports = spec.split('/')[0].split(':')
         if len(ports) < 2 or ports[-1] != ports[-2]:
@@ -1183,6 +1187,22 @@ COMMANDS['image'] = group('image', {
 COMMANDS['builder'] = group('builder', {'prune': lambda st, a: cmd_prune(st, 'builder', a),
                                         'build': COMMANDS['build']})
 COMMANDS['buildx'] = group('buildx', {'build': COMMANDS['build']})
+
+
+def cmd_compose(st, args):
+    import compose
+    return compose.main(st, args)
+
+
+COMMANDS['compose'] = cmd_compose
+
+
+def cmd_engine(st, args):
+    import engine
+    return engine.main(st, args)
+
+
+COMMANDS['engine'] = cmd_engine
 
 
 def main(argv):

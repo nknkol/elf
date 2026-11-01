@@ -17,12 +17,14 @@ Expected outcomes:
   policy, wait, cp, named volumes, --read-only, --in-place, rm, prune.
 Needs a case-sensitive directory: ELF_OCI_TEST_HOME, default
 /data/storage/el2/base/files/elf-oci-test (else a temporary directory)."""
+import base64
 import gzip
 import hashlib
 import http.server
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +32,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -524,6 +527,230 @@ def cow_tests(home, work):
     check(p.returncode == 125, '--cow with --read-only is refused', p.stderr)
 
 
+def compose_tests(home, work):
+    """R7: docker compose (docs/OCI.md)."""
+    proj = work / 'compose-proj'
+    (proj / 'web').mkdir(parents=True)
+    (proj / 'web' / 'Dockerfile').write_text('FROM test/alpine:1\nUSER root\nRUN echo built > /built\n')
+    (proj / 'token.txt').write_text('tok\n')
+    (proj / '.env').write_text('GREETING=hello # a comment\nPORT=18431\n')
+    # The test image's entrypoint is ["/bin/sh", "-c"]: commands are one string.
+    (proj / 'compose.yaml').write_text("""
+name: ElfC
+x-common: &common
+  image: test/alpine:1
+  user: root
+services:
+  db:
+    <<: *common
+    command: ["sleep 1; touch /tmp/ready; while true; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\ndb-page\\n' | nc -l -p ${PORT}; done"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 1s
+      retries: 20
+  web:
+    build: ./web
+    user: root
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      - GREETING=${GREETING:-unset}
+    secrets: [token]
+    command: ["cat /built /run/secrets/token; wget -qO- http://db:${PORT}/; echo $$GREETING; exec sleep 60"]
+  init:
+    <<: *common
+    command: ["echo seeded > /data/seed"]
+    volumes: [data:/data]
+  after:
+    <<: *common
+    depends_on:
+      init: {condition: service_completed_successfully}
+    command: ["cat /data/seed"]
+    volumes: [data:/data]
+  tool:
+    <<: *common
+    profiles: [tools]
+volumes:
+  data:
+secrets:
+  token:
+    file: ./token.txt
+""")
+
+    def compose(*args, timeout=300):
+        return docker(home, 'compose', '--project-directory', str(proj), '-f', str(proj / 'compose.yaml'),
+                      *args, timeout=timeout)
+    p = compose('up', '-d')
+    check(p.returncode == 0, 'compose: up -d (build, healthy and completed dependencies)', p.stdout + p.stderr)
+    time.sleep(2)
+    p = compose('ps', '-a', '--format', '{{.Service}} {{.State}}')
+    states = dict(line.split() for line in p.stdout.splitlines() if line.strip())
+    check(states == {'db': 'running', 'web': 'running', 'init': 'exited', 'after': 'exited'},
+          'compose: ps (the tools profile stays off)', p.stdout + p.stderr)
+    p = compose('logs', 'web', 'after')
+    shown = [re.sub(r' +\| ', ' | ', line) for line in p.stdout.splitlines()]
+    check({'elfc-web-1 | built', 'elfc-web-1 | tok', 'elfc-web-1 | db-page', 'elfc-web-1 | hello',
+           'elfc-after-1 | seeded'} <= set(shown),
+          'compose: build, secrets, .env interpolation, a service reached by name, named volume',
+          p.stdout + p.stderr)
+    p = compose('exec', '-T', 'db', 'cat', '/tmp/ready')
+    check(p.returncode == 0, 'compose: exec', p.stderr)
+    p = compose('run', '--rm', '-T', '--no-deps', 'after', 'cat /data/seed; exit 4')
+    check(p.returncode == 4 and p.stdout == 'seeded\n', 'compose: run --rm (exit status)', p.stdout + p.stderr)
+    before = docker(home, 'inspect', '-f', '{{.Id}}', 'elfc-db-1').stdout
+    p = compose('up', '-d', 'db')
+    check(p.returncode == 0 and docker(home, 'inspect', '-f', '{{.Id}}', 'elfc-db-1').stdout == before,
+          'compose: up keeps an unchanged service', p.stderr)
+    (proj / 'compose.override.yaml').write_text('services:\n  db:\n    environment: [CHANGED=1]\n')
+    p = docker(home, 'compose', '--project-directory', str(proj), 'up', '-d', 'db', timeout=300)
+    check(p.returncode == 0 and docker(home, 'inspect', '-f', '{{.Id}}', 'elfc-db-1').stdout != before and
+          'Recreate' in p.stderr, 'compose: a changed service is recreated (override file)', p.stderr)
+    (proj / 'compose.override.yaml').unlink()
+    p = compose('down', '-v')
+    p2 = docker(home, 'ps', '-a', '--filter', 'label=com.docker.compose.project=elfc', '-q')
+    check(p.returncode == 0 and not p2.stdout.strip() and not (home / 'volumes' / 'elfc_data').exists(),
+          'compose: down -v', p.stderr + p2.stdout)
+    # Foreground: prefixed output, the exit code of one service.
+    fg = work / 'compose-fg'
+    fg.mkdir()
+    (fg / 'docker-compose.yml').write_text(
+        'services:\n  a:\n    image: test/alpine:1\n    command: ["echo from-a; sleep 30"]\n'
+        '  b:\n    image: test/alpine:1\n    command: ["sleep 1; echo from-b; exit 3"]\n')
+    p = docker(home, 'compose', '--project-directory', str(fg), 'up', '--exit-code-from', 'b', timeout=120)
+    check(p.returncode == 3 and 'compose-fg-a-1  | from-a' in p.stdout and 'compose-fg-b-1  | from-b' in p.stdout,
+          'compose: foreground up, prefixed output, --exit-code-from', p.stdout + p.stderr)
+    docker(home, 'compose', '--project-directory', str(fg), 'down')
+
+
+def engine_tests(home, work):
+    """R7: the Engine API on a UNIX socket (docs/OCI.md)."""
+    import http.client
+    import socket as socket_mod
+    sock = work / 'engine.sock'
+    server = subprocess.Popen([sys.executable, '-B', str(DOCKER), 'engine', '-H', f'unix://{sock}'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                              env=dict(os.environ, ELF_OCI_HOME=str(home)))
+    for _ in range(100):
+        if sock.exists():
+            break
+        time.sleep(0.1)
+
+    class Conn(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket_mod.socket(socket_mod.AF_UNIX)
+            self.sock.connect(str(sock))
+
+    def api(method, url, body=None, raw=None, headers=None):
+        c = Conn('localhost', timeout=120)
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        hdrs = dict(headers or {})
+        if body is not None:
+            hdrs['Content-Type'] = 'application/json'
+        c.request(method, '/v1.43' + url, body=data, headers=hdrs)
+        r = c.getresponse()
+        out = r.read()
+        c.close()
+        return r.status, out, r
+
+    def js(out):
+        return json.loads(out) if out.strip() else None
+
+    def demux(data):
+        streams = {1: b'', 2: b''}
+        while len(data) >= 8:
+            n = int.from_bytes(data[4:8], 'big')
+            streams[data[0]] = streams.get(data[0], b'') + data[8:8 + n]
+            data = data[8 + n:]
+        return streams
+    try:
+        status, out, r = api('GET', '/_ping')
+        st2, ver, _ = api('GET', '/version')
+        st3, inf, _ = api('GET', '/info')
+        check(status == 200 and out == b'OK' and r.getheader('Api-Version') == '1.43' and
+              js(ver)['ApiVersion'] == '1.43' and st3 == 200 and 'Containers' in js(inf),
+              'engine: ping, version, info', str(out) + str(ver))
+        status, out, _ = api('GET', '/images/json')
+        check(status == 200 and any('test/alpine:1' in i['RepoTags'] for i in js(out)),
+              'engine: images/json', out[:300])
+        status, out, _ = api('POST', '/containers/create?name=api1',
+                             {'Image': 'test/alpine:1', 'Cmd': ['echo out; echo err >&2; exit 3'],
+                              'Labels': {'elf.test': 'api'}})
+        cid = (js(out) or {}).get('Id', '')
+        s1, _, _ = api('POST', f'/containers/{cid}/start')
+        s2, waited, _ = api('POST', f'/containers/{cid}/wait')
+        s3, logs, r = api('GET', f'/containers/{cid}/logs?stdout=1&stderr=1')
+        check(status == 201 and s1 == 204 and s2 == 200 and js(waited)['StatusCode'] == 3 and s3 == 200 and
+              demux(logs)[1] == b'out\nerr\n' and 'multiplexed' in (r.getheader('Content-Type') or ''),
+              'engine: create, start, wait, logs (multiplexed frames)', str(out) + str(waited) + str(logs))
+        status, out, _ = api('GET', '/containers/json?all=1&filters=' +
+                             urllib.parse.quote(json.dumps({'label': ['elf.test=api']})))
+        check(status == 200 and [c['Names'] for c in js(out)] == [['/api1']] and js(out)[0]['State'] == 'exited',
+              'engine: containers/json with a label filter', out[:300])
+        status, out, _ = api('GET', '/containers/api1/json')
+        check(status == 200 and js(out)['State']['ExitCode'] == 3 and js(out)['Name'] == '/api1',
+              'engine: containers/{id}/json', out[:300])
+        status, out, _ = api('POST', '/containers/create?name=api2',
+                             {'Image': 'test/alpine:1', 'Cmd': ['sleep 60'],
+                              'HostConfig': {'PortBindings': {'18432/tcp': [{'HostPort': ''}]}}})
+        api('POST', '/containers/api2/start')
+        s1, out, _ = api('POST', '/containers/api2/exec', {'Cmd': ['sh', '-c', 'echo hi; echo oops >&2; exit 5'],
+                                                           'AttachStdout': True, 'AttachStderr': True})
+        eid = (js(out) or {}).get('Id', '')
+        s2, out, _ = api('POST', f'/exec/{eid}/start', {'Detach': False, 'Tty': False})
+        s3, ex, _ = api('GET', f'/exec/{eid}/json')
+        frames = demux(out)
+        check(s1 == 201 and s2 == 200 and frames[1] == b'hi\n' and frames[2] == b'oops\n' and
+              js(ex)['ExitCode'] == 5,
+              'engine: exec create, start (stdout and stderr frames), inspect', str(out) + str(ex))
+        status, out, _ = api('GET', '/containers/api2/json')
+        check(js(out)['NetworkSettings']['Ports'].get('18432/tcp') == [{'HostIp': '0.0.0.0', 'HostPort': '18432'}],
+              'engine: a port binding without a host port is the port itself', out[:400])
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            info = tarfile.TarInfo('put.txt')
+            info.size = 4
+            tar.addfile(info, io.BytesIO(b'put\n'))
+        s1, _, _ = api('PUT', '/containers/api2/archive?path=/tmp', raw=buf.getvalue(),
+                       headers={'Content-Type': 'application/x-tar'})
+        s2, out, r = api('GET', '/containers/api2/archive?path=/tmp/put.txt')
+        got = b''
+        if s2 == 200:
+            with tarfile.open(fileobj=io.BytesIO(out)) as tar:
+                got = tar.extractfile('put.txt').read()
+        stat = json.loads(base64.b64decode(r.getheader('X-Docker-Container-Path-Stat') or 'e30='))
+        check(s1 == 200 and got == b'put\n' and stat.get('size') == 4, 'engine: archive put and get',
+              f'{s1} {s2} {got} {stat}')
+        s1, _, _ = api('POST', '/containers/api2/stop?t=1')
+        s2, _, _ = api('DELETE', '/containers/api2')
+        s3, _, _ = api('DELETE', f'/containers/{cid}')
+        s4, _, _ = api('GET', '/containers/api1/json')
+        check((s1, s2, s3, s4) == (204, 204, 204, 404), 'engine: stop, delete, 404 after', f'{s1} {s2} {s3} {s4}')
+        s1, out, _ = api('POST', '/volumes/create', {'Name': 'apivol'})
+        s2, lst, _ = api('GET', '/volumes')
+        s3, _, _ = api('DELETE', '/volumes/apivol')
+        check(s1 == 201 and 'apivol' in [v['Name'] for v in js(lst)['Volumes']] and s3 == 204,
+              'engine: volumes', str(out) + str(lst))
+        s1, out, _ = api('POST', '/networks/create', {'Name': 'n'})
+        s2, out2, _ = api('POST', '/containers/create', {'Image': 'test/alpine:1',
+                                                          'HostConfig': {'Privileged': True}})
+        s3, out3, _ = api('POST', '/containers/create', {
+            'Image': 'test/alpine:1', 'HostConfig': {'Isolate': True, 'Binds': [f'{sock}:/var/run/docker.sock']}})
+        check(s1 == 501 and s2 == 400 and s3 >= 400 and b'refused' in out3,
+              'engine: networks, --privileged and the socket in an --isolate container refused',
+              f'{s1} {s2} {s3} {out3}')
+        p = docker(home, 'run', '--rm', '--isolate', '-v', f'{home}/docker.sock:/var/run/docker.sock',
+                   'test/alpine:1', 'true')
+        check(p.returncode == 125 and 'refused' in p.stderr, 'docker run --isolate with the engine socket refused',
+              p.stderr)
+    finally:
+        server.terminate()
+        try:
+            server.wait(10)
+        except subprocess.TimeoutExpired:
+            server.kill()
+    check(not sock.exists(), 'engine: the socket is removed on exit', server.stderr.read()[-500:])
+
+
 def alpine_image(home, work):
     root = lib.require(lib.ALPINE, 'Alpine test rootfs')
     raw = io.BytesIO()
@@ -773,6 +1000,8 @@ def main():
             build_tests(home, work)
             mount_owner_tests(home, work)
             cow_tests(home, work)
+            compose_tests(home, work)
+            engine_tests(home, work)
         else:
             print('SKIP: container runs need', lib.ALPINE)
         p = docker(home, 'system', 'prune', '-af', '--volumes')
