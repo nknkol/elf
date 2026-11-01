@@ -109,10 +109,17 @@ def oci_layout(path, layers, config=None, name='test/img:1', tamper_diff=False):
     return cfg_bytes, m_bytes
 
 
-def docker(home, *args, input=None, timeout=300, env=None):
-    return subprocess.run([sys.executable, '-B', str(DOCKER), *args], capture_output=True, text=True,
+def docker(home, *args, input=None, timeout=300, env=None, text=True):
+    return subprocess.run([sys.executable, '-B', str(DOCKER), *args], capture_output=True, text=text,
                           input=input, timeout=timeout,
                           env=dict(os.environ, ELF_OCI_HOME=str(home), **(env or {})))
+
+
+def proc_start(pid):
+    try:
+        return int(Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
+    except OSError:
+        return None
 
 
 def tree(root):
@@ -513,6 +520,29 @@ def cow_tests(home, work):
         check(p.returncode == 0 and (cdir / 'upper/usr/share/cow-in').read_text() == 'in\n' and
               p2.returncode == 0 and (work / 'cow-out').read_text() == 'changed\n',
               '--cow: cp in (to the upper) and out (merged view)' + tag, p.stderr + p2.stderr)
+        # A directory comes out merged: the upper's and the lower's files,
+        # without the whited-out ones or whiteout markers (also as tar).
+        out = work / ('cow-etc' + tag)
+        p = docker(home, 'cp', f'{name}:/etc', str(out))
+        p2 = docker(home, 'cp', f'{name}:/etc', '-', text=False)
+        names = set(tarfile.open(fileobj=io.BytesIO(p2.stdout)).getnames()) if p2.returncode == 0 else set()
+        check(p.returncode == 0 and (out / 'motd').read_text() == 'changed\n' and (out / 'fstab').exists() and
+              (out / 'alpine-release').exists() and not (out / 'issue').exists() and
+              not any(n.startswith('.wh.') for _, ds, fs in os.walk(out) for n in ds + fs) and
+              {'etc/motd', 'etc/fstab', 'etc/alpine-release'} <= names and 'etc/issue' not in names and
+              not any('.wh.' in n for n in names),
+              '--cow: cp of a directory is the merged view (whiteouts applied, markers hidden)' + tag,
+              p.stderr + str(sorted(names))[:800])
+        # A symlink in the upper at the destination is replaced, not followed.
+        victim = work / ('cow-victim' + tag)
+        victim.write_text('host\n')
+        (cdir / 'upper/usr/share/cow-in').unlink()
+        os.symlink(victim, cdir / 'upper/usr/share/cow-in')
+        p = docker(home, 'cp', str(work / 'cow-in'), f'{name}:/usr/share/')
+        check(p.returncode == 0 and victim.read_text() == 'host\n' and
+              not (cdir / 'upper/usr/share/cow-in').is_symlink() and
+              (cdir / 'upper/usr/share/cow-in').read_text() == 'in\n',
+              '--cow: cp into the upper replaces a symlink at the destination' + tag, p.stderr)
         image = f'test/cow{"-isolate" if mode else ""}:1'
         p = docker(home, 'commit', name, image)
         p2 = docker(home, 'run', '--rm', '--cow', *mode, image,
@@ -578,6 +608,17 @@ def erofs_tests(home, work):
     p = docker(home, 'cp', f'{name}:/srv/l4', str(work / 'erofs-out'))
     check(p.returncode == 0 and (work / 'erofs-out').read_text() == 'layer4\n', 'layer images: cp out',
           p.stderr)
+    # A file nothing read yet is a placeholder in its cache: cp fills it first.
+    held = [Path(d, 'x') for c in (home / 'layers').glob('*.cache')
+            for d, _, fs in os.walk(c) if d.endswith('etc/apk/protected_paths.d') and 'x' in fs]
+    unread = [h for h in held if erofs.placeholder(os.lstat(h))]
+    p = docker(home, 'cp', f'{name}:/etc/apk/protected_paths.d/x', str(work / 'erofs-x'))
+    p2 = docker(home, 'cp', f'{name}:/srv', str(work / 'erofs-srv'))
+    srv = sorted(os.listdir(work / 'erofs-srv')) if p2.returncode == 0 else []
+    check(unread and p.returncode == 0 and (work / 'erofs-x').read_text() == 'opq\n' and
+          srv == ['l1', 'l2', 'l4', 'l5', 'l6', 'l7', 'l8'] and (work / 'erofs-srv/l2').read_text() == 'w\n' and
+          (work / 'erofs-srv/l8').read_text() == 'layer8\n',
+          'layer images: cp fills unread files; a directory is the merged view', [held, srv, p.stderr, p2.stderr])
     p = docker(home, 'commit', name, 'test/erofs-commit:1')
     p2 = docker(home, 'run', '--rm', 'test/erofs-commit:1', 'cat /srv/l2; test -e /srv/l3 || echo gone')
     check(p.returncode == 0 and p2.stdout == 'w\ngone\n', 'layer images: commit', p.stderr + p2.stdout + p2.stderr)
@@ -1030,11 +1071,39 @@ def run_tests(home, work, isolate):
     check(p.returncode == 0 and p2.stdout == 'copied', 'cp into the container' + tag, p.stderr + p2.stderr)
     p = docker(home, 'cp', f'{name}:/etc/alpine-release', str(work / 'release'))
     check(p.returncode == 0 and (work / 'release').read_text().strip()[0].isdigit(), 'cp out of the container' + tag)
+    suffix = '-iso' if isolate else ''
+    # A symlink the container placed at the destination (the final name, or a
+    # directory inside a recursive copy) is replaced, never followed to the host.
+    victim, victim_dir = work / ('victim' + suffix), work / ('victim-dir' + suffix)
+    victim.write_text('host file\n')
+    victim_dir.mkdir()
+    (work / 'cptree' / 'sub').mkdir(parents=True, exist_ok=True)  # (both runs)
+    (work / 'cptree' / 'sub' / 'f').write_text('tree\n')
+    docker(home, 'exec', name, 'sh', '-c', f'mkdir -p /root/dest /root/tree && ln -s {victim} /root/dest/cpfile && '
+           f'ln -s {victim_dir} /root/tree/sub')
+    p = docker(home, 'cp', str(work / 'cpfile'), f'{name}:/root/dest')
+    p2 = docker(home, 'cp', str(work / 'cptree') + '/.', f'{name}:/root/tree')
+    p3 = docker(home, 'exec', name, 'sh', '-c', 'cat /root/dest/cpfile; echo; test -L /root/dest/cpfile || echo file; '
+                'cat /root/tree/sub/f')
+    check(p.returncode == 0 and p2.returncode == 0 and victim.read_text() == 'host file\n' and
+          not any(victim_dir.iterdir()) and p3.stdout == 'copied\nfile\ntree\n',
+          'cp into the container replaces its symlinks, never follows them to the host' + tag,
+          p.stderr + p2.stderr + p3.stdout + p3.stderr)
+    # exec -d processes are the container's: they end when it stops.
+    cdir = home / 'containers' / docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+    p = docker(home, 'exec', '-d', name, 'sh', '-c', 'while :; do sleep 0.2; done')
+    execs = json.loads((cdir / 'execs.json').read_text()) if (cdir / 'execs.json').exists() else []
     p = docker(home, 'stop', name)          # StopSignal SIGUSR1 from the image.
     p2 = docker(home, 'inspect', '-f', '{{.State.Status}} {{.State.ExitCode}}', name)
     p3 = docker(home, 'logs', name)
     check(p2.stdout.strip() == 'exited 9' and 'started' in p3.stdout and 'got-usr1' in p3.stdout,
           'stop sends the StopSignal; logs kept' + tag, p2.stdout + p3.stdout + p.stderr)
+    time.sleep(0.3)
+    check(len(execs) == 1 and all(not Path(f'/proc/{pid}').exists() or proc_start(pid) != start
+                                  for pid, start in execs) and not (cdir / 'execs.json').exists(),
+          'exec -d processes end with the container' + tag, execs)
+    p = docker(home, 'exec', '-d', name, 'true')
+    check(p.returncode != 0, 'no exec in a stopped container' + tag, p.stderr)
     docker(home, 'rm', name)
     p = docker(home, 'run', '-d', *mode, '--name', name, '--stop-signal', 'SIGHUP', '-u', 'root', img,
                'trap "" HUP; while :; do sleep 0.2; done')

@@ -6,14 +6,16 @@ itself; `run -d`/`start` hand it to a small per-container monitor process
 applies the restart policy (docs/OCI.md, R2). The container's processes are
 one process group; its id and start time are recorded in run.json."""
 import os
+import posixpath
 import shutil
 import signal
 import subprocess
 import sys
 import tarfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+import guestfs
 import layer_images
 import network
 import owners as owners_mod
@@ -55,7 +57,60 @@ def refresh(st, record):
                 if state.get('ExitCode') is None:
                     state['ExitCode'] = 255
                 st.save_container(record)
+                end_execs_locked(st, record['Id'])
     return record
+
+
+def exec_spawn(st, cid, launch):
+    """Starts an exec process (launch() -> Popen, the process heading a
+    process group of its own) while the container runs, registered in
+    execs.json so that it ends with the container (end_execs). Under the
+    store lock: a container that is stopping takes no new exec."""
+    with st.lock():
+        record = st.load_container(cid)
+        state = record['State']
+        if state['Status'] != 'running' or not alive(state) or state.get('ExecsClosed'):
+            raise StoreError(f'Container {cid[:12]} is not running')
+        proc = launch()
+        path = st.container_dir(cid) / 'execs.json'
+        execs = [e for e in store_mod.read_json(path, []) if proc_start_time(e[0]) == e[1]]
+        execs.append([proc.pid, proc_start_time(proc.pid)])
+        store_mod.write_json(path, execs)
+    return proc
+
+
+def exec_done(st, cid, pid):
+    with st.lock():
+        path = st.container_dir(cid) / 'execs.json'
+        if path.exists():
+            store_mod.write_json(path, [e for e in store_mod.read_json(path, []) if e[0] != pid])
+
+
+def end_execs(st, cid):
+    with st.lock():
+        end_execs_locked(st, cid)
+
+
+def end_execs_locked(st, cid):
+    """The container's exec processes go with it, as in its PID namespace:
+    no new one starts until it runs again (ExecsClosed)."""
+    cdir = st.container_dir(cid)
+    if not cdir.exists():
+        return
+    record = st.load_container(cid)
+    if not record['State'].get('ExecsClosed'):
+        record['State']['ExecsClosed'] = True
+        st.save_container(record)
+    path = cdir / 'execs.json'
+    for pid, start in store_mod.read_json(path, []):
+        if proc_start_time(pid) != start:
+            continue
+        for kill_ in (os.killpg, os.kill):   # (the group may not be made yet)
+            try:
+                kill_(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    path.unlink(missing_ok=True)
 
 
 def rootfs_of(st, record):
@@ -297,7 +352,7 @@ def run_once(st, record, stdio, interactive, tty):
     forwarder.pgid = proc.pid
     set_state(st, cid, Status='running', Running=True, Pid=proc.pid,
               PidStart=proc_start_time(proc.pid), StartedAt=store_mod.now(), ExitCode=None,
-              FinishedAt=None)
+              FinishedAt=None, ExecsClosed=False)
     try:
         while True:
             try:
@@ -316,6 +371,7 @@ def run_once(st, record, stdio, interactive, tty):
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+        end_execs(st, cid)
         if terminal is not None:
             old = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
             try:
@@ -407,7 +463,9 @@ def stop(st, record, timeout=None, sig=None):
     record = set_state(st, cid, ManualStop=True)
     state = record['State']
     if not alive(state):
-        return refresh(st, record)
+        record = refresh(st, record)
+        end_execs(st, cid)
+        return record
     pgid = state['Pid']
     sig = sig or parse_signal(record['Config'].get('StopSignal'))
     if timeout is None:
@@ -434,7 +492,9 @@ def stop(st, record, timeout=None, sig=None):
                 record['State']['MonitorPid']) == record['State'].get('MonitorStart')):
             break
         time.sleep(0.05)
-    return refresh(st, st.load_container(cid))
+    record = refresh(st, st.load_container(cid))
+    end_execs(st, cid)
+    return record
 
 
 def kill(st, record, sig):
@@ -462,6 +522,7 @@ def remove(st, record, force=False, volumes=False):
             raise StoreError(f'cannot remove container "/{record["Name"]}": container is running: '
                              'stop the container before removing or force remove')
         stop(st, record, timeout=0, sig=signal.SIGKILL)
+    end_execs(st, record['Id'])
     cdir = st.container_dir(record['Id'])
     if cdir.exists():
         trash = st.home / 'tmp' / f'rm-{record["Id"]}'
@@ -477,20 +538,26 @@ def exec_in(st, record, command, interactive, tty, detach, env, workdir, user):
         raise StoreError(f'Container {record["Id"][:12]} is not running')
     argv, _ = command_line(st, record, extra_env=env, workdir=workdir, user=user, command=command)
     rootfs = rootfs_of(st, record)
+    cid = record['Id']
     if detach:
-        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, cwd=str(rootfs), start_new_session=True)
+        exec_spawn(st, cid, lambda: subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=str(rootfs), start_new_session=True))
         return 0
     terminal = 0 if (interactive or tty) and os.isatty(0) else None
     forwarder = Forwarder(signal.SIGTERM)
     forwarder.install()
+    proc = None
     try:
-        proc = spawn(argv, os.environ.get('PATH', '/usr/bin:/bin'),
-                     None if interactive else subprocess.DEVNULL, None, None, str(rootfs), terminal)
+        proc = exec_spawn(st, cid, lambda: spawn(argv, os.environ.get('PATH', '/usr/bin:/bin'),
+                                                 None if interactive else subprocess.DEVNULL, None, None,
+                                                 str(rootfs), terminal))
         forwarder.pgid = proc.pid
         code = proc.wait()
     finally:
         forwarder.restore()
+        if proc is not None:
+            exec_done(st, cid, proc.pid)
         if terminal is not None:
             old = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
             try:
@@ -506,8 +573,41 @@ def container_path(st, record, path, follow=True):
     return runspec.guest_resolve(view_of(st, record), binds, path, follow)
 
 
+def guest_view(st, record):
+    """The container's files as its processes see them (guestfs.View)."""
+    return guestfs.View(view_of(st, record), [(b[0], b[1]) for b in all_binds(st, record)])
+
+
+def host_target(dest, is_dir, name, contents):
+    """Docker's cp rules on the host side: (directory, top) to write the
+    copy under: into an existing directory under the source's name (its
+    contents for "src/." or the root), else as dest."""
+    dest = Path(dest)
+    if dest.is_dir():
+        return dest, [] if is_dir and (contents or not name) else [name]
+    if is_dir and os.path.lexists(dest):
+        raise StoreError('cannot copy a directory to a file')
+    if not dest.parent.is_dir():
+        raise StoreError(f'no such directory: {dest.parent}')
+    return dest.parent, [dest.name]
+
+
+def guest_target(view, dest_path, is_dir, name, contents):
+    """The same rules in the container: (canonical directory parts, top)."""
+    parts = view.resolve(dest_path, follow=True)
+    if view.is_dir(parts):
+        return parts, [] if is_dir and contents else [name]
+    if is_dir and view.exists(parts):
+        raise StoreError('cannot copy a directory to a file')
+    if not parts or not view.is_dir(parts[:-1]):
+        raise StoreError(f'no such directory: {posixpath.dirname(dest_path.rstrip("/")) or "/"}')
+    return parts[:-1], [parts[-1]]
+
+
 def cp(st, src, dest, archive_mode=False):
-    """docker cp: exactly one side is CONTAINER:PATH; '-' is a tar stream."""
+    """docker cp: exactly one side is CONTAINER:PATH; '-' is a tar stream.
+    The container side is read through its merged view and written only
+    through FDs that never follow its links (guestfs)."""
     def split(spec):
         if spec == '-' or spec.startswith(('/', '.')) or ':' not in spec:
             return None, spec
@@ -517,55 +617,43 @@ def cp(st, src, dest, archive_mode=False):
     (src_c, src_path), (dest_c, dest_path) = split(src), split(dest)
     if bool(src_c) == bool(dest_c):
         raise StoreError('copying between containers or between local paths is not supported')
+    contents = src_path.endswith('/.')
     if src_c:
-        host_src = container_path(st, src_c, src_path, follow=True)
-        if not host_src.exists() and not host_src.is_symlink():
+        view = guest_view(st, src_c)
+        parts = view.resolve(src_path, follow=True)
+        if not view.exists(parts):
             raise StoreError(f'Could not find the file {src_path} in container {src_c["Name"]}')
+        name = parts[-1] if parts else ''
         if dest_path == '-':
             with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as tar:
-                tar.add(str(host_src), arcname=Path(src_path.rstrip('/')).name or '.')
+                guestfs.copy(view.walk(parts, [PurePosixPath(src_path.rstrip('/')).name or '.']),
+                             guestfs.TarSink(tar))
             return
-        copy_tree(host_src, Path(dest_path), src_path)
-    else:
-        host_dest = container_path(st, dest_c, dest_path)
-        if lower_of(st, dest_c):
-            # R6: written into the upper (a lower directory is made there).
-            host_dest = union.writable(rootfs_of(st, dest_c), lower_of(st, dest_c), host_dest)
-        if src_path == '-':
-            if not host_dest.is_dir():
-                raise StoreError(f'destination "{dest_path}" must be a directory')
-            import unpack
-            extractor = unpack.Extractor(host_dest)
-            try:
-                with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as tar:
-                    touched, times = set(), []
-                    for member in tar:
-                        extractor.member(tar, member, touched, times)
-            finally:
-                extractor.close()
-            return
-        copy_tree(Path(src_path), host_dest, src_path)
-
-
-def copy_tree(src, dest, src_spec):
-    """Docker's cp rules: into an existing directory under the source's
-    name, otherwise as dest; "src/." copies the contents."""
-    contents = src_spec.endswith('/.')
-    if src.is_dir() and not src.is_symlink():
-        if dest.exists() and not dest.is_dir():
-            raise StoreError('cannot copy a directory to a file')
-        target = dest if contents or not dest.exists() else dest / src.name
-        shutil.copytree(src, target, symlinks=True, dirs_exist_ok=True)
-    else:
-        if src_spec.endswith('/'):
-            raise StoreError(f'{src_spec} is not a directory')
-        target = dest / src.name if dest.is_dir() else dest
-        if src.is_symlink():
-            if target.is_symlink() or target.exists():
-                target.unlink()
-            os.symlink(os.readlink(src), target)
-        else:
-            shutil.copy2(src, target)
+        is_dir = view.is_dir(parts)
+        if src_path.endswith('/') and not is_dir:
+            raise StoreError(f'{src_path} is not a directory')
+        directory, top = host_target(dest_path, is_dir, name, contents)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        guestfs.copy(view.walk(parts, top), guestfs.DirSink(fd))
+        return
+    view = guest_view(st, dest_c)
+    upper = lower_of(st, dest_c) is not None
+    if src_path == '-':
+        parts = view.resolve(dest_path, follow=True)
+        if not view.is_dir(parts):
+            raise StoreError(f'destination "{dest_path}" must be a directory')
+        with tarfile.open(fileobj=sys.stdin.buffer, mode='r|*') as tar:
+            guestfs.copy(guestfs.tar_walk(tar), guestfs.DirSink(view.open_dir(parts), upper))
+        return
+    src_host = Path(src_path)
+    if not os.path.lexists(src_host):
+        raise StoreError(f'no such file or directory: {src_path}')
+    is_dir = src_host.is_dir() and not src_host.is_symlink()
+    if src_path.endswith('/') and not is_dir:
+        raise StoreError(f'{src_path} is not a directory')
+    name = Path(os.path.abspath(src_host)).name
+    directory, top = guest_target(view, dest_path, is_dir, name, contents)
+    guestfs.copy(guestfs.host_walk(src_host, top), guestfs.DirSink(view.open_dir(directory), upper))
 
 
 def logs(st, record, follow=False, tail=None):

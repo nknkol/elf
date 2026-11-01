@@ -35,6 +35,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import fmt
+import guestfs
 import images
 import runtime
 import store as store_mod
@@ -808,8 +809,10 @@ def archive(h, name):
     path = h.query.get('path')
     if not path:
         raise APIError(400, 'path is required')
-    host = runtime.container_path(h.st, r, path, follow=True)
-    if not os.path.lexists(host):
+    view = runtime.guest_view(h.st, r)
+    parts = view.resolve(path, follow=True)
+    host, present = view.host(parts, fill=True)
+    if not present:
         raise APIError(404, f'Could not find the file {path} in container {name}')
     base = Path(path.rstrip('/')).name or '/'
     header = {'X-Docker-Container-Path-Stat': path_stat(host, base)}
@@ -823,7 +826,7 @@ def archive(h, name):
         return
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode='w', format=tarfile.PAX_FORMAT) as tar:
-        tar.add(str(host), arcname=base if base != '/' else '.')
+        guestfs.copy(view.walk(parts, [base if base != '/' else '.']), guestfs.TarSink(tar))
     data = buf.getvalue()
     h.send_response(200)
     h.common_headers()
@@ -837,26 +840,18 @@ def archive(h, name):
 
 @route('PUT', r'/containers/([^/]+)/archive')
 def archive_put(h, name):
-    import union
-    import unpack
     r = h.container(name)
     path = h.query.get('path')
     if not path:
         raise APIError(400, 'path is required')
-    dest = runtime.container_path(h.st, r, path)
-    if runtime.lower_of(h.st, r):
-        dest = union.writable(runtime.rootfs_of(h.st, r), runtime.lower_of(h.st, r), dest)
-    if not dest.is_dir():
-        raise APIError(404 if not dest.exists() else 400, f'destination {path} must be a directory')
+    view = runtime.guest_view(h.st, r)
+    parts = view.resolve(path, follow=True)
+    if not view.is_dir(parts):
+        raise APIError(404 if not view.exists(parts) else 400, f'destination {path} must be a directory')
     data = h.body_bytes()
-    extractor = unpack.Extractor(dest)
-    try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as tar:
-            touched, times = set(), []
-            for member in tar:
-                extractor.member(tar, member, touched, times)
-    finally:
-        extractor.close()
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as tar:
+        guestfs.copy(guestfs.tar_walk(tar),
+                     guestfs.DirSink(view.open_dir(parts), runtime.lower_of(h.st, r) is not None))
     h.send_empty(200)
 
 
@@ -897,15 +892,20 @@ def exec_start(h, eid):
                                    command=e.cmd)
     cwd = str(runtime.rootfs_of(st, record))
     if detach:
-        e.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, cwd=cwd, start_new_session=True)
-        threading.Thread(target=lambda: setattr(e, 'exit', e.proc.wait()), daemon=True).start()
+        e.proc = runtime.exec_spawn(st, e.cid, lambda: subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=cwd, start_new_session=True))
+
+        def reap():
+            e.exit = e.proc.wait()
+            runtime.exec_done(st, e.cid, e.proc.pid)
+        threading.Thread(target=reap, daemon=True).start()
         return h.send_empty(200)
+    e.proc = runtime.exec_spawn(st, e.cid, lambda: subprocess.Popen(
+        argv, stdin=subprocess.PIPE if e.stdin else subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if tty else subprocess.PIPE, cwd=cwd, start_new_session=True))
     h.start_stream('application/vnd.docker.raw-stream' if tty else 'application/vnd.docker.multiplexed-stream',
                    hijack=True)
-    e.proc = subprocess.Popen(argv, stdin=subprocess.PIPE if e.stdin else subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT if tty else subprocess.PIPE,
-                              cwd=cwd, start_new_session=True)
     lock = threading.Lock()
 
     def pump(src, stream):
@@ -940,6 +940,7 @@ def exec_start(h, eid):
                 pass
         threading.Thread(target=feed, daemon=True).start()
     code = e.proc.wait()
+    runtime.exec_done(st, e.cid, e.proc.pid)
     for t in readers:
         t.join(5)
     e.exit = 128 - code if code < 0 else code

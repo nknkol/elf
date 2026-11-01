@@ -11,7 +11,9 @@ port 80; a peer connects to it and is seen as coming from its own
 address; a container not listed as a peer is refused (ECONNREFUSED);
 binding another container's address is EADDRNOTAVAIL; 127.0.0.1 is the
 container itself; 127.127.0.1 is the host's 127.0.0.1; the host reaches a
-container's port 80 at 61080. Both builds, plain and with --isolate (the
+container's port 80 at 61080, while the guest itself cannot bind or
+connect to 61080 of a pool address (EACCES, ECONNREFUSED: the host ports
+of ports below 1024 are reserved, so the mapping has no collisions). Both builds, plain and with --isolate (the
 broker refuses the non-peer connect and the foreign bind)."""
 import json
 import os
@@ -73,6 +75,14 @@ conn, peer = srv.accept()
 out['self_peer'] = peer[0]
 conn.close(); cl.close(); srv.close()
 out['host'] = ask('127.127.0.1', host_port)
+# 61001-62023 stand for ports below 1024: not usable directly.
+s = socket.socket()
+try:
+    s.bind(('0.0.0.0', 61080)); out['reserved_bind'] = 'bound'
+except OSError as e:
+    out['reserved_bind'] = errno.errorcode[e.errno]
+s.close()
+out['reserved_connect'] = ask(a, 61080)
 print('RESULT ' + json.dumps(out))
 '''
 
@@ -133,6 +143,7 @@ with tempfile.TemporaryDirectory(prefix='net-', dir=lib.mode_capable()) as tmp:
                 assert out['foreign_bind'] == 'EADDRNOTAVAIL', (what, out['foreign_bind'])
                 assert out['own_name'] == [b, 81] and out['self_peer'] == b, (what, out)
                 assert out['host'][0] == 'host', (what, out['host'])
+                assert out['reserved_bind'] == 'EACCES' and out['reserved_connect'] == 'ECONNREFUSED', (what, out)
                 # The host reaches the container's port 80 at 61080 of its address.
                 with socket.create_connection((a, 61080), timeout=5) as s:
                     reply = s.makefile().readline().strip()
@@ -143,6 +154,6 @@ with tempfile.TemporaryDirectory(prefix='net-', dir=lib.mode_capable()) as tmp:
                 for srv in servers:
                     srv.kill()
                     srv.wait()
-            print('PASS: container networks (own address, port 80 twice, peers, refusal, localhost, host alias):',
+            print('PASS: container networks (own address, port 80 twice, peers, refusal, localhost, host alias, reserved ports):',
                   loader.name, *isolate)
     hs.close()

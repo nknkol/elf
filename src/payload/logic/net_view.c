@@ -143,6 +143,7 @@ long net_address(long number, long fd, const void *name, unsigned length, void *
             if (rc < 0) return rc;
         }
     }
+    if (net_pool_address(ip) && net_port_reserved(port)) return bind ? -EACCES : -ECONNREFUSED;
     if (net_pool_address(ip) && port && port < 1024) port = (uint16_t)(NET_PORT_BASE + port);
     if (v6) {
         v4_to_v6(ip, a6.addr);
@@ -174,7 +175,7 @@ void net_reverse(void *name, unsigned length)
     } else {
         return;
     }
-    if (!net_pool_address(ip) || port <= NET_PORT_BASE || port >= NET_PORT_BASE + 1024) return;
+    if (!net_pool_address(ip) || !net_port_reserved(port)) return;
     port = be16((uint16_t)(port - NET_PORT_BASE));
     memcpy((char *)name + 2, &port, 2);
 }

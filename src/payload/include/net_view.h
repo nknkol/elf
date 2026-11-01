@@ -15,7 +15,9 @@
  *    see where it comes from;
  *  - ports below 1024 of a pool address are ports NET_PORT_BASE + p on
  *    the host (an unprivileged process cannot bind them), shown as p in
- *    every address the guest gets back.
+ *    every address the guest gets back; the guest cannot use those host
+ *    ports itself (bind EACCES, connect ECONNREFUSED), so the mapping
+ *    has no collisions and reads back unambiguously.
  * IPv6 sockets take the same through IPv4-mapped addresses (:: and ::1
  * are the container's address). Without --isolate this is a view, not a
  * boundary; with it the broker refuses binds to other pool addresses and
@@ -31,6 +33,9 @@
 #define NET_PORT_BASE 61000u        /* above the ephemeral ports */
 
 static inline bool net_pool_address(uint32_t ip) { return (ip & NET_POOL_MASK) == NET_POOL; }
+
+/* The host ports that stand for ports 1..1023 of a pool address. */
+static inline bool net_port_reserved(uint32_t port) { return port > NET_PORT_BASE && port < NET_PORT_BASE + 1024; }
 
 /* Whether ip (host order) is in text, the peers file's content (one
  * dotted address per line); the payload and the broker read it. */

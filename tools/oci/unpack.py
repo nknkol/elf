@@ -81,8 +81,9 @@ def clean_name(name):
 class Rootfs:
     """A directory written only through FDs opened without following links."""
 
-    def __init__(self, path):
-        self.fd = os.open(path, DIR_FLAGS)
+    def __init__(self, path=None, fd=None):
+        """path opened without following it, or fd (taken over)."""
+        self.fd = fd if fd is not None else os.open(path, DIR_FLAGS)
 
     def close(self):
         os.close(self.fd)

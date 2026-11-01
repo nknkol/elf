@@ -267,10 +267,17 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
 ## R2 管理
 
 - **`exec`**：再启动一个 loader 进程，使用同一 rootfs、环境、工作目录与卷。没有命名空间，它只是“同一文件视图里的
-  另一个进程”，看得到宿主的其他进程。
+  另一个进程”，看得到宿主的其他进程。每个 exec 进程（含 `-d` 与引擎 API 的）自成进程组，在存储锁内确认容器在运行后
+  启动并登记到 `containers/<id>/execs.json`（pid 与启动时间）；主进程退出、stop、rm 以及发现容器已不在时把登记的进程组
+  全部 SIGKILL，并在容器下次运行前拒绝新的 exec，所以启动与停止竞争时也不会留下进程（与 PID 命名空间的 init 退出相同）。
 - **`stop`/`kill`/`restart`/`wait`**：容器入口进程放在自己的进程组，`run.json` 记录进程组；按 StopSignal 发信号，
   超时后 SIGKILL。
-- **`cp`**：在宿主路径与容器 rootfs 之间复制（按容器内路径经 root/bind 翻译）。
+- **`cp`**：在宿主路径与容器之间复制（`tools/oci/guestfs.py`，引擎的 archive 接口相同）。容器内路径按容器视图解析
+  （符号链接在容器内解析，bind 换成来源）。读取走合并视图：目录列出各层的名字，去掉被 whiteout 或不透明目录遮住的
+  以及 `.wh.` 标记，bind 目标显示来源内容，层镜像里的普通文件先填充再读（占位文件不会导出全零）。写入从目标所在区域
+  （rootfs、上层或 bind 来源）的根逐级 `O_NOFOLLOW` 打开目标目录，每一项都在父目录 FD 下不跟随链接地创建：容器预先
+  放在目标名字或递归目录里的符号链接被替换，不会被跟随写到宿主；写进上层时删除同名 whiteout，新目录盖住被删的目录时
+  加不透明标记。
 - **`run -d`、`logs`、`--restart`**：轻量守护进程 `daemon.py`，第一次用 `-d` 时自动启动；负责拉起容器、把输出写进
   `containers/<cid>/log`、记录退出码、按重启策略重启。前台 `run` 不需要它。日志只多一次管道转发。
 - **卷**：`volume create/ls/rm/inspect`，命名卷是 `volumes/<name>/`；`-v name:/path`。
@@ -702,7 +709,8 @@ bind）。所以每个容器分到一个自己的回环地址，相当于有了�
   ECONNREFUSED；连池地址前，未绑定的套接字先绑到容器地址，对方看到的来源就是这个容器。
 - **端口**：本机不许非特权进程绑 1024 以下（`ip_unprivileged_port_start` 1024），所以池地址上的端口 p<1024 实际是
   61000+p（在临时端口范围 32768–60999 之上，不会撞上自动分配的源端口）；getsockname、getpeername、accept、recvfrom、
-  recvmsg 返回的地址再换回 p。
+  recvmsg 返回的地址再换回 p。61001–62023 因此留给映射：guest 在池地址上直接绑这些端口返回 EACCES，连接返回
+  ECONNREFUSED，否则 80 与真正的 61080 会落到同一个宿主端口，反向转换也分不清；`-p` 也不接受这段容器端口。
 - **IPv6**：`::` 与 `::1` 当作容器地址，用 IPv4 映射地址（先关 IPV6_V6ONLY）；真正的 IPv6 地址原样。
 - **隔离模式**：broker 执行 bind/connect，自己读 peers 文件：绑别的容器的地址 EADDRNOTAVAIL，连不在 peers 里的池地址
   ECONNREFUSED。不加 `--isolate` 时只是视图（guest 直接发系统调用能绕过），与 R4、R5 的约束性质相同。

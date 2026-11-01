@@ -313,6 +313,9 @@ def parse_publish(spec):
             raise StoreError(f'invalid port {text} in -p {spec}')
         return list(range(a, b + 1))
     conts = span(cont)
+    if any(reserved_port(c) for c in conts):
+        raise StoreError(f'-p {spec}: container ports {PORT_BASE + 1}-{PORT_BASE + 1023} stand for '
+                         'ports below 1024 here')
     hosts = span(host) if host else [0] * len(conts)
     if len(hosts) == 1 and len(conts) > 1:
         hosts = [hosts[0] + i for i in range(len(conts))] if host and '-' not in host else hosts * len(conts)
@@ -323,6 +326,11 @@ def parse_publish(spec):
 
 def container_port(port):
     return PORT_BASE + port if 0 < port < 1024 else port
+
+
+def reserved_port(port):
+    """A host port standing for a port below 1024 (the guest cannot use it)."""
+    return PORT_BASE < port < PORT_BASE + 1024
 
 
 class Publisher:

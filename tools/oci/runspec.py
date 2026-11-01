@@ -104,24 +104,27 @@ def resolve_user(rootfs, user):
     return uid, gid, home
 
 
-def guest_resolve(rootfs, binds, path, follow=True):
-    """Host path of a guest path: symlinks resolved inside the container view
-    (absolute targets restart at the container root), binds applied."""
-    def host_of(parts):
-        guest = '/' + '/'.join(parts)
-        best = None
-        for src, dst in binds:
-            if guest == dst or guest.startswith(dst.rstrip('/') + '/'):
-                if best is None or len(dst) > len(best[1]):
-                    best = (src, dst)
-        if best:
-            rest = guest[len(best[1]):].lstrip('/')
-            return Path(best[0], rest) if rest else Path(best[0])
-        if isinstance(rootfs, tuple):  # (upper, lower) of a --cow container
-            import union
-            return union.Root(*rootfs).locate(guest)[0]
-        return Path(rootfs, *parts)
+def guest_host(rootfs, binds, parts):
+    """Host path of canonical guest parts (no symlinks left): the longest
+    bind that holds it, else the rootfs (or the merged view's layer)."""
+    guest = '/' + '/'.join(parts)
+    best = None
+    for src, dst in binds:
+        if guest == dst or guest.startswith(dst.rstrip('/') + '/'):
+            if best is None or len(dst) > len(best[1]):
+                best = (src, dst)
+    if best:
+        rest = guest[len(best[1]):].lstrip('/')
+        return Path(best[0], rest) if rest else Path(best[0])
+    if isinstance(rootfs, tuple):  # (upper, lower) of a --cow container
+        import union
+        return union.Root(*rootfs).locate(guest)[0]
+    return Path(rootfs, *parts)
 
+
+def guest_parts(rootfs, binds, path, follow=True):
+    """Canonical parts of a guest path: symlinks resolved inside the
+    container view (absolute targets restart at the container root)."""
     parts = []
     pending = [p for p in PurePosixPath('/' + path.lstrip('/')).parts[1:]]
     links = 0
@@ -134,7 +137,7 @@ def guest_resolve(rootfs, binds, path, follow=True):
                 parts.pop()
             continue
         candidate = parts + [name]
-        host = host_of(candidate)
+        host = guest_host(rootfs, binds, candidate)
         if (pending or follow) and host.is_symlink():
             links += 1
             if links > 40:
@@ -145,7 +148,13 @@ def guest_resolve(rootfs, binds, path, follow=True):
             pending = [p for p in PurePosixPath(target).parts if p != '/'] + pending
             continue
         parts = candidate
-    return host_of(parts)
+    return parts
+
+
+def guest_resolve(rootfs, binds, path, follow=True):
+    """Host path of a guest path: symlinks resolved inside the container view
+    (absolute targets restart at the container root), binds applied."""
+    return guest_host(rootfs, binds, guest_parts(rootfs, binds, path, follow))
 
 
 def make_guest_dirs(rootfs, binds, path):
