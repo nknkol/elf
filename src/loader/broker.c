@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include "loader.h"
 #include "broker_proto.h"
+#include "lazy_layer.h"
 
 #define TREES (CONFIG_MAX_BINDS + 5 + CONFIG_MAX_LOWERS)
 #define PATH_BYTES 4096
@@ -644,6 +645,31 @@ static long socket_name(struct call *c, long nr)
 	return rc;
 }
 
+/* R6 layer images: the broker expands a cache for the guest, whose view of
+ * the lowers is read-only. Only a path inside a lower that is an image's
+ * cache; lazy_layer.c walks it without following symlinks. */
+static const payload_config_t *broker_cfg;
+
+static long lazy_request(const struct call *c)
+{
+	char path[4096];
+	if (!c->path[0] || z_strlen(c->path[0]) >= sizeof(path))
+		return -EINVAL_;
+	copy_cstr(path, sizeof(path), c->path[0]);
+	if (normalize(path) < 0)
+		return -EINVAL_;
+	for (int i = 0; broker_cfg && i < broker_cfg->lower_count; i++) {
+		const char *cache = broker_cfg->lower[i];
+		size_t n = z_strlen(cache);
+		if (!broker_cfg->lower_image[i][0] || z_strncmp(path, cache, n) ||
+		    (path[n] && path[n] != '/'))
+			continue;
+		return c->a[1] ? lazy_fill(broker_cfg->lower_image[i], cache, path + n)
+			       : lazy_expand(broker_cfg->lower_image[i], cache, path + n);
+	}
+	return -EACCES_;
+}
+
 static long execute(struct call *c, long nr)
 {
 	long *a = c->a;
@@ -928,6 +954,9 @@ static long execute(struct call *c, long nr)
 	case BROKER_CONNECT_PATH:
 		rc = socket_name(c, nr);
 		break;
+	case BROKER_LAZY_PATH:
+		rc = lazy_request(c);
+		break;
 	default:
 		rc = -EACCES_;
 	}
@@ -1180,6 +1209,7 @@ static void serve(int channel)
 
 static void broker_run(int control, const payload_config_t *cfg)
 {
+	broker_cfg = cfg;
 	const char *access = cfg->mount_access_observe;
 	add_tree(cfg->root[0] ? cfg->root : "/", access[0] ? access[0] : 'w');
 	for (int i = 0; i < cfg->bind_count; i++)

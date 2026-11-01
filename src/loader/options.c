@@ -176,6 +176,14 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			if (cfg->lower_count >= CONFIG_MAX_LOWERS)
 				z_errx(1, "too many --lower layers (at most %d)", CONFIG_MAX_LOWERS);
 			copy_cstr(cfg->lower[cfg->lower_count++], CONFIG_MAX_PATH, v);
+		} else if (is(arg, "--lower-image")) {
+			/* R6: the preceding --lower is the cache of this layer image. */
+			const char *v = value(argc, argv, &i);
+			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
+				z_errx(1, "--lower-image needs an absolute host file");
+			if (!cfg->lower_count || cfg->lower_image[cfg->lower_count - 1][0])
+				z_errx(1, "--lower-image follows the --lower that is its cache");
+			copy_cstr(cfg->lower_image[cfg->lower_count - 1], CONFIG_MAX_PATH, v);
 		} else if (is(arg, "-v") || is(arg, "--volume")) {
 			add_bind(cfg, value(argc, argv, &i));
 		} else if (is(arg, "-e") || is(arg, "--env")) {

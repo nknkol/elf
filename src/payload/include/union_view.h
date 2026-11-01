@@ -38,6 +38,10 @@ struct union_view {
     int count;                        /* layers, upper included */
     const char *layer[UNION_LAYERS];  /* host directories, no trailing '/' */
     size_t length[UNION_LAYERS];
+    /* Layer images (lazy_layer.h): the erofs file whose cache the layer is,
+     * NULL for a plain directory. Directories the walk finds there are
+     * expanded; a file is filled before its content is read. */
+    const char *image[UNION_LAYERS];
 };
 
 /* Where a name of the view is: the walk of one lookup. */
@@ -108,6 +112,10 @@ long union_rename(const struct union_view *u, const char *from, const char *to, 
  * and, once the fd's own directory is exhausted, the entries of the
  * layers below that are not hidden. */
 long union_getdents(int fd, void *buffer, unsigned long count, long ret);
+
+/* host names a placeholder of a layer image of u: filled (content read
+ * next). 0 or -errno. */
+long union_lazy_fill(const struct union_view *u, const char *host);
 
 /* A whiteout or opaque marker name. */
 static inline bool union_hidden_name(const char *name)

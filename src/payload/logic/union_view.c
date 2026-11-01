@@ -12,6 +12,8 @@
 #include "config.h"
 #include "container_state.h"
 #include "host_syscall.h"
+#include "broker_proto.h"
+#include "lazy_layer.h"
 #include "union_view.h"
 
 extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6);
@@ -105,9 +107,12 @@ bool union_root(struct union_view *u)
     const payload_config_t *cfg = &g_payload_config;
     if (cfg->lower_count <= 0 || !cfg->root[0]) return false;
     u->layer[0] = cfg->root;
+    u->image[0] = NULL;
     u->count = 1;
-    for (int i = 0; i < cfg->lower_count && i < CONFIG_MAX_LOWERS; i++)
+    for (int i = 0; i < cfg->lower_count && i < CONFIG_MAX_LOWERS; i++) {
+        u->image[u->count] = cfg->lower_image[i][0] ? cfg->lower_image[i] : NULL;
         u->layer[u->count++] = cfg->lower[i];
+    }
     set_lengths(u); /* "/" joins as "" + "/rel" */
     return true;
 }
@@ -131,7 +136,8 @@ int union_views(struct union_view *views, int max, char (*storage)[CONFIG_MAX_PA
         struct union_view *u = &views[n++];
         u->count = 1 + count;
         u->layer[0] = mounts[i].host;
-        for (int k = 0; k < count; k++) u->layer[1 + k] = lowers[k];
+        u->image[0] = NULL;
+        for (int k = 0; k < count; k++) { u->layer[1 + k] = lowers[k]; u->image[1 + k] = NULL; }
         set_lengths(u);
     }
     return n;
@@ -173,6 +179,67 @@ int union_alias(const struct union_view *u, const char *host, char out[PATH_MAX]
     return join(out, u->layer[0], u->length[0], rel, strlen(rel), NULL) < 0 ? 0 : 1;
 }
 
+/* ---------------------------------------------------------------- images */
+/* Directories of layer images known expanded (by st_dev and st_ino): the
+ * marker is looked up once per process. A lost race only repeats a check. */
+#define LAZY_SEEN 1024
+static uint64_t lazy_seen[LAZY_SEEN];
+static uint32_t lazy_roots; /* root view layers whose top is expanded */
+
+static uint64_t lazy_key(const struct stat *st)
+{
+    uint64_t h = (uint64_t)st->st_ino * 0x9E3779B97F4A7C15ull ^ (uint64_t)st->st_dev * 0xC2B2AE3D27D4EB4Full;
+    return h | 1;
+}
+
+/* Expansion or fill (op 1) of host, a path of layer i: by the broker with
+ * --isolate (the guest cannot write the cache there). */
+static long lazy_call(const struct union_view *u, int i, const char *host, int op)
+{
+    if (g_payload_config.isolate) return hs(BROKER_LAZY_PATH, (long)host, op, 0, 0, 0, 0);
+    const char *rel = host + u->length[i];
+    return op ? lazy_fill(u->image[i], u->layer[i], rel) : lazy_expand(u->image[i], u->layer[i], rel);
+}
+
+/* The directory at host (layer i, an image; st its lstat) expanded. */
+static long lazy_dir(const struct union_view *u, int i, const char *host, const struct stat *st)
+{
+    uint64_t key = lazy_key(st);
+    uint64_t *slot = &lazy_seen[(key >> 7) % LAZY_SEEN];
+    if (__atomic_load_n(slot, __ATOMIC_RELAXED) == key) return 0;
+    char marker[PATH_MAX];
+    if (join(marker, host, strlen(host), "/", 1, LAZY_MARKER) < 0) return -ENAMETOOLONG;
+    long rc = exists(marker) ? 0 : lazy_call(u, i, host, 0);
+    if (rc == 0) __atomic_store_n(slot, key, __ATOMIC_RELAXED);
+    return rc;
+}
+
+/* Every image layer's top expanded (once per process). */
+static long lazy_tops(const struct union_view *u)
+{
+    for (int i = 1; i < u->count; i++) {
+        if (!u->image[i] || (__atomic_load_n(&lazy_roots, __ATOMIC_RELAXED) & (1u << i))) continue;
+        struct stat st;
+        long rc = lstat_at(u->layer[i], &st);
+        if (rc == 0) rc = lazy_dir(u, i, u->layer[i], &st);
+        if (rc < 0) return rc;
+        __atomic_or_fetch(&lazy_roots, 1u << i, __ATOMIC_RELAXED);
+    }
+    return 0;
+}
+
+long union_lazy_fill(const struct union_view *u, const char *host)
+{
+    if (!u) return 0;
+    int i = union_layer_of(u, host, NULL);
+    if (i <= 0 || !u->image[i]) return 0;
+    struct stat st;
+    if (lstat_at(host, &st) < 0 || (st.st_mode & S_IFMT_) != S_IFREG_ ||
+        !lazy_placeholder_times((long)st.st_atime, (long)st.st_atime_nsec))
+        return 0;
+    return lazy_call(u, i, host, 1);
+}
+
 /* The walk of rel ("" for the top, else "/a/b"). below: also find out
  * whether a layer other than the upper has the final name. */
 static int walk(const struct union_view *u, const char *rel, struct union_hit *hit,
@@ -193,6 +260,8 @@ static int walk(const struct union_view *u, const char *rel, struct union_hit *h
     hit->below = false;
     hit->whiteout = false;
     hit->dirs = 0;
+    long lazy = lazy_tops(u);
+    if (lazy < 0) return (int)lazy;
     if (!len) {
         /* The top: every layer's root merges (an opaque upper root hides all). */
         hit->layer = 0;
@@ -228,6 +297,10 @@ static int walk(const struct union_view *u, const char *rel, struct union_hit *h
             struct stat st;
             if (lstat_at(path, &st) == 0) {
                 bool is_dir = (st.st_mode & S_IFMT_) == S_IFDIR_;
+                if (is_dir && u->image[i]) {
+                    long lr = lazy_dir(u, i, path, &st);
+                    if (lr < 0) return (int)lr;
+                }
                 if (first < 0) { first = i; first_dir = is_dir; }
                 if (i > 0) below = true;
                 if (!stop) {
@@ -374,8 +447,14 @@ static long copy_one(struct scratch *s, const struct union_view *u, int src, con
         join(to, u->layer[0], u->length[0], rel, len, NULL) < 0)
         return -ENAMETOOLONG;
     struct stat st;
-    long rc = lstat_at(from, &st);
+    long rc = data ? union_lazy_fill(u, from) : 0;
     if (rc < 0) return rc;
+    rc = lstat_at(from, &st);
+    if (rc < 0) return rc;
+    if (lazy_placeholder_times((long)st.st_atime, (long)st.st_atime_nsec)) {
+        st.st_atime = st.st_mtime; /* (truncated: the mark is not copied) */
+        st.st_atime_nsec = st.st_mtime_nsec;
+    }
     unsigned mode = st.st_mode & 07777;
     switch (st.st_mode & S_IFMT_) {
     case S_IFDIR_:

@@ -25,7 +25,7 @@
 /* Script levels the kernel follows (exec_binprm allows five rewrites
  * before ELOOP): the script plus four script interpreters. */
 #define SCRIPT_DEPTH 5
-#define CHAIN_EXTRA (72 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2 + CONFIG_MAX_LOWERS * 2)
+#define CHAIN_EXTRA (72 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2 + CONFIG_MAX_LOWERS * 4)
 #define CHAIN_ARGS (EXEC_ARGS + CHAIN_EXTRA)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
@@ -404,6 +404,10 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     for (int i = 0; i < cfg->lower_count && i < CONFIG_MAX_LOWERS; i++) {
         s->argv[pos++] = "--lower";
         s->argv[pos++] = (char *)cfg->lower[i];
+        if (cfg->lower_image[i][0]) {
+            s->argv[pos++] = "--lower-image";
+            s->argv[pos++] = (char *)cfg->lower_image[i];
+        }
     }
     for (int i = 0; i < cfg->bind_count; i++) {
         /* CLI serializes volumes as host:guest. Colons need a richer protocol. */

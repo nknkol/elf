@@ -11,7 +11,9 @@ copying (EXDEV); mount -t overlay inside merges its own layers; listings merge t
 of a non-empty merged directory fails; a cwd inside a lower directory
 reads as its guest path and relative creation lands in the upper; a later
 run sees the same view. The lower tree is byte-for-byte unchanged. Both
-builds, plain and with --isolate."""
+builds, plain and with --isolate, with the lower as a directory and as a
+layer image (erofs, expanded on demand into a cache: what is read is
+filled, the rest stays placeholders; the image file is unchanged)."""
 import hashlib
 import os
 import stat
@@ -48,6 +50,8 @@ keys = sorted(os.listdir(LOWER / 'etc/apk/keys'))
 etc_lower = sorted(os.listdir(LOWER / 'etc'))
 STEPS = [
     ('read', 'cat /etc/alpine-release', release + '\n'),
+    ('exec of a lower program not run before (its libraries too)', '/sbin/apk --version | cut -c1-9',
+     'apk-tools\n'),
     ('write copies up', 'echo new > /etc/motd; echo more >> /etc/motd; cat /etc/motd', 'new\nmore\n'),
     ('truncate', 'printf abc > /etc/group; : > /etc/group; wc -c < /etc/group', '0\n'),
     ('chmod', 'chmod 600 /etc/fstab; stat -c %a /etc/fstab', '600\n'),
@@ -76,38 +80,59 @@ STEPS = [
 # What /etc lists at the end.
 etc_final = sorted((set(etc_lower) - {'hostname'}) | {'hostname2', 'keys2', 'motd', 'issue'})
 
-with tempfile.TemporaryDirectory(prefix='union-', dir=lib.mode_capable()) as tmp:
-    for suffix, loader in lib.loaders():
-        for isolate in ([], ['--isolate']):
-            what = (loader.name, isolate)
-            upper = Path(tmp, 'upper' + suffix + ''.join(isolate))
-            upper.mkdir()
+sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+import erofs  # noqa: E402
 
-            def run(command, timeout=60):
-                return subprocess.run([str(loader), *lib.ISOLATE_EXTRA, *isolate, '--mode', 'container',
-                                       '--root', str(upper), '--lower', str(LOWER), '-v', '/dev/null:/dev/null',
-                                       '--mount-table', str(upper) + '.mounts', '--mount-scratch',
-                                       str(upper) + '.scratch',
-                                       '--', 'bin/busybox', 'sh', '-c',
-                                       'PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; ' + command],
-                                      cwd='/', capture_output=True, text=True, timeout=timeout)
-            for name, command, expected in STEPS:
-                p = run(command)
-                assert p.returncode == 0 and p.stdout == expected, (what, name, p.returncode, p.stdout,
-                                                                    p.stderr[-2000:])
-            # A later run: the same view; /etc merges both layers.
-            p = run('cat /etc/motd /etc/issue; ls -A /etc')
-            assert p.returncode == 0, (what, p.stderr[-2000:])
-            assert p.stdout.split('\n')[:3] == ['new', 'more', 'again'], (what, p.stdout)
-            assert sorted(p.stdout.split()[3:]) == etc_final, (what, sorted(p.stdout.split()[3:]), etc_final)
-            # The upper is the layer diff: copies, new files, whiteouts.
-            assert (upper / 'etc/motd').read_text() == 'new\nmore\n', what
-            assert (upper / 'etc/.wh.hostname').exists() and (upper / 'etc/apk/.wh.keys').exists(), what
-            assert not (upper / 'etc/.wh.issue').exists(), what
-            assert (upper / 'etc/apk/protected_paths.d/.wh..wh..opq').exists(), what
-            assert (upper / 'usr/local/new/deep/f').read_text() == 'x\n', what
-            assert stat.S_IMODE((upper / 'etc/fstab').stat().st_mode) & 0o077 == 0, what
-            assert not (upper / 'etc/alpine-release').exists(), what
-            assert digest(LOWER) == before, (what, 'the lower changed')
-            print('PASS: copy-on-write root (copy-up, whiteouts, opaque, EXDEV, listings, cwd):',
-                  loader.name, *isolate)
+with tempfile.TemporaryDirectory(prefix='union-', dir=lib.mode_capable()) as tmp:
+    # R6 layer images: the same steps with the lower as an erofs image,
+    # expanded on demand into a cache (a fresh one per run: the payload
+    # expands it, or with --isolate the broker).
+    image = Path(tmp, 'alpine.erofs')
+    erofs.from_dir(LOWER, image)
+    image_digest = hashlib.sha256(image.read_bytes()).hexdigest()
+    runs = [(s, l, i, k) for s, l in lib.loaders() for i in ([], ['--isolate']) for k in ('dir', 'image')]
+    for suffix, loader, isolate, kind in runs:
+        what = (loader.name, isolate, kind)
+        upper = Path(tmp, 'upper' + suffix + ''.join(isolate) + kind)
+        upper.mkdir()
+        lower = ['--lower', str(LOWER)]
+        if kind == 'image':
+            cache = Path(tmp, 'cache' + suffix + ''.join(isolate))
+            cache.mkdir()
+            lower = ['--lower', str(cache), '--lower-image', str(image)]
+
+        def run(command, timeout=60):
+            return subprocess.run([str(loader), *lib.ISOLATE_EXTRA, *isolate, '--mode', 'container',
+                                   '--root', str(upper), *lower, '-v', '/dev/null:/dev/null',
+                                   '--mount-table', str(upper) + '.mounts', '--mount-scratch',
+                                   str(upper) + '.scratch',
+                                   '--', 'bin/busybox', 'sh', '-c',
+                                   'PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; ' + command],
+                                  cwd='/', capture_output=True, text=True, timeout=timeout)
+        for name, command, expected in STEPS:
+            p = run(command)
+            assert p.returncode == 0 and p.stdout == expected, (what, name, p.returncode, p.stdout,
+                                                                p.stderr[-2000:])
+        # A later run: the same view; /etc merges both layers.
+        p = run('cat /etc/motd /etc/issue; ls -A /etc')
+        assert p.returncode == 0, (what, p.stderr[-2000:])
+        assert p.stdout.split('\n')[:3] == ['new', 'more', 'again'], (what, p.stdout)
+        assert sorted(p.stdout.split()[3:]) == etc_final, (what, sorted(p.stdout.split()[3:]), etc_final)
+        # The upper is the layer diff: copies, new files, whiteouts.
+        assert (upper / 'etc/motd').read_text() == 'new\nmore\n', what
+        assert (upper / 'etc/.wh.hostname').exists() and (upper / 'etc/apk/.wh.keys').exists(), what
+        assert not (upper / 'etc/.wh.issue').exists(), what
+        assert (upper / 'etc/apk/protected_paths.d/.wh..wh..opq').exists(), what
+        assert (upper / 'usr/local/new/deep/f').read_text() == 'x\n', what
+        assert stat.S_IMODE((upper / 'etc/fstab').stat().st_mode) & 0o077 == 0, what
+        assert not (upper / 'etc/alpine-release').exists(), what
+        assert digest(LOWER) == before, (what, 'the lower changed')
+        if kind == 'image':
+            assert hashlib.sha256(image.read_bytes()).hexdigest() == image_digest, (what, 'image changed')
+            held = [os.path.join(d, f) for d, _, fs in os.walk(cache) for f in fs
+                    if erofs.placeholder(os.lstat(os.path.join(d, f)))]
+            assert held and not erofs.placeholder(os.lstat(cache / 'bin/busybox')), \
+                (what, 'files read are filled, the others stay placeholders', len(held))
+            assert (cache / 'bin/busybox').read_bytes() == (LOWER / 'bin/busybox').read_bytes(), what
+        print('PASS: copy-on-write root (copy-up, whiteouts, opaque, EXDEV, listings, cwd):',
+              loader.name, *isolate, kind)

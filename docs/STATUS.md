@@ -442,6 +442,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-11-01 Docker/OCI R6 写时复制（[OCI](OCI.md)“R6 实现记录”）：loader `--root UPPER --lower LOWER`（最多 8 层）给出 overlayfs 式的合并视图，上层就是 OCI 层 diff（`.wh.` whiteout、`.wh..wh..opq`）；payload 按层查找（同一调用复用公共前缀）、改动前复制上来（父目录、模式、时间、属主记录随之转移）、删除留 whiteout、下层目录改名 EXDEV、getdents 合并各层；隔离模式下 broker 把下层登记为只读树。容器内 `mount -t overlay` 用同一机制（下层存在挂载表附加区）。`docker run --cow` 共享镜像 rootfs、只写 `containers/<id>/upper`，diff/commit/cp/用户解析读同一合并视图（`tools/oci/union.py`）。层镜像（erofs/squashfs）与 `mount -o loop` 未做，build 仍按扫描计算层。payload ABI 24。新增 `test/proot/test_union.py`；check 270、check-guarded 171、alpine/ubuntu 18/18（常规与 `--isolate`）、check-isolation、`make check-oci` 99 项全部通过。
 2026-11-01 Docker/OCI R7（[OCI](OCI.md)“R7 实现记录”）：`docker compose`（`tools/oci/compose.py`，YAML 子集解析器 `yamlite.py`）：多文件与 override、extends、`.env` 与变量插值、profiles，服务建成带 `com.docker.compose.*` 标签的容器，与宿主共用网络（服务名在 /etc/hosts 指向 127.0.0.1），depends_on 的 healthy/completed 条件由 compose 执行检查，up（前台带前缀输出、`--exit-code-from`）、down、ps、logs、exec、run、build、config 等；配置哈希不变的服务不重建。`docker engine`（`engine.py`）：UNIX 套接字（0600）上的 Engine API 1.43 子集，images、containers（含 logs/attach 多路复用帧、wait、archive）、exec（劫持连接）、volumes、networks（仅 host），绑进 `--isolate` 容器默认拒绝。`make check-oci` 99→121 项全部通过；docker-py 7.2.0 对引擎跑通 run/exec_run/archive/logs/wait/volumes。
 2026-11-01 Docker/OCI build 写上层（[OCI](OCI.md)“R6 实现记录”的 build 一节）：`RUN` 以工作 rootfs 为下层、新建上层运行，上层直接成为这一层（whiteout、不透明目录），再改名移入工作 rootfs；不再前后扫描。属主记录按 inode→路径表命名，不遍历下层。`make check-oci` 121→127。
+2026-11-01 Docker/OCI R6 层镜像（[OCI](OCI.md)“R6 实现记录”的层镜像一节）：每层一个未压缩 erofs 文件（`tools/oci/erofs.py` 写入与读取），loader `--lower CACHE --lower-image IMAGE` 在合并视图查找时按目录展开缓存（`src/payload/logic/lazy_layer.c`，payload 与 loader 共用；隔离模式由 broker 的 `BROKER_LAZY_PATH` 展开），普通文件为占位文件、读之前原地填充；payload ABI 25。`docker image erofs [--prune]`，`--cow` 容器以层镜像为下层，层按 diff_id 共享。`make check-oci` 127→138，`test_union.py` 加层镜像下层的四种组合。
 仍未完成：祖先目录的 stat 仍是宿主元数据；
 非保护模式下的路径竞争与 PRoot 相同；读取模式不检查未知 cwd 的来源，仅依赖反向映射往返后的词法判定。
 环境为当前 HarmonyOS AArch64 终端沙盒；以下结果不能直接外推到其他系统。
@@ -474,7 +475,7 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 | `make check-alpine` / `make check-ubuntu` | 各 18/18 | 离线 rootfs 验收；Ubuntu 归档硬链接按副本展开 |
 | 以上四套加 `ELF_LOADER_OPTIONS=--isolate` | 同上 | 只作用于经 `test/lib.py` 启动 loader 的测试 |
 | `make check-isolation` | 121 + 38 + 38 项通过 | 隔离验收目标 A–L，两种构建；大小写别名（大小写不敏感的存储上，否则 SKIP）；GPU 设备（`device.py`，需 /dev/hvgr0） |
-| `make check-oci` | 127 项通过 | docker 命令 R1–R7 验收（[OCI](OCI.md)），常规与 `--isolate`；真实镜像另见 `test/oci/images.py` |
+| `make check-oci` | 138 项通过 | docker 命令 R1–R7 验收（[OCI](OCI.md)），常规与 `--isolate`；真实镜像另见 `test/oci/images.py` |
 | `make bench` | 只记录 | 原生与各配置的微基准（[BENCHMARKS](BENCHMARKS.md)） |
 
 宿主原生创建硬链接被拒绝的 fixture 记为 SKIP，不算成功；ENOSYS 不算功能实现。

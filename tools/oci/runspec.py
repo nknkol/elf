@@ -55,10 +55,12 @@ def read_guest_file(rootfs, guest_path):
     rootfs may be (upper, lower) of a --cow container (R6)."""
     if isinstance(rootfs, tuple):
         import union
-        host, layer = union.Root(*rootfs).locate('/' + guest_path.lstrip('/'))
+        view = union.Root(*rootfs)
+        host, layer = view.locate('/' + guest_path.lstrip('/'))
         if layer is None:
             return None
-        rootfs = rootfs[layer]
+        view.fill(host, layer)  # a layer image's file (R6)
+        rootfs = view.layers[layer][0]
     root = unpack.Rootfs(rootfs)
     try:
         fd = root.open_file(unpack.clean_name(guest_path.lstrip('/')))
@@ -204,7 +206,10 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
             argv += ['--isolate-device', device]
     argv += ['--mode', 'container', '--root', str(rootfs), '--link-copy']
     if lower:
-        argv += ['--lower', str(lower)]  # R6: the shared image rootfs
+        import union
+        # R6: the shared image rootfs, or the image's layer images.
+        for cache, image in union.lowers(lower):
+            argv += ['--lower', str(cache)] + (['--lower-image', str(image)] if image else [])
     # Mounts the container makes (R4): a table every process of it shares
     # (docker exec joins it through the file), tmpfs directories below.
     argv += ['--mount-table', str(cdir / 'mounts.table'), '--mount-scratch', str(cdir / 'mounts')]
@@ -223,7 +228,9 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
         argv += ['-e', f'{key}={value}']
     if len(str(cdir / 'mounts').encode()) >= MAX_PATH - 48:
         raise SpecError(f'the container directory path is too long for the loader: {cdir}')
-    for value in [str(rootfs), str(lower or ''), cwd, *(p for b in all_binds for p in b[:2])]:
+    import union
+    layer_paths = [str(p) for entry in (union.lowers(lower) if lower else []) for p in entry if p]
+    for value in [str(rootfs), *layer_paths, cwd, *(p for b in all_binds for p in b[:2])]:
         if len(value.encode()) >= MAX_PATH:
             raise SpecError(f'path exceeds the loader limit of {MAX_PATH - 1} bytes: {value[:80]}...')
     if command is None:

@@ -24,6 +24,7 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 
 import images
+import layer_images
 import layers
 import owners as owners_mod
 import registry
@@ -475,7 +476,7 @@ class Builder:
             docker = importlib.import_module('docker_cli')
             image_id = docker.ensure_image(self.st, base, self.pull, quiet=self.quiet)
             info = self.st.image_info(image_id)
-            runspec.copy_rootfs(self.st.image_dir(image_id) / 'rootfs', s.rootfs)
+            runspec.copy_rootfs(layer_images.rootfs(self.st, image_id), s.rootfs)
             s.base_id = image_id
             s.config = json.loads(json.dumps(info['config'].get('config', {})))
             s.layers = list(info['manifest'].get('layers', []))
@@ -811,7 +812,7 @@ class Builder:
         import importlib
         docker = importlib.import_module('docker_cli')
         image_id = docker.ensure_image(self.st, ref, self.pull, quiet=self.quiet)
-        return self.st.image_dir(image_id) / 'rootfs', None
+        return layer_images.rootfs(self.st, image_id), None
 
     def source_path(self, root, path, ins):
         if root == self.context:
@@ -1147,7 +1148,7 @@ def export(st, image_id, spec):
     """--output type=local,dest=DIR | type=tar,dest=FILE | DIR."""
     fields = dict(f.partition('=')[::2] for f in spec.split(',')) if '=' in spec else {'type': 'local', 'dest': spec}
     kind, dest = fields.get('type', 'local'), fields.get('dest')
-    root = st.image_dir(image_id) / 'rootfs'
+    root = layer_images.rootfs(st, image_id)
     if kind == 'local':
         copy_into(root, Path(dest))
         helper = Path(dest) / runspec.HELPER
@@ -1172,12 +1173,13 @@ def container_diff(st, record):
         raise StoreError('an --in-place container has no unchanged image to compare with')
     if host.get('ReadonlyRootfs'):
         return {}, {}, None
-    image_root = st.image_dir(record['Image']) / 'rootfs'
     container_root = runtime.rootfs_of(st, record)
     if host.get('Cow'):
-        # R6: the merged view; files are read from the layer that shows them.
-        return layers.scan(image_root), union.scan(container_root, image_root), \
-            union.Root(container_root, image_root)
+        # R6: the merged view; files are read from the layer that shows them
+        # (a layer image's scan comes from the image, nothing expanded).
+        lower = runtime.lower_of(st, record)
+        return union.lower_scan(lower), union.scan(container_root, lower), union.Root(container_root, lower)
+    image_root = layer_images.rootfs(st, record['Image'])
     return layers.scan(image_root), layers.scan(container_root), container_root
 
 
@@ -1269,9 +1271,9 @@ def cmd_commit(st, args):
         # container keeps its own).
         image_root = work / 'rootfs'
         if root is None:
-            runspec.copy_rootfs(st.image_dir(record['Image']) / 'rootfs', image_root)
+            runspec.copy_rootfs(layer_images.rootfs(st, record['Image']), image_root)
         elif isinstance(root, union.Root):
-            runspec.copy_rootfs(root.lower, image_root)
+            runspec.copy_rootfs(layer_images.rootfs(st, record['Image']), image_root)
             union.apply(root.upper, image_root)
         else:
             runspec.copy_rootfs(root, image_root)

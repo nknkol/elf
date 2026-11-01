@@ -134,6 +134,8 @@ def tree(root):
 
 def image_root(home, name):
     p = docker(home, 'inspect', '-f', '{{.GraphDriver.Data.Rootfs}}', name)
+    # Never '' (that would name the working directory).
+    assert p.returncode == 0 and p.stdout.strip(), (name, p.stdout, p.stderr)
     return Path(p.stdout.strip())
 
 
@@ -525,6 +527,76 @@ def cow_tests(home, work):
           '--cow --owners: chown/chmod of a lower file recorded', p.stdout + p.stderr)
     p = docker(home, 'run', '--rm', '--cow', '--read-only', img, 'true')
     check(p.returncode == 125, '--cow with --read-only is refused', p.stderr)
+
+
+def erofs_tests(home, work):
+    """R6 layer images: docker image erofs; --cow runs on them (docs/OCI.md)."""
+    sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+    import erofs
+    ctx = work / 'erofs-ctx'
+    ctx.mkdir()
+    lines = ['FROM test/alpine:1', 'USER root', 'WORKDIR /']
+    lines += [f'RUN echo layer{i} > /srv/l{i}' for i in range(9)]
+    lines += ['RUN rm /srv/l0 /etc/motd && rm -r /etc/apk/protected_paths.d && mkdir /etc/apk/protected_paths.d '
+              '&& echo opq > /etc/apk/protected_paths.d/x',
+              'RUN chown 321:654 /srv/l1 && chmod 4750 /srv/l1']
+    (ctx / 'Dockerfile').write_text('\n'.join(lines) + '\n')
+    img = 'test/layers:1'
+    p = docker(home, 'build', '-q', '-t', img, str(ctx), timeout=900)
+    check(p.returncode == 0, 'layer images: a 12-layer image builds', p.stderr[-800:])
+    if p.returncode:
+        return
+    cmd = ('cat /srv/l*; ls /etc/apk/protected_paths.d; test -e /etc/motd || echo motd-gone; '
+           'stat -c "%u %g %a" /srv/l1; cat /etc/alpine-release; apk --version | cut -c1-9')
+    ref = docker(home, 'run', '--rm', '--owners', img, cmd)
+    p = docker(home, 'image', 'erofs', img, 'test/alpine:1')
+    data = json.loads(docker(home, 'inspect', '-f', '{{json .GraphDriver.Data}}', img).stdout)
+    stack = data.get('LayerImages', '').split(':')
+    check(p.returncode == 0 and len(stack) == 8 and 'chain-' in stack[-1] and
+          all(Path(i).exists() for i in stack), 'docker image erofs: 12 layers as 7 layer images and one '
+          'of the bottom chain (the loader takes 8 lowers)', p.stdout + p.stderr + str(data))
+    images_before = {i: sha(Path(i).read_bytes()) for i in (home / 'layers').glob('*.erofs')}
+    for mode in ([], ['--isolate']):
+        tag = ' (--isolate)' if mode else ''
+        p = docker(home, 'run', '--rm', '--cow', '--owners', *mode, img, cmd)
+        check(ref.returncode == 0 and p.returncode == 0 and p.stdout == ref.stdout and '321 654 4750' in p.stdout,
+              '--cow on layer images: the same view as a copy (layers, whiteouts, opaque, owners)' + tag,
+              ref.stdout + '\n---\n' + p.stdout + p.stderr)
+    held = sum(1 for c in (home / 'layers').glob('*.cache') for d, _, fs in os.walk(c) for f in fs
+               if erofs.placeholder(os.lstat(os.path.join(d, f))))
+    check(held > 0 and {i: sha(Path(i).read_bytes()) for i in (home / 'layers').glob('*.erofs')} == images_before,
+          'layer images: expanded on demand (unread files stay placeholders); the images unchanged', held)
+    name = 'erofs-c'
+    p = docker(home, 'run', '--cow', '--name', name, img, 'echo w > /srv/l2 && rm /srv/l3 && cat /srv/l2')
+    cid = docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+    cdir = home / 'containers' / cid
+    check(p.stdout == 'w\n' and (cdir / 'upper/srv/l2').read_text() == 'w\n' and (cdir / 'upper/srv/.wh.l3').exists(),
+          'layer images: writes go to the upper', p.stdout + p.stderr)
+    p = docker(home, 'diff', name)
+    check({'C /srv/l2', 'D /srv/l3'} <= set(p.stdout.splitlines()) and 'A /srv/l4' not in p.stdout,
+          'layer images: diff (the lower scanned from the images)', p.stdout + p.stderr)
+    p = docker(home, 'cp', f'{name}:/srv/l4', str(work / 'erofs-out'))
+    check(p.returncode == 0 and (work / 'erofs-out').read_text() == 'layer4\n', 'layer images: cp out',
+          p.stderr)
+    p = docker(home, 'commit', name, 'test/erofs-commit:1')
+    p2 = docker(home, 'run', '--rm', 'test/erofs-commit:1', 'cat /srv/l2; test -e /srv/l3 || echo gone')
+    check(p.returncode == 0 and p2.stdout == 'w\ngone\n', 'layer images: commit', p.stderr + p2.stdout + p2.stderr)
+    docker(home, 'rm', name)
+    docker(home, 'rmi', '-f', 'test/erofs-commit:1')
+    # --prune: no unpacked rootfs; --cow needs none, a copy unpacks it again.
+    image_id = docker(home, 'inspect', '-f', '{{.Id}}', img).stdout.strip()[7:]
+    unpacked = home / 'images' / image_id / 'rootfs'
+    p = docker(home, 'image', 'erofs', '--prune', img)
+    shown = docker(home, 'inspect', '-f', '{{.GraphDriver.Data.Rootfs}}', img).stdout.strip()
+    gone = not unpacked.exists() and shown == ''
+    p2 = docker(home, 'run', '--rm', '--cow', img, 'cat /srv/l5')
+    p3 = docker(home, 'run', '--rm', img, 'cat /srv/l6')
+    check(p.returncode == 0 and gone and p2.stdout == 'layer5\n' and p3.stdout == 'layer6\n' and
+          unpacked.exists(), 'docker image erofs --prune: --cow runs without the unpacked rootfs, '
+          'a copy unpacks it again', p.stdout + p.stderr + p2.stdout + p2.stderr + p3.stdout + p3.stderr)
+    docker(home, 'rmi', '-f', img)
+    left = {Path(i).name for i in stack} & {p.name for p in (home / 'layers').iterdir()}
+    check(not left, 'rmi removes the layer images no other image uses', left)
 
 
 def compose_tests(home, work):
@@ -1052,13 +1124,15 @@ def main():
             build_tests(home, work)
             mount_owner_tests(home, work)
             cow_tests(home, work)
+            erofs_tests(home, work)
             compose_tests(home, work)
             engine_tests(home, work)
         else:
             print('SKIP: container runs need', lib.ALPINE)
         p = docker(home, 'system', 'prune', '-af', '--volumes')
         p2 = docker(home, 'images', '-q')
-        check(p.returncode == 0 and not p2.stdout.strip() and not list((home / 'containers').iterdir()),
+        check(p.returncode == 0 and not p2.stdout.strip() and not list((home / 'containers').iterdir()) and
+              (not (home / 'layers').exists() or not list((home / 'layers').iterdir())),
               'system prune removes everything unused', p.stderr + p2.stdout)
     shutil.rmtree(home, ignore_errors=True)
     if failures:

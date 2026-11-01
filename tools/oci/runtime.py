@@ -14,6 +14,7 @@ import tarfile
 import time
 from pathlib import Path
 
+import layer_images
 import owners as owners_mod
 import union
 import runspec
@@ -60,15 +61,21 @@ def rootfs_of(st, record):
     """The loader's --root: the image's rootfs (read-only, in place), the
     container's copy, or with --cow its upper layer (R6)."""
     if record['HostConfig'].get('ReadonlyRootfs') or record['HostConfig'].get('InPlace'):
-        return st.image_dir(record['Image']) / 'rootfs'
+        return layer_images.rootfs(st, record['Image'])
     if record['HostConfig'].get('Cow'):
         return st.container_dir(record['Id']) / 'upper'
     return st.container_dir(record['Id']) / 'rootfs'
 
 
 def lower_of(st, record):
-    """The image rootfs under a --cow container's upper, else None."""
-    return st.image_dir(record['Image']) / 'rootfs' if record['HostConfig'].get('Cow') else None
+    """What lies under a --cow container's upper: the image rootfs, or the
+    image's layer images (a union.Stack, R6); else None."""
+    host = record['HostConfig']
+    if not host.get('Cow'):
+        return None
+    if host.get('LayerImages'):
+        return union.Stack(host['LayerImages'])
+    return layer_images.rootfs(st, record['Image'])
 
 
 def view_of(st, record):
@@ -83,8 +90,16 @@ def create(st, record, quiet=False):
     cid = record['Id']
     work = st.tmpdir('container')
     try:
-        image_root = st.image_dir(record['Image']) / 'rootfs'
         host = record['HostConfig']
+        lower = None
+        if host.get('Cow'):
+            # R6: a converted image's layer images, else its rootfs.
+            entries = layer_images.stack_entries(st, record['Image'])
+            if entries:
+                host['LayerImages'] = union.Stack(entries).to_json()
+                lower = union.Stack(entries)
+        image_root = None if lower else layer_images.rootfs(st, record['Image'])
+        lower = lower or image_root
         if host.get('ReadonlyRootfs'):
             for name in ('tmp', 'run', 'var-tmp', 'workdir'):
                 (work / 'writable' / name).mkdir(parents=True)
@@ -109,18 +124,21 @@ def create(st, record, quiet=False):
             # R5: owners and modes of the image, by inode of this rootfs
             # (with --cow, of the shared image rootfs: copy-up carries them).
             meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
-            owners_mod.from_meta(image_root if host.get('Cow') else rootfs, meta, work / 'owners.db')
+            if host.get('Cow'):
+                union.from_meta(rootfs, lower, meta, work / 'owners.db')
+            else:
+                owners_mod.from_meta(rootfs, meta, work / 'owners.db')
         runspec.install_helper(rootfs)
         # Docker creates a missing working directory (not in a read-only root).
         cwd = record['Config'].get('WorkingDir')
         binds = [(b[0], b[1]) for b in all_binds(st, record, work)]
         if cwd and host.get('Cow'):
-            found = runspec.guest_resolve((rootfs, image_root), binds, cwd)
+            found = runspec.guest_resolve((rootfs, lower), binds, cwd)
             if not found.is_dir():
                 if any(cwd == d or cwd.startswith(d.rstrip('/') + '/') for _, d in binds):
                     found.mkdir(parents=True, exist_ok=True)
                 else:
-                    union.mkdirs(rootfs, image_root, cwd)
+                    union.mkdirs(rootfs, lower, cwd)
         elif cwd and not host.get('ReadonlyRootfs'):
             runspec.make_guest_dirs(rootfs, binds, cwd)
         store_mod.write_json(work / 'run.json', record)
@@ -147,7 +165,7 @@ def all_binds(st, record, cdir=None):
         # Docker creates a missing working directory; the root cannot
         # change, so an empty private directory stands in for it.
         cwd = record['Config'].get('WorkingDir')
-        image_root = st.image_dir(record['Image']) / 'rootfs'
+        image_root = layer_images.rootfs(st, record['Image'])
         if cwd and cwd not in ('/tmp', '/run', '/var/tmp') and \
                 not runspec.guest_resolve(image_root, [], cwd).is_dir():
             binds.append((str(cdir / 'writable' / 'workdir'), cwd, 'rw'))

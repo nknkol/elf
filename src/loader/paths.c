@@ -2,6 +2,7 @@
 /* Host paths, and the little of the guest view the loader resolves itself
  * (the initial program's PT_INTERP; the payload resolves everything a guest
  * exec names). */
+#include "lazy_layer.h"
 #include "loader.h"
 
 void copy_substr(char *dst, size_t dst_sz, const char *src, size_t len)
@@ -279,6 +280,9 @@ static int map_guest_path(const payload_config_t *cfg, const char *guest, char *
 		if (base_len && r[0] == '/' && base[base_len - 1] == '/')
 			r++, rest_len--;
 		z_memcpy(out + base_len, r, rest_len + 1);
+		/* A layer image's cache: expanded on the way, the file filled. */
+		if (layer && cfg->lower_image[layer - 1][0])
+			lazy_ensure(cfg->lower_image[layer - 1], base, rest, true);
 		struct stat st;
 		if (!cfg->lower_count || z_newfstatat(AT_FDCWD, out, &st, AT_SYMLINK_NOFOLLOW) == 0) {
 			if (!out[0])

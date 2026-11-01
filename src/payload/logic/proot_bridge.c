@@ -1100,7 +1100,8 @@ static int union_prepare(Bridge *b)
         bool tmpfile = (f & O_TMPFILE) == O_TMPFILE;
         bool writes = (f & O_ACCMODE) != O_RDONLY || (f & O_TRUNC) || tmpfile;
         if (layer > 0) {
-            if (!writes) return 0;
+            /* A layer image's file: its content before the kernel opens it. */
+            if (!writes) return (int)union_lazy_fill(b->uv, b->host);
             if ((f & O_CREAT) && (f & O_EXCL)) return -EEXIST;
             rc = union_copy_up(b->uv, b->union_rel, !(f & O_TRUNC) || tmpfile);
             break;
@@ -2999,6 +3000,8 @@ int proot_resolve_exec_path(int dirfd, const char *path, bool follow,
         else {
             strcpy(guest, b->guest);
             strcpy(host, b->host);
+            /* A layer image's file: its content before it is read. */
+            ret = union_lazy_fill(b->final_view, b->host);
         }
     }
     bridge_release(b);
@@ -3030,8 +3033,10 @@ long proot_open_exec_path(int dirfd, const char *path, bool follow,
         if (!ret) {
             strcpy(guest, b->guest);
             strcpy(host, b->host);
-            ret = raw_syscall(__NR_openat, AT_FDCWD, (long)b->host, O_RDONLY | (follow ? 0 : O_NOFOLLOW),
-                              0, 0, 0);
+            ret = union_lazy_fill(b->final_view, b->host);
+            if (!ret)
+                ret = raw_syscall(__NR_openat, AT_FDCWD, (long)b->host, O_RDONLY | (follow ? 0 : O_NOFOLLOW),
+                                  0, 0, 0);
         }
         bool again = optimism_retry(b, &o, ret);
         bridge_release(b);

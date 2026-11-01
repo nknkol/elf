@@ -1,8 +1,9 @@
 # Docker/OCI 镜像支持
 
 **状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主、R6 写时复制、R7 compose 与 Engine API
-已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收（见文末各“实现记录”）；R6 中的层镜像（erofs/squashfs）与
-`mount -o loop` 没有做（理由见 R6 实现记录）。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
+已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收（见文末各“实现记录”）；R6 的层镜像（erofs，按需展开）与
+`build` 直接写合并视图的上层也已完成，只剩只读镜像的 `mount -o loop` 没有做。下文各节保留设计原文，实现与设计不同之处
+集中写在“实现与设计的差异”。
 
 ## 目标
 
@@ -404,8 +405,7 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 1. ~~R5 的属主数据库在不加 `--isolate` 时是否值得做~~：做了，两种模式都在共享内存里，不作安全边界（见“R4–R5 实现记录”）。
 2. ~~守护进程何时引入~~：R1–R3 都不需要（每容器监视进程）；R7 的 Engine API 需要时再定。
 3. `docker` 命令名与真正的 Docker 冲突时的安装方式。
-4. ~~R6 选 erofs 还是 squashfs~~：暂不做层镜像。展开后的镜像 rootfs 本来就只有一份、可作所有容器的共享下层，写时复制
-   不依赖镜像文件；层镜像只在要放到大小写不敏感的存储上或要省展开空间时才有用（见“R6 实现记录”）。
+4. ~~R6 选 erofs 还是 squashfs~~：erofs（未压缩的布局读取简单，内核与 erofs-utils 可校验；见“R6 实现记录”的层镜像一节）。
 
 ## R1–R3 实现记录（2026-11-01，HarmonyOS 真机）
 
@@ -546,12 +546,48 @@ chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全
 - 验收：`make check-oci` 121→127（`RUN` 层只含上层内容、whiteout、不透明目录、chown 与 setuid 进层、`RUN` 后 `COPY`、
   `COPY` 后 `RUN` 的层各自正确）。python:3.13-slim 上 5 条 `RUN` 的构建 2.9 s→2.0 s，rootfs 越大省得越多。
 
+### 层镜像（2026-11-01）
+
+- **格式**（`tools/oci/erofs.py`）：每层一个未压缩的 erofs 文件（4 KiB 块，扩展 inode，flat plain 与 flat inline 数据，
+  目录按字节序排序）。whiteout 仍是 `.wh.<名字>` 文件、不透明标记仍是 `.wh..wh..opq`，所以层镜像就是 OCI 层 diff，可直接作
+  合并视图的下层；属主、模式、setuid、设备号、硬链接（同一 inode 多个名字）都在镜像元数据里。Python 写入器从层 tar（流式读
+  一遍，校验 diff_id）或目录生成；开发机上 `fsck.erofs` 接受这些镜像，`mkfs.erofs` 生成的未压缩镜像（紧凑 inode）也能读。
+  压缩与 chunk 布局的文件拒绝（EOPNOTSUPP）。
+- **按需展开**（`src/payload/include/lazy_layer.h` 写明协议，C 与 Python 各实现一份）：层的目录是缓存目录。合并视图查找时，
+  在镜像层里找到的每个目录先展开一级：建出全部子项（子目录为空、未展开；符号链接；FIFO；普通文件为占位文件），完成后放
+  `.wh..elf-lazy` 标记；每个子项先以 `.wh..elf-lazy-tmp` 建好再改名，存在的名字一定完整；展开在目录的 flock 下进行。
+  占位文件是稀疏文件，大小、模式、mtime 与镜像相同，atime 设为远未来的标记值（relatime 不会改写它；写不进标记的文件系统
+  直接报错，不会把占位当内容）。内容在读之前**原地**填充（同一 inode，R5 按 inode 记的属主不受影响）：只读 open、exec
+  （含解释器、PT_INTERP、库）、复制上来之前。stat 直接由内核回答（大小、模式、时间都对；st_blocks 在填充前为 0）。
+  设备与 socket 跳过（与展开 tar 相同），存储拒绝的 FIFO 也跳过，硬链接展开成各自的文件。
+- **路径安全**：缓存内逐级 `O_NOFOLLOW` 打开，镜像里的符号链接不会把展开引到缓存之外；名字含 `/`、`.`、`..` 或越界的
+  目录块都按损坏镜像处理。
+- **loader**：`--lower CACHE --lower-image IMAGE`（可与普通 `--lower` 混用，共 8 层），子 loader 收到同样的参数。首个程序、
+  PT_INTERP 与 `--cwd` 在 loader 里展开并填充。payload 每个进程记住已展开的目录（按 dev/ino），每个目录只查一次标记。
+  payload ABI 25。
+- **隔离模式**：guest 对下层只有只读树，展开与填充由 broker 执行（伪调用 `BROKER_LAZY_PATH`：路径必须落在某个镜像层的缓存
+  里，broker 用自己的读取器展开）；guest 碰不到镜像文件本身。
+- **docker**：`docker image erofs IMAGE...` 把各层转成 `layers/<diff_id>.erofs`（同一层被多个镜像共享，只存一份）与缓存
+  `layers/<diff_id>.cache`，记在 `images/<id>/layers.json`；超过 8 层时底部各层合并成一个 `layers/chain-<id>.erofs`
+  （应用 whiteout）。之后 `--cow` 容器以这些缓存为下层（记录在 HostConfig `LayerImages`，`inspect` 的 GraphDriver 显示）。
+  `--owners` 的数据库按显示该路径的层的 inode 建立（沿途展开）；`diff` 的下层直接从镜像读出，不展开；`cp`、`commit`、
+  用户解析经同一合并视图（需要内容时先填充）。`--prune` 删除展开的 rootfs，需要完整目录树的命令（复制式容器、`build FROM`、
+  `commit` 的新 rootfs、只读与原地容器）从 blob 重新展开；`rmi` 与 `prune` 删除不再被引用的层镜像。
+- **验收**：`test/oci/erofs_check.py`（写入与读回、层 tar 的 whiteout/硬链接/setuid/设备/属主、缓存展开与原地填充、
+  fsck.erofs 与 mkfs.erofs 互验）；`test/proot/test_union.py` 全部步骤再以层镜像作下层跑一遍（两种构建 × 常规与
+  `--isolate`：读过的文件已填充、其余仍是占位，镜像文件不变），并加上“执行下层里还没运行过的程序”一步；`make check-oci`
+  127→138（12 层镜像转成 7 个层镜像加一个底部链镜像，`--cow --owners` 与复制式容器看到的完全相同，常规与 `--isolate`；
+  按需展开、写入进上层、diff、cp、commit、`--prune` 后 `--cow` 照常而复制式容器重新展开、`rmi` 回收层镜像）。
+- **真实镜像**（设备默认存储）：python:3.13-slim、node:lts-alpine、debian:bookworm-slim 三个镜像共 8 个层镜像，转换 11 s；
+  `--cow` 运行 python 离线负载 4.4–4.7 s（`--isolate` 8.2 s），node、dpkg 正常；python 最大的 166 MB 层运行后缓存展开 144 MB
+  （解释器读了大部分标准库），其余层只展开用到的部分（node 层 96 MB 中 4 MB）。
+- **限制**：占位文件的 atime 显示为标记值、st_blocks 为 0；guest 的 openat2 `RESOLVE_BENEATH` 不经合并视图，可能得到未填充的
+  占位文件；层镜像不放大小写不敏感的存储（缓存要区分大小写）。
+
 ### 与设计的差别
 
-- **没有层镜像**（erofs/squashfs、按需展开）与 `mount -o loop`：共享与写时复制只需要已展开的镜像 rootfs，它本来就只有一份；
-  层镜像要在 payload 与 broker 里各实现一个文件系统读取器加按需展开的缓存，收益只是能放在大小写不敏感的存储上、少占展开
-  空间。需要时再做。
-- **下层不按层拆分**：docker 的下层是展开后的整个镜像 rootfs（一层）；loader 支持多层，`build` 与按层共享还没有用上。
+- **没有 `mount -o loop`**：层镜像只作为 docker 的下层（`--lower-image`）使用，容器内挂载只读镜像还没有接上 R4 的挂载表。
+- **下层按层拆分只在层镜像时**：未转换的镜像，docker 的下层是展开后的整个镜像 rootfs（一层）；转换后每层一个层镜像。
 - **inode**：复制上来后 st_ino 改变（overlayfs 会保持）；已打开的下层 FD 继续读旧内容；硬链接复制后各自独立（本机本来就
   不能建硬链接）。overlay 挂载的上层里的 whiteout 在根的视图里看不见（真实 overlayfs 里是字符设备，可见）。
 - **guarded 的安全遍历**：路径落在下层时不经 mount 根的逐级 O_NOFOLLOW 遍历（下层只读，guest 不能在里面放符号链接）。

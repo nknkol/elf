@@ -68,6 +68,7 @@ check-ubuntu:
 
 # docker command acceptance (docs/OCI.md R1-R3); real images: test/oci/images.py.
 check-oci: build
+	$(PYTHON) test/oci/erofs_check.py
 	$(PYTHON) test/oci/run.py
 
 # Isolation acceptance (docs/ISOLATION_TESTING.md); HarmonyOS device.

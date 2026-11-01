@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.modules.setdefault('docker_cli', sys.modules[__name__])   # For build.py.
 import fmt  # noqa: E402
 import images  # noqa: E402
+import layer_images  # noqa: E402
 import registry  # noqa: E402
 import runspec  # noqa: E402
 import runtime  # noqa: E402
@@ -71,7 +72,10 @@ def image_inspect(st, image_id):
         'Os': config.get('os'),
         'Size': info['info'].get('size', 0),
         'GraphDriver': {'Name': 'elf-unpacked',
-                        'Data': {'Rootfs': str(st.image_dir(image_id) / 'rootfs')}},
+                        'Data': dict({'Rootfs': '' if info['info'].get('pruned') else
+                                      str(st.image_dir(image_id) / 'rootfs')},
+                                     **({'LayerImages': ':'.join(str(i) for _, i in stack)}
+                                        if (stack := layer_images.stack_entries(st, image_id)) else {}))},
         'RootFS': {'Type': 'layers', 'Layers': config.get('rootfs', {}).get('diff_ids', [])},
         'Metadata': {'LastTagTime': info['info'].get('created', ''),
                      'Dirty': bool(info['info'].get('dirty'))},
@@ -252,7 +256,25 @@ def remove_image(st, text, force=False):
     with st.lock():
         target.rename(trash)
     store_mod.remove(trash)
+    layer_images.collect(st)  # layer images no other image shares (R6)
     print(f'Deleted: sha256:{image_id}')
+
+
+def cmd_image_erofs(st, args):
+    p = parser('image erofs', 'Keep the layers of images as erofs layer images (R6): --cow containers '
+               'then run on them, expanded on demand, and layers images share are stored once')
+    p.add_argument('--prune', action='store_true',
+                   help='drop the unpacked rootfs afterwards (unpacked again when a command needs it)')
+    p.add_argument('image', nargs='+')
+    a = p.parse_args(args)
+    for text in a.image:
+        image_id = st.resolve_image(text)
+        entries = layer_images.convert(st, image_id, quiet=False)
+        line = f'{image_id[:12]}: {len(entries)} layer image{"s" if len(entries) != 1 else ""}'
+        if a.prune:
+            freed = layer_images.prune_rootfs(st, image_id)
+            line += f', unpacked rootfs removed ({freed // 1000000} MB)'
+        print(line)
 
 
 def cmd_tag(st, args):
@@ -788,8 +810,10 @@ def container_inspect(st, record):
         'GraphDriver': {'Name': 'elf', 'Data': dict(
             {'Rootfs': str(runtime.rootfs_of(st, record))},
             **({'UpperDir': str(runtime.rootfs_of(st, record)),
-                'LowerDir': str(st.image_dir(record['Image']) / 'rootfs')}
-               if record['HostConfig'].get('Cow') else {}))},
+                'LowerDir': str(runtime.lower_of(st, record))}
+               if record['HostConfig'].get('Cow') else {}),
+            **({'LayerImages': ':'.join(i for _, i in record['HostConfig']['LayerImages'])}
+               if record['HostConfig'].get('LayerImages') else {}))},
         'Mounts': [{'Type': 'bind' if s.startswith('/') else 'volume', 'Source': s if s.startswith('/') else
                     str(st.volume_dir(s) / 'data'), 'Name': '' if s.startswith('/') else s,
                     'Destination': d, 'Mode': m, 'RW': m != 'ro'} for s, d, m in host['Binds']],
@@ -1035,6 +1059,7 @@ def prune_images(st, everything):
         keep.add(info['manifest'].get('config', {}).get('digest', '')[7:])
         keep.update(d[7:] for d in info['info'].get('layer_digests', []))
         keep.add(image_id)
+    freed += layer_images.collect(st)
     for blob in (st.home / 'blobs' / 'sha256').iterdir():
         if blob.name not in keep and len(blob.name) == 64:
             try:
@@ -1183,7 +1208,7 @@ COMMANDS['image'] = group('image', {
     'ls': cmd_images, 'list': cmd_images, 'pull': cmd_pull, 'push': COMMANDS['push'], 'rm': cmd_rmi,
     'tag': cmd_tag, 'history': cmd_history, 'save': cmd_save, 'load': cmd_load,
     'inspect': lambda st, a: cmd_inspect(st, a, 'image'), 'build': COMMANDS['build'],
-    'prune': lambda st, a: cmd_prune(st, 'image', a)})
+    'prune': lambda st, a: cmd_prune(st, 'image', a), 'erofs': cmd_image_erofs})
 COMMANDS['builder'] = group('builder', {'prune': lambda st, a: cmd_prune(st, 'builder', a),
                                         'build': COMMANDS['build']})
 COMMANDS['buildx'] = group('buildx', {'build': COMMANDS['build']})

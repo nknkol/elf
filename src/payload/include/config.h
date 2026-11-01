@@ -73,7 +73,8 @@
 #define CONFIG_OWNER_DB_FD 902
 #define CONFIG_CHILD_OWNER_DB_FD "--owner-db-fd"
 /* Copy-on-write root (docs/OCI.md, R6): read-only lower directories under
- * the root, topmost first (--lower DIR, repeated); the root is the upper. */
+ * the root, topmost first (--lower DIR, repeated); the root is the upper.
+ * --lower-image IMAGE makes the preceding lower the cache of a layer image. */
 #define CONFIG_MAX_LOWERS 8
 
 struct bind_entry {
@@ -158,6 +159,9 @@ typedef struct payload_config {
     /* R6: the root's lower layers (union_view.h); 0: a plain root. */
     int32_t lower_count;
     char lower[CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
+    /* R6 layer images (lazy_layer.h): lower i is the cache of this erofs
+     * image (--lower-image after its --lower); empty: a plain directory. */
+    char lower_image[CONFIG_MAX_LOWERS][CONFIG_MAX_PATH];
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
 } payload_config_t;
