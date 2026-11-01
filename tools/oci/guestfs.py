@@ -260,12 +260,41 @@ class GuestSink:
     def __init__(self, view, base):
         self.view, self.base = view, list(base)
         self.sinks = {}
-        root, rel, upper = view.write_area(self.base)
-        if upper and self.base:   # the base and its parents in the upper
-            try:
-                os.close(union.mkdirs_fd(view.upper, view.lower, '/' + '/'.join(self.base)))
-            except OSError as e:
-                raise StoreError(f'/{"/".join(self.base)}: {e}') from None
+        self.made = set()   # directories known to be in the upper
+        view.write_area(self.base)
+
+    def upper_dir(self, guest):
+        """The guest directory made in the upper as a --cow directory is
+        (lower modes, whiteouts removed, opaque over a deleted one), also
+        when a tar has no entry for it."""
+        key = tuple(guest)
+        if key in self.made:
+            return
+        try:
+            os.close(union.mkdirs_fd(self.view.upper, self.view.lower, '/' + '/'.join(guest)))
+        except OSError as e:
+            raise StoreError(f'/{"/".join(guest)}: {e}') from None
+        self.made.add(key)
+
+    def update_file(self, root, e, guest):
+        """A file bind's mount point: its content is replaced through the
+        source (opened, not replaced), the mount stays."""
+        if e.kind != 'f':
+            raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
+        fd = os.open(root, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
+            os.ftruncate(fd, 0)
+            with e.open() as src:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    os.write(fd, chunk)
+            os.utime(fd, (e.mtime, e.mtime))
+        finally:
+            os.close(fd)
 
     def sink(self, root, upper):
         key = str(root)
@@ -278,8 +307,12 @@ class GuestSink:
         root, rel, upper = self.view.write_area(guest)
         if not rel:
             if e.kind == 'd':
+                if not os.path.isdir(root):
+                    raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
                 return
-            raise StoreError(f'cannot overwrite the mount point /{"/".join(guest)}')
+            if os.path.isdir(root):
+                raise StoreError(f'cannot replace the mount point /{"/".join(guest)}')
+            return self.update_file(root, e, guest)
         if e.kind == 'h':   # its target was written in this copy, maybe in another area
             lroot, lrel, lupper = self.view.write_area(self.base + e.link)
             if not lrel:
@@ -290,7 +323,11 @@ class GuestSink:
                 raise StoreError(f'hard link {"/".join(e.parts)} to missing {"/".join(e.link)}') from None
             mode = stat.S_IMODE(os.fstat(fd).st_mode)
             e = e._replace(kind='f', mode=mode, open=lambda: os.fdopen(fd, 'rb'))
+        if upper and len(guest) > 1:
+            self.upper_dir(guest[:-1])
         self.sink(root, upper).put(e._replace(parts=rel))
+        if upper and e.kind == 'd':
+            self.made.add(tuple(guest))
 
     def finish(self):
         for s in self.sinks.values():

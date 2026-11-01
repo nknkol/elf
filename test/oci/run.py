@@ -545,6 +545,20 @@ def cow_tests(home, work):
               not any('.wh.' in n for n in names),
               '--cow: cp of a directory is the merged view (whiteouts applied, markers hidden)' + tag,
               p.stderr + str(sorted(names))[:800])
+        # A tar without entries for its directories: a directory the upper
+        # deleted comes back opaque (only the new file shows).
+        (cdir / 'upper/etc/.wh.apk').touch()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            info = tarfile.TarInfo('etc/apk/new')
+            info.size = 4
+            tar.addfile(info, io.BytesIO(b'new\n'))
+        p = docker(home, 'cp', '-', f'{name}:/', input=buf.getvalue(), text=False)
+        out = work / ('cow-apk' + tag)
+        p2 = docker(home, 'cp', f'{name}:/etc/apk', str(out))
+        check(p.returncode == 0 and p2.returncode == 0 and sorted(os.listdir(out)) == ['new'],
+              '--cow: cp of a tar without directory entries keeps a deleted directory deleted' + tag,
+              [p.stderr, p2.stderr, sorted(os.listdir(out)) if out.exists() else None])
         # A symlink in the upper at the destination is replaced, not followed.
         victim = work / ('cow-victim' + tag)
         victim.write_text('host\n')
@@ -1106,15 +1120,25 @@ def run_tests(home, work, isolate):
     mvol, rovol = work / ('mvol' + suffix), work / ('rovol' + suffix)
     mvol.mkdir()
     rovol.mkdir()
+    conf, roconf = work / ('app.conf' + suffix), work / ('ro.conf' + suffix)
+    conf.write_text('old\n')
+    roconf.write_text('old\n')
     mname = 'mnt' + suffix
     docker(home, 'run', *mode, '--name', mname, '-u', 'root', '-v', f'{mvol}:/srv/sub', '-v', f'{rovol}:/srv/ro:ro',
-           img, 'true')
+           '-v', f'{conf}:/srv/app.conf', '-v', f'{roconf}:/srv/ro.conf:ro', img, 'true')
     mcdir = home / 'containers' / docker(home, 'inspect', '-f', '{{.Id}}', mname).stdout.strip()
     p = docker(home, 'cp', str(work / 'cptree') + '/.', f'{mname}:/srv')
     p2 = docker(home, 'cp', str(work / 'cpfile'), f'{mname}:/srv/ro/')
     check(p.returncode == 0 and (mvol / 'f').read_text() == 'tree\n' and
           not (mcdir / 'rootfs/srv/sub/f').exists() and p2.returncode != 0 and not any(rovol.iterdir()),
           'cp into the container writes a volume inside the tree to its source; a read-only volume refuses' + tag,
+          p.stderr + p2.stderr)
+    # A file bind: cp updates its content through the source (the mount
+    # stays); a read-only one refuses.
+    p = docker(home, 'cp', str(work / 'cpfile'), f'{mname}:/srv/app.conf')
+    p2 = docker(home, 'cp', str(work / 'cpfile'), f'{mname}:/srv/ro.conf')
+    check(p.returncode == 0 and conf.read_text() == 'copied' and p2.returncode != 0 and
+          roconf.read_text() == 'old\n', 'cp onto a file bind updates its source; a read-only one refuses' + tag,
           p.stderr + p2.stderr)
     docker(home, 'rm', mname)
     # exec -d processes are the container's: they end when it stops, also
