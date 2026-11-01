@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -207,7 +208,7 @@ class Ignore:
                 continue
             negate = line.startswith('!')
             pattern = os.path.normpath(line[1:].strip() if negate else line).lstrip('/')
-            self.rules.append((negate, re.compile('^' + self._regex(pattern) + '$')))
+            self.rules.append((negate, re.compile('^' + self._regex(pattern) + '$'), pattern))
 
     @staticmethod
     def _regex(pattern):
@@ -248,10 +249,44 @@ class Ignore:
         parts = rel.split('/')
         prefixes = ['/'.join(parts[:n]) for n in range(1, len(parts) + 1)]
         result = False
-        for negate, rx in self.rules:
+        for negate, rx, _ in self.rules:
             if any(rx.match(prefix) for prefix in prefixes):
                 result = not negate
         return result
+
+    def may_include_below(self, rel):
+        """Whether an exception could bring back a path below the excluded
+        directory rel (so the context copy goes into it): rules matching
+        rel or a parent decide rel's descendants as they decide rel, so
+        only an exception longer than rel, matching it component by
+        component, or one with ** within its length, can. Conservative."""
+        parts = rel.strip('/').split('/')
+        for negate, _, pattern in self.rules:
+            if not negate:
+                continue
+            pp = pattern.split('/')
+            if any('**' in c for c in pp[:len(parts) + 1]):
+                return True
+            if len(pp) > len(parts) and all(re.match('^' + self._regex(c) + '$', part)
+                                            for c, part in zip(pp, parts)):
+                return True
+        return False
+
+
+def skipped(p, rel, ignore, base):
+    """Whether .dockerignore leaves p (at rel) out entirely: excluded, and
+    no exception brings back anything below it (an excluded directory
+    holding such a file is kept for it, as Docker keeps its parents)."""
+    if not ignore or not ignore.excluded(rel):
+        return False
+    if p.is_symlink() or not p.is_dir() or not ignore.may_include_below(rel):
+        return True
+    for d, dirs, files in os.walk(p):
+        for name in dirs + files:
+            sub = Path(d, name)
+            if not ignore.excluded(str(sub.relative_to(base))):
+                return False
+    return True
 
 
 def hash_tree(path, ignore=None, base=None):
@@ -262,7 +297,7 @@ def hash_tree(path, ignore=None, base=None):
 
     def add(p):
         rel = str(p.relative_to(base)) if p != base else '.'
-        if ignore and rel != '.' and ignore.excluded(rel):
+        if rel != '.' and skipped(p, rel, ignore, base):
             return
         st = os.lstat(p)
         h.update(f'{rel}\0{st.st_mode:o}\0'.encode())
@@ -303,7 +338,7 @@ def copy_into(src, dest, ignore=None, base=None, chmod=None):
     for child in sorted(os.listdir(src)):
         s = src / child
         rel = str(s.relative_to(base))
-        if ignore and ignore.excluded(rel):
+        if skipped(s, rel, ignore, base):
             continue
         copy_into(s, dest / child, ignore, base, chmod)
     shutil.copystat(src, dest)
@@ -359,26 +394,94 @@ class Builder:
         self.ignore = None
         if self.context:
             self.context = self.stage_context(self.context)
-        if self.context and (self.context / '.dockerignore').exists():
-            self.ignore = Ignore((self.context / '.dockerignore').read_text())
         self.stages = []
         self.step = 0
 
     def stage_context(self, context):
         """The build reads its context from a private copy made here, as
         Docker reads the tar it was sent: read through FDs opened from the
-        context's root without following links (guestfs), links kept as
-        links, modes and times exact. Whatever the context's links or a
-        later change of it, nothing outside it is read."""
+        context's root without following links, links kept as links, modes
+        and times exact. Whatever the context's links or a later change of
+        it, nothing outside it is read.
+
+        .dockerignore is read first (from the root FD, a regular file, not
+        a link) and the copy follows it: an excluded file is never opened,
+        an excluded directory is entered only when an exception could
+        bring back something below it (the copy is then a superset that
+        Ignore still filters). The store (the build's own work, this copy
+        among it) is never copied, should it lie in the context."""
         import guestfs
+        try:
+            root = os.open(context, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except OSError as e:
+            raise BuildError(f'cannot read the build context: {e}') from None
         staged = self.work / 'context'
         staged.mkdir()
-        fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        skip = set()
+        for p in (self.st.home, staged):
+            s = os.stat(p)
+            skip.add((s.st_dev, s.st_ino))
         try:
-            guestfs.copy(guestfs.View(context, []).walk([], []), guestfs.DirSink(fd, exact=True))
+            text = self.read_ignore(root)
+            self.ignore = Ignore(text) if text is not None else None
+            fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            guestfs.copy(self.context_entries(root, [], skip), guestfs.DirSink(fd, exact=True))
         except store_mod.StoreError as e:
             raise BuildError(f'cannot read the build context: {e}') from None
+        finally:
+            os.close(root)
         return staged
+
+    @staticmethod
+    def read_ignore(root):
+        try:
+            fd = os.open('.dockerignore', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=root)
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise BuildError(f'cannot read .dockerignore: {e}') from None
+        with os.fdopen(fd, 'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise BuildError('cannot read .dockerignore: not a regular file')
+            return f.read().decode('utf-8', 'replace')
+
+    def context_entries(self, dirfd, parts, skip):
+        """Entries of the context directory dirfd (guestfs.Entry), by the
+        rules of .dockerignore (stage_context)."""
+        import guestfs
+        for name in sorted(os.listdir(dirfd)):
+            rel = parts + [name]
+            path = '/'.join(rel)
+            st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            kind = guestfs.kind_of(st.st_mode)
+            if (st.st_dev, st.st_ino) in skip:
+                continue
+            if self.ignore is not None and path != '.dockerignore' and self.ignore.excluded(path) and not (
+                    kind == 'd' and self.ignore.may_include_below(path)):
+                continue
+            if kind == 'l':
+                yield guestfs.Entry(rel, 'l', stat.S_IMODE(st.st_mode), st.st_mtime, st.st_size,
+                                    os.readlink(name, dir_fd=dirfd), None)
+            elif kind == 'd':
+                fd = os.open(name, unpack.DIR_FLAGS, dir_fd=dirfd)
+                try:
+                    fs = os.fstat(fd)
+                    if (fs.st_dev, fs.st_ino) in skip:
+                        continue
+                    yield guestfs.Entry(rel, 'd', stat.S_IMODE(fs.st_mode), fs.st_mtime, 0, None, None)
+                    yield from self.context_entries(fd, rel, skip)
+                finally:
+                    os.close(fd)
+            elif kind == 'f':
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+                try:
+                    fs = os.fstat(fd)
+                    if stat.S_ISREG(fs.st_mode):
+                        yield guestfs.Entry(rel, 'f', stat.S_IMODE(fs.st_mode), fs.st_mtime, fs.st_size, None,
+                                            lambda fd=fd: os.fdopen(os.dup(fd), 'rb'))
+                finally:
+                    os.close(fd)
 
     def say(self, text):
         if not self.quiet:

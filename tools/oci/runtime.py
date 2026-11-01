@@ -66,6 +66,11 @@ def refresh(st, record):
     """A record whose 'running' state outlived its process (the waiting
     docker or monitor process was killed) becomes 'exited'."""
     state = record['State']
+    if state.get('Paused') and not pause_owner_alive(state.get('PauseOwner')):
+        with st.lock():
+            record = st.load_container(record['Id'])
+            resume_orphaned_pause(st, record)
+            state = record['State']
     if state['Status'] in ('running', 'restarting') and not alive(state):
         monitor = state.get('MonitorPid') or 0
         if monitor and proc_start_time(monitor) == state.get('MonitorStart'):
@@ -132,48 +137,122 @@ def container_groups(st, record):
     return groups
 
 
-def pause(st, cid):
+class PauseError(StoreError):
+    pass
+
+
+def pause_owner_alive(owner):
+    return isinstance(owner, list) and len(owner) == 2 and owner[0] > 0 and \
+        proc_start_time(owner[0]) == owner[1]
+
+
+def pause(st, cid, timeout=5.0):
     """Stops a running container's processes (SIGSTOP to its process
     groups) until the returned function is called, which continues them;
-    no exec starts meanwhile. A container that is not running: nothing."""
+    no exec starts meanwhile. A container that is not running: nothing.
+
+    The pause has one owner (State.PauseOwner: [pid, start] of this process):
+    another pause of the same container is refused while its owner lives,
+    and only the owner's resume continues the container. Every group must
+    be signalled and every process found stopped within timeout, or the
+    groups are continued, the state cleared and PauseError raised: the
+    caller reads nothing of a container that may still be writing."""
+    me = [os.getpid(), proc_start_time(os.getpid())]
     with st.lock():
         record = st.load_container(cid)
-        if record['State']['Status'] != 'running' or not alive(record['State']):
+        state = record['State']
+        if state['Status'] != 'running' or not alive(state):
             return lambda: None
-        record['State']['Paused'] = True
+        if state.get('Paused') and pause_owner_alive(state.get('PauseOwner')):
+            raise PauseError(f'Container {cid[:12]} is already paused')
+        state.update(Paused=True, PauseOwner=me)
         st.save_container(record)
         groups = container_groups(st, record)
-    for pgid in groups:
-        try:
-            os.killpg(pgid, signal.SIGSTOP)
-        except (ProcessLookupError, PermissionError):
-            pass
-    # Every process of those groups has stopped before the caller reads.
-    deadline = time.time() + 5
-    while time.time() < deadline and not all(stopped(pgid) for pgid in groups):
-        time.sleep(0.01)
+    signalled = []
+    failure = None
 
     def resume():
-        for pgid in groups:
+        for pgid in signalled:
             try:
                 os.killpg(pgid, signal.SIGCONT)
             except (ProcessLookupError, PermissionError):
                 pass
-        if st.container_dir(cid).exists():
-            set_state(st, cid, Paused=False)
+        with st.lock():
+            if st.container_dir(cid).exists():
+                record = st.load_container(cid)
+                if record['State'].get('PauseOwner') == me:
+                    record['State'].update(Paused=False, PauseOwner=None)
+                    st.save_container(record)
+
+    for pgid in groups:
+        try:
+            os.killpg(pgid, signal.SIGSTOP)
+            signalled.append(pgid)
+        except ProcessLookupError:
+            pass      # (gone since: nothing left to write)
+        except OSError as e:
+            failure = f'cannot stop process group {pgid}: {e}'
+            break
+    if failure is None:
+        # Every process of those groups has stopped before the caller reads.
+        deadline = time.time() + timeout
+        while not all(stopped(pgid) for pgid in groups):
+            if time.time() >= deadline:
+                failure = f'its processes did not stop within {timeout:g}s'
+                break
+            time.sleep(0.01)
+    if failure is not None:
+        resume()
+        raise PauseError(f'cannot pause container {cid[:12]}: {failure}')
     return resume
 
 
+def resume_orphaned_pause(st, record):
+    """A pause whose owner died (killed mid-commit): its groups continue
+    and the state clears. Under the store lock."""
+    state = record['State']
+    if not state.get('Paused') or pause_owner_alive(state.get('PauseOwner')):
+        return
+    for pgid in container_groups(st, record):
+        try:
+            os.killpg(pgid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError):
+            pass
+    state.update(Paused=False, PauseOwner=None)
+    st.save_container(record)
+
+
+# HongMeng shows a stopped task as 'S' in /proc; its wchan then names the
+# signal-delivery stop (a task sleeping anywhere else, pause() included,
+# shows its own wait).
+STOP_WCHAN = 'thread_precheck_deliver_signal'
+
+
+def task_stopped(task):
+    """Whether the task (/proc/PID/task/TID) is stopped (or gone)."""
+    try:
+        state = (task / 'stat').read_text().rsplit(')', 1)[1].split()[0]
+        if state in ('T', 't', 'Z', 'X'):
+            return True
+        return (task / 'wchan').read_text().strip() == STOP_WCHAN
+    except (OSError, IndexError):
+        return True
+
+
 def stopped(pgid):
-    """Whether every process of the group is stopped (or gone)."""
+    """Whether every thread of every process of the group is stopped (or
+    gone)."""
     for entry in os.listdir('/proc'):
         if not entry.isdigit():
             continue
         try:
             fields = Path(f'/proc/{entry}/stat').read_text().rsplit(')', 1)[1].split()
-        except OSError:
+            if int(fields[2]) != pgid:
+                continue
+            tasks = os.listdir(f'/proc/{entry}/task')
+        except (OSError, IndexError, ValueError):
             continue
-        if int(fields[2]) == pgid and fields[0] not in ('T', 't', 'Z', 'X'):
+        if not all(task_stopped(Path(f'/proc/{entry}/task/{t}')) for t in tasks):
             return False
     return True
 

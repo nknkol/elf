@@ -9,7 +9,9 @@
  *   probe h|d stat|lstat|readlink|list|chdir|statfs|getxattr PATH
  *   probe h   rawlist PATH           open through the payload, getdents64 from its svc
  *   probe h   rawlistwait PATH       the same, listing after a line on stdin
- *   probe h   lazy IMAGE CACHE REL OP  a forged BROKER_LAZY_MOUNT (OP 0 expand, 1 fill)
+ *   probe h   lazy IMAGE CACHE REL OP [N]  a forged BROKER_LAZY_MOUNT (OP 0 expand, 1 fill);
+ *                                    N: "ready", a line read from stdin, then sent N
+ *                                    times, "lazy-rc RC COUNT" per result
  *   probe h   reopen PATH            O_PATH open, then reopen by /proc/self/fd/N and by a
  *                                    forged magic-link request; each listed from the svc
  *   probe h|d mkdir|unlink|rmdir|chmod|chown|utime|truncate|setxattr PATH
@@ -522,7 +524,7 @@ static void reopen(const char *path)
     list_fd("reopen-forged", rc >= 1000 ? rc - 1000 : rc);
 }
 
-static void lazy_forged(const char *image, const char *cache, const char *rel, long op)
+static void lazy_forged(const char *image, const char *cache, const char *rel, long op, long times)
 {
     payload_config_t *cfg = payload_config();
     if (!cfg || !cfg->isolate) { report("isolated", 0); return; }
@@ -549,7 +551,24 @@ static void lazy_forged(const char *image, const char *cache, const char *rel, l
         r->len[i] = strlen(parts[i]) + 1;
         used += r->len[i];
     }
-    report("lazy", request(pair[0], r, sizeof(*r) + used, 0, 0, 0, 0));
+    if (times <= 0) {
+        report("lazy", request(pair[0], r, sizeof(*r) + used, 0, 0, 0, 0));
+        return;
+    }
+    printf("ready\n");
+    fflush(stdout);
+    char line[8];
+    if (!fgets(line, sizeof(line), stdin)) return;   /* the harness starts moving */
+    long rcs[8] = {0}, counts[8] = {0};
+    int kinds = 0;
+    for (long t = 0; t < times; t++) {
+        long rc = request(pair[0], r, sizeof(*r) + used, 0, 0, 0, 0);
+        int k = 0;
+        while (k < kinds && rcs[k] != rc) k++;
+        if (k == kinds && kinds < 8) rcs[kinds++] = rc;
+        if (k < 8) counts[k]++;
+    }
+    for (int k = 0; k < kinds; k++) printf("lazy-rc %ld %ld\n", rcs[k], counts[k]);
 }
 
 static void after_broker_gone(const char *path)
@@ -783,7 +802,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "rawlist")) rawlist(p, 0);
     else if (!strcmp(op, "rawlistwait")) rawlist(p, 1);
     else if (!strcmp(op, "reopen")) reopen(p);
-    else if (!strcmp(op, "lazy") && argc > 6) lazy_forged(p, q, argv[5], atol(argv[6]));
+    else if (!strcmp(op, "lazy") && argc > 6) lazy_forged(p, q, argv[5], atol(argv[6]), argc > 7 ? atol(argv[7]) : 0);
     else if (!strcmp(op, "exec")) {
         char *args[] = {(char *)p, 0}, *env[] = {0};
         long rc = direct ? via(281, AT_FDCWD, (long)p, (long)args, (long)env, 0, 0)

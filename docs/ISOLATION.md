@@ -303,5 +303,11 @@ guest 视图里的设备路径必须翻译成同一宿主路径：compat 模式�
 - 继承来的 FD：直接用 loader 时，调用者留给它的每个 FD 都是显式交给 guest 的能力，过滤器放行 FD 上的数据操作，
   broker 不检查它们；调用者要么关掉，要么就是有意给出。agent 启动器默认把 stdio 以外的继承 FD 设为 close-on-exec，
   只保留 `--pass-fd N` 列出的（`test/fs_policy/agent_launch.py` 验收）。
-- broker 代为展开层镜像缓存（`BROKER_LAZY_MOUNT` 与下层缓存）时，缓存里只要有别的访问（`r`、`d`、glue、loader 文件）
-  的树就拒绝：可写的缓存根不代表所有后代可写（`test/isolation/lazy_nested.py` 验收）。
+- broker 代为展开层镜像缓存（`BROKER_LAZY_MOUNT` 与下层缓存）时，检查做在展开实际打开的对象上：缓存根打开后，
+  其中只要有别的访问（`r`、`d`、glue、loader 文件）的树就拒绝（可写的缓存根不代表所有后代可写）；之后逐级打开的每个
+  目录、要填充的文件，都在用它的 FD 继续之前比较 (dev, ino)，等于受保护树的根（或文件树本身）就拒绝。受保护子树只能
+  经它的根进入，检查与使用是同一个 FD，所以检查之后才移进缓存的目录在遍历遇到它时被拒绝。新建条目的 chmod 先以
+  `O_NOFOLLOW` 打开并核对类型（不跟随期间换进来的链接），改名用 `RENAME_NOREPLACE`（存储不支持时退回覆盖）；填充时写入
+  的文件须与加锁检查的是同一 inode。验收（`test/isolation/lazy_nested.py`）：静态嵌套布局；以及一个含受保护子树的
+  可写目录在 guest 就绪后被反复移进移出缓存，同时伪造 400 次展开与填充请求——没有一次成功、受保护子树不变
+  （59c7dd9 的 loader 在同一用例下有 28–50 次成功并改写了子树）。

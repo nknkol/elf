@@ -964,7 +964,7 @@ static int at_or_below(int dir, unsigned long dev, unsigned long ino)
 }
 
 /* A cache the broker expands or fills (lazy_layer.c walks it with
- * O_NOFOLLOW but checks no access of its own): refused when any tree of
+ * O_NOFOLLOW, lazy_check_object judging each object): refused when any tree of
  * other access ('r', 'd', glue, the loader file) lies inside it, so a
  * writable cache root never stands for read-only or denied descendants.
  * self: the cache's own tree (a lower) does not count. */
@@ -1009,6 +1009,47 @@ static int cache_holds_protected(int cache, int self)
 	return 0;
 }
 
+/* The request being served: whether the cache's own tree (a lower) is
+ * exempt, and the cache's identity, recorded at the top. */
+static struct { int self; unsigned long dev, ino; } lazy_now;
+
+/* lazy_object_check while the broker serves a request: the cache itself
+ * (top) must hold no protected tree; every directory the walk then opens,
+ * and the file it fills, must not be a protected tree's own object. A
+ * protected tree is reached only through its root (or is the file), and
+ * each check is made on the FD the walk goes on with: a directory moved
+ * into the cache after the top was checked is refused where the walk
+ * meets it. */
+static long lazy_check_object(long fd, bool top)
+{
+	struct stat st;
+	if (sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) < 0)
+		return -EACCES_;
+	if (top) {
+		lazy_now.dev = st.st_dev;
+		lazy_now.ino = st.st_ino;
+		return cache_holds_protected((int)fd, lazy_now.self) ? -EACCES_ : 0;
+	}
+	for (int i = 0; i < tree_count; i++) {
+		if (trees[i].access == 'w')
+			continue;
+		if (lazy_now.self && trees[i].dev == lazy_now.dev && trees[i].ino == lazy_now.ino)
+			continue;
+		if (trees[i].dev == st.st_dev && trees[i].ino == st.st_ino)
+			return -EACCES_;
+	}
+	return 0;
+}
+
+static long lazy_checked(int self, const char *image, const char *cache, const char *rel, int fill)
+{
+	lazy_now.self = self;
+	lazy_object_check = lazy_check_object;
+	long rc = fill ? lazy_fill(image, cache, rel) : lazy_expand(image, cache, rel);
+	lazy_object_check = 0;
+	return rc;
+}
+
 static long lazy_request(const struct call *c)
 {
 	char path[4096];
@@ -1023,14 +1064,7 @@ static long lazy_request(const struct call *c)
 		if (!broker_cfg->lower_image[i][0] || z_strncmp(path, cache, n) ||
 		    (path[n] && path[n] != '/'))
 			continue;
-		int fd = (int)sys(__NR_openat, AT_FDCWD, (long)cache, O_PATH_ | O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0);
-		int nested = fd < 0 || cache_holds_protected(fd, 1);
-		if (fd >= 0)
-			sys(__NR_close, fd, 0, 0, 0, 0, 0);
-		if (nested)
-			return -EACCES_;
-		return c->a[1] ? lazy_fill(broker_cfg->lower_image[i], cache, path + n)
-			       : lazy_expand(broker_cfg->lower_image[i], cache, path + n);
+		return lazy_checked(1, broker_cfg->lower_image[i], cache, path + n, c->a[1] != 0);
 	}
 	return -EACCES_;
 }
@@ -1061,13 +1095,11 @@ static long lazy_mount_request(struct call *c)
 			    O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
 		rc = image < 0 ? image : cache < 0 ? cache : 0;
 	}
-	if (rc >= 0 && cache_holds_protected((int)cache, 0))
-		rc = -EACCES_;
 	if (rc >= 0) {
 		char image_path[32], cache_path[32];
 		fd_path(image_path, (int)image);
 		fd_path(cache_path, (int)cache);
-		rc = c->a[1] ? lazy_fill(image_path, cache_path, rel) : lazy_expand(image_path, cache_path, rel);
+		rc = lazy_checked(0, image_path, cache_path, rel, c->a[1] != 0);
 	}
 	if (image >= 0)
 		sys(__NR_close, image, 0, 0, 0, 0, 0);

@@ -35,6 +35,12 @@
 #define LAZY_ATIME_SEC 15000000000L
 #define LAZY_ATIME_NSEC 123456789L
 
+/* Loader build only: set by the broker for the guest's requests, called
+ * with every cache object the walk opens (top: the cache itself; then
+ * each directory on the way and the file filled) before anything there is
+ * read or changed; a negative result refuses the request. */
+extern long (*lazy_object_check)(long fd, bool top);
+
 /* Expands the directory at rel ("" for the top, else "/a/b") of the cache
  * from the image. 0 or -errno (-ENOENT/-ENOTDIR: no such directory in the
  * image). */

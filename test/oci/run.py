@@ -503,6 +503,23 @@ def mount_owner_tests(home, work):
         docker(home, 'rmi', '-f', image)
 
 
+def last_layer_files(home, image, wanted):
+    """{name: text} of the wanted files in the image's last layer."""
+    saved = docker(home, 'save', image, text=False)
+    out = {}
+    with tarfile.open(fileobj=io.BytesIO(saved.stdout)) as outer:
+        manifest = json.loads(outer.extractfile('manifest.json').read())
+        data = outer.extractfile(manifest[0]['Layers'][-1]).read()
+        if data[:2] == b'\x1f\x8b':
+            data = gzip.decompress(data)
+        with tarfile.open(fileobj=io.BytesIO(data)) as layer:
+            for m in layer:
+                name = m.name[2:] if m.name.startswith('./') else m.name
+                if name in wanted:
+                    out[name] = layer.extractfile(m).read().decode()
+    return out
+
+
 def pause_orphan_tests(home, work):
     """commit --pause stops the container while it is read and continues
     it whatever happens; a container whose monitor and entry process are
@@ -519,33 +536,22 @@ def pause_orphan_tests(home, work):
         image = f'test/paused{"-iso" if mode else ""}:1'
         p = docker(home, 'commit', name, image)
         # The layer of the new image and its local rootfs hold the same files.
-        saved = docker(home, 'save', image, text=False)
-        layer_files = {}
-        with tarfile.open(fileobj=io.BytesIO(saved.stdout)) as outer:
-            manifest = json.loads(outer.extractfile('manifest.json').read())
-            last = manifest[0]['Layers'][-1]
-            data = outer.extractfile(last).read()
-            if data[:2] == b'\x1f\x8b':
-                data = gzip.decompress(data)
-            with tarfile.open(fileobj=io.BytesIO(data)) as layer:
-                for m in layer:
-                    name_ = m.name[2:] if m.name.startswith('./') else m.name
-                    if name_ in ('a', 'b'):
-                        layer_files[name_] = layer.extractfile(m).read().decode()
+        layer_files = last_layer_files(home, image, ('a', 'b')) if p.returncode == 0 else {}
         p2 = docker(home, 'run', '--rm', image, 'cat /a /b')
-        running = proc_state(state['Pid'])
+        running = proc_stopped(state['Pid'])
         before = docker(home, 'exec', name, 'cat', '/a').stdout
         time.sleep(0.5)
         after = docker(home, 'exec', name, 'cat', '/a').stdout
         check(p.returncode == 0 and layer_files.get('a', '') + layer_files.get('b', '') == p2.stdout and
-              running not in ('T', 't') and before != after,
+              running is False and before != after,
               'commit --pause: the layer and the image rootfs agree; the container runs on' + tag,
               [p.stderr, layer_files, p2.stdout, running, before, after])
         p = docker(home, 'commit', '-c', 'FROM busybox', name, image + 'x')
         time.sleep(0.2)
-        check(p.returncode != 0 and proc_state(state['Pid']) not in ('T', 't') and
+        check(p.returncode != 0 and proc_stopped(state['Pid']) is False and
               docker(home, 'exec', name, 'true').returncode == 0,
               'commit --pause: a failed commit continues the container' + tag, p.stderr)
+        pause_owner_tests(home, name, tag)
         docker(home, 'rm', '-f', name)
         docker(home, 'rmi', '-f', image)
         # The monitor dies, then the entry process exits leaving a job in
@@ -573,11 +579,89 @@ def pause_orphan_tests(home, work):
         docker(home, 'rm', '-f', name)
 
 
-def proc_state(pid):
+def pause_owner_tests(home, name, tag):
+    """A pause has one owner and either stops every process or reads
+    nothing: driven in this process (tools/oci imported) with a stop that
+    fails or never completes injected."""
+    sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+    import build as build_mod
+    import runtime as runtime_mod
+    import store as store_mod
+    st = store_mod.Store(home)
+    cid = st.resolve_container(name)['Id']
+    docker(home, 'exec', '-d', name, 'sleep', '300')
+    time.sleep(0.5)
+    groups = runtime_mod.container_groups(st, st.load_container(cid))
+
+    def running(pids):
+        return all(proc_stopped(p) is False for p in pids)
+
+    def paused_state():
+        s = st.load_container(cid)['State']
+        return s.get('Paused'), s.get('PauseOwner')
+
+    # One owner: a commit while another pause holds the container is
+    # refused, and does not continue it; the owner's resume does.
+    resume = runtime_mod.pause(st, cid)
+    p = docker(home, 'commit', name, 'test/second:1')
+    held = all(proc_stopped(g) for g in groups)
+    resume()
+    check(len(groups) == 2 and p.returncode != 0 and 'already paused' in p.stderr and held and
+          running(groups) and paused_state() == (False, None),
+          'commit --pause: a second pause is refused and does not continue the first owner\'s' + tag,
+          [groups, p.stderr, held, paused_state()])
+    # A group that cannot be stopped, then a stop that never completes: the
+    # commit reads nothing, every group continues, the state clears.
+    read = []
+    real_commit, real_killpg, real_stopped = build_mod.commit_paused, os.killpg, runtime_mod.stopped
+
+    def failing_killpg(pgid, sig):
+        if sig == signal.SIGSTOP and pgid == groups[-1]:
+            raise PermissionError(1, 'injected')
+        return real_killpg(pgid, sig)
+    for what, patch in (('a group that cannot be stopped', lambda: setattr(os, 'killpg', failing_killpg)),
+                        ('processes that do not stop in time',
+                         lambda: setattr(runtime_mod, 'stopped', lambda pgid: False))):
+        build_mod.commit_paused = lambda *a: read.append(a) or 'x'
+        patch()
+        try:
+            build_mod.cmd_commit(st, [name, 'test/never:1'])
+            error = None
+        except store_mod.StoreError as e:
+            error = str(e)
+        finally:
+            build_mod.commit_paused, os.killpg, runtime_mod.stopped = real_commit, real_killpg, real_stopped
+        time.sleep(0.2)
+        check(error and 'cannot pause' in error and not read and running(groups) and
+              paused_state() == (False, None),
+              f'commit --pause: {what}: nothing is read, every group continues' + tag,
+              [error, read, [proc_stopped(g) for g in groups], paused_state()])
+    # A pause whose owner died mid-commit: the next look at the container
+    # continues it.
+    for g in groups:
+        os.killpg(g, signal.SIGSTOP)
+    with st.lock():
+        record = st.load_container(cid)
+        record['State'].update(Paused=True, PauseOwner=[2 ** 22 + 1, 1])
+        st.save_container(record)
+    docker(home, 'ps')
+    time.sleep(0.2)
+    check(running(groups) and paused_state() == (False, None),
+          'a pause whose owner died is continued when the container is next looked at' + tag,
+          [[proc_stopped(g) for g in groups], paused_state()])
+
+
+def proc_stopped(pid):
+    """True when every thread of pid is stopped (runtime.task_stopped:
+    HongMeng shows stopped tasks as 'S'), False when one runs, None when
+    pid is gone."""
+    sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+    import runtime as runtime_mod
     try:
-        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+        tasks = os.listdir(f'/proc/{pid}/task')
     except OSError:
         return None
+    return all(runtime_mod.task_stopped(Path(f'/proc/{pid}/task/{t}')) for t in tasks)
 
 
 def cow_tests(home, work):
@@ -1485,6 +1569,59 @@ def context_link_tests(home, work):
     check(p.returncode == 0 and p2.stdout == 'inside\ninside\n', 'build: links inside the context still work',
           p.stderr + p2.stdout + p2.stderr)
     docker(home, 'rmi', '-f', 'test/ctxlink-ok:1')
+    context_ignore_tests(home, work)
+
+
+def layer_names(home, image):
+    saved = docker(home, 'save', image, text=False)
+    names = set()
+    with tarfile.open(fileobj=io.BytesIO(saved.stdout)) as outer:
+        manifest = json.loads(outer.extractfile('manifest.json').read())
+        for last in manifest[0]['Layers']:
+            data = outer.extractfile(last).read()
+            if data[:2] == b'\x1f\x8b':
+                data = gzip.decompress(data)
+            with tarfile.open(fileobj=io.BytesIO(data)) as layer:
+                names |= {m.name[2:] if m.name.startswith('./') else m.name for m in layer}
+    return names
+
+
+def context_ignore_tests(home, work):
+    """The context copy follows .dockerignore: an excluded file is never
+    read (one nobody can read does not fail the build), exceptions still
+    bring files back, and a store inside the context is not copied."""
+    ctx = work / 'ignore-ctx'
+    (ctx / 'deps' / 'big').mkdir(parents=True)
+    (ctx / 'deps' / 'big' / 'locked').write_text('x')
+    os.chmod(ctx / 'deps' / 'big' / 'locked', 0)
+    os.chmod(ctx / 'deps' / 'big', 0)
+    (ctx / 'deps' / 'keep').write_text('kept\n')
+    (ctx / 'unreadable.tmp').write_text('x')
+    os.chmod(ctx / 'unreadable.tmp', 0)
+    (ctx / 'app').write_text('app\n')
+    (ctx / '.dockerignore').write_text('deps\n!deps/keep\n*.tmp\n')
+    (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nCOPY . /ctx/\n')
+    try:
+        p = docker(home, 'build', '-t', 'test/ignored:1', str(ctx), timeout=300)
+        p2 = docker(home, 'run', '--rm', 'test/ignored:1', 'cd /ctx && find . | sort | tr "\\n" " "')
+    finally:
+        os.chmod(ctx / 'deps' / 'big', 0o755)
+    check(p.returncode == 0 and p2.stdout.split() == ['.', './.dockerignore', './Dockerfile', './app', './deps',
+                                                      './deps/keep'],
+          'build: ignored files are never read (unreadable ones too); exceptions still apply',
+          p.stderr[-500:] + p2.stdout + p2.stderr)
+    docker(home, 'rmi', '-f', 'test/ignored:1')
+    # A store inside the context: the build's own work is not in its context.
+    ctx = work / 'store-ctx'
+    store = ctx / 'store'
+    store.mkdir(parents=True)
+    (ctx / 'f').write_text('f\n')
+    (ctx / 'Dockerfile').write_text('FROM scratch\nCOPY . /ctx/\n')
+    p = docker(store, 'build', '-t', 'test/instore:1', str(ctx), timeout=300)
+    names = layer_names(store, 'test/instore:1') if p.returncode == 0 else set()
+    check(p.returncode == 0 and 'ctx/f' in names and not any(n.startswith('ctx/store') for n in names),
+          'build: a store inside the context is not copied into it', [p.stderr[-500:], sorted(names)[:20]])
+    shutil.rmtree(store, ignore_errors=True)
 
 
 def build_tests(home, work):

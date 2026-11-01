@@ -10,6 +10,10 @@
 #include "lazy_layer.h"
 
 #ifdef LAZY_LOADER
+/* The broker's check of every cache object the walk opens (lazy_layer.h):
+ * made on the FD the walk then uses, so no later rename changes what was
+ * checked. */
+long (*lazy_object_check)(long fd, bool top);
 long z_syscall(int n, ...);
 static long sys(long n, long a, long b, long c, long d, long e, long f)
 {
@@ -33,6 +37,7 @@ static long sys(long n, long a, long b, long c, long d, long e, long f)
 #define O_DIRECTORY_ 040000 /* AArch64 values */
 #define O_NOFOLLOW_ 0100000
 #define O_CLOEXEC_ 02000000
+#define O_NONBLOCK_ 04000
 #define LOCK_EX_ 2
 #define S_IFMT_ 0170000
 #define S_IFDIR_ 0040000
@@ -276,9 +281,26 @@ static long image_lookup(struct work *w, const char *rel, struct inode *ino)
 /* ---------------------------------------------------------------- cache */
 /* The directory at rel of the cache, walked without following symlinks;
  * parent: the directory holding rel's final name (left in w->name). */
+static long checked(long fd, bool top)
+{
+#ifdef LAZY_LOADER
+    if (fd >= 0 && lazy_object_check) {
+        long rc = lazy_object_check(fd, top);
+        if (rc < 0) {
+            sys(__NR_close, fd, 0, 0, 0, 0, 0);
+            return rc;
+        }
+    }
+#else
+    (void)top;
+#endif
+    return fd;
+}
+
 static long cache_dir(struct work *w, const char *cache, const char *rel, bool parent)
 {
-    long fd = sys(__NR_openat, AT_FDCWD_, (long)cache, O_RDONLY_ | O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0);
+    long fd = checked(sys(__NR_openat, AT_FDCWD_, (long)cache, O_RDONLY_ | O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0),
+                      true);
     const char *p = rel;
     while (fd >= 0) {
         while (*p == '/') p++;
@@ -295,8 +317,8 @@ static long cache_dir(struct work *w, const char *cache, const char *rel, bool p
         const char *rest = end;
         while (*rest == '/') rest++;
         if (parent && !*rest) break;
-        long next = sys(__NR_openat, fd, (long)w->name, O_RDONLY_ | O_DIRECTORY_ | O_NOFOLLOW_ | O_CLOEXEC_,
-                        0, 0, 0);
+        long next = checked(sys(__NR_openat, fd, (long)w->name,
+                                O_RDONLY_ | O_DIRECTORY_ | O_NOFOLLOW_ | O_CLOEXEC_, 0, 0, 0), false);
         sys(__NR_close, fd, 0, 0, 0, 0, 0);
         fd = next;
         p = end;
@@ -318,6 +340,37 @@ static void times_of(const struct inode *ino, long t[4], bool placeholder)
     t[3] = (long)ino->mtime_nsec;
 }
 
+/* chmod of the name just made in dir, never through a link put there since
+ * (fchmodat follows one): the object is opened without following and its
+ * type checked. A FIFO opens at once read-only with O_NONBLOCK. */
+static long chmod_made(long dir, const char *name, unsigned type, unsigned mode)
+{
+    long fd = sys(__NR_openat, dir, (long)name,
+                  O_RDONLY_ | O_NOFOLLOW_ | O_CLOEXEC_ | O_NONBLOCK_ | (type == S_IFDIR_ ? O_DIRECTORY_ : 0), 0, 0, 0);
+    if (fd < 0) return fd;
+    struct stat st;
+    long rc = sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0);
+    if (rc >= 0 && (st.st_mode & S_IFMT_) != type) rc = -EAGAIN;
+    if (rc >= 0) rc = sys(__NR_fchmod, fd, mode, 0, 0, 0, 0);
+    sys(__NR_close, fd, 0, 0, 0, 0, 0);
+    return rc;
+}
+
+/* A made child's final rename: never over a name that appeared meanwhile
+ * (whoever made it wins; storage without RENAME_NOREPLACE replaces). */
+static long place_child(long dir, const char *name)
+{
+    long rc = sys(__NR_renameat2, dir, (long)LAZY_TMP, dir, (long)name, 1 /* RENAME_NOREPLACE */, 0);
+    if (rc == -EINVAL || rc == -ENOSYS)
+        rc = sys(__NR_renameat2, dir, (long)LAZY_TMP, dir, (long)name, 0, 0);
+    if (rc == -EEXIST) {
+        if (sys(__NR_unlinkat, dir, (long)LAZY_TMP, 0, 0, 0, 0) < 0)
+            sys(__NR_unlinkat, dir, (long)LAZY_TMP, AT_REMOVEDIR_, 0, 0, 0);
+        rc = 0;
+    }
+    return rc;
+}
+
 /* One child made under LAZY_TMP, then renamed to name. */
 static long make_child(struct work *w, long dir, const char *name, const struct inode *ino)
 {
@@ -328,7 +381,7 @@ static long make_child(struct work *w, long dir, const char *name, const struct 
     case S_IFDIR_:
         rc = sys(__NR_mkdirat, dir, (long)LAZY_TMP, 0700, 0, 0, 0);
         if (rc < 0) return rc;
-        sys(__NR_fchmodat, dir, (long)LAZY_TMP, mode | 0700, 0, 0, 0);
+        chmod_made(dir, LAZY_TMP, S_IFDIR_, mode | 0700);
         break;
     case S_IFLNK_:
         if (ino->size == 0 || ino->size >= sizeof(w->target)) return -EIO;
@@ -345,7 +398,7 @@ static long make_child(struct work *w, long dir, const char *name, const struct 
          * refuses FIFOs skips them. HarmonyOS refuses any later change of
          * a FIFO: the mode is then the image's under the umask. */
         if (sys(__NR_mknodat, dir, (long)name, S_IFIFO_ | (mode & 0777), 0, 0, 0) < 0) return 0;
-        sys(__NR_fchmodat, dir, (long)name, mode, 0, 0, 0);
+        chmod_made(dir, name, S_IFIFO_, mode);
         sys(__NR_utimensat, dir, (long)name, (long)t, AT_SYMLINK_NOFOLLOW_, 0, 0);
         return 0;
     case S_IFREG_: {
@@ -372,13 +425,13 @@ static long make_child(struct work *w, long dir, const char *name, const struct 
             sys(__NR_unlinkat, dir, (long)LAZY_TMP, 0, 0, 0, 0);
             return rc;
         }
-        return sys(__NR_renameat2, dir, (long)LAZY_TMP, dir, (long)name, 0, 0);
+        return place_child(dir, name);
     }
     default:
         return 0; /* Devices and sockets are skipped. */
     }
     sys(__NR_utimensat, dir, (long)LAZY_TMP, (long)t, AT_SYMLINK_NOFOLLOW_, 0, 0);
-    return sys(__NR_renameat2, dir, (long)LAZY_TMP, dir, (long)name, 0, 0);
+    return place_child(dir, name);
 }
 
 static long expand_at(struct work *w, const char *image, const char *cache, const char *rel)
@@ -449,7 +502,7 @@ static long fill_at(struct work *w, const char *image, const char *cache, const 
 {
     long dir = cache_dir(w, cache, rel, true);
     if (dir < 0) return dir;
-    long fd = sys(__NR_openat, dir, (long)w->name, O_RDONLY_ | O_NOFOLLOW_ | O_CLOEXEC_, 0, 0, 0);
+    long fd = checked(sys(__NR_openat, dir, (long)w->name, O_RDONLY_ | O_NOFOLLOW_ | O_CLOEXEC_, 0, 0, 0), false);
     struct stat st;
     long rc = fd < 0 ? fd : sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0);
     if (rc < 0 || (st.st_mode & S_IFMT_) != S_IFREG_ ||
@@ -467,6 +520,12 @@ static long fill_at(struct work *w, const char *image, const char *cache, const 
     if (!(mode & 0200)) sys(__NR_fchmod, fd, mode | 0200, 0, 0, 0, 0);
     long out = sys(__NR_openat, dir, (long)w->name, O_WRONLY_ | O_NOFOLLOW_ | O_CLOEXEC_, 0, 0, 0);
     rc = out < 0 ? out : 0;
+    if (rc >= 0) {
+        /* The very file checked and locked (not one renamed in since). */
+        struct stat ost;
+        rc = sys(__NR_fstat, out, (long)&ost, 0, 0, 0, 0);
+        if (rc >= 0 && (ost.st_dev != st.st_dev || ost.st_ino != st.st_ino)) rc = -EAGAIN;
+    }
     for (uint64_t pos = 0; rc >= 0 && pos < ino.size;) {
         uint64_t n = ino.size - pos < sizeof(w->copy) ? ino.size - pos : sizeof(w->copy);
         rc = data_read(&w->img, &ino, pos, w->copy, n);
