@@ -1,4 +1,31 @@
-# Agent filesystem profiles (planning prototype)
+# Agent filesystem profiles and launcher
+
+## Current state (2026-11-01)
+
+- `launch.py` runs a profile with the **broker backend by default**
+  (`--backend isolate`): the loader's seccomp guest filter refuses every
+  path-based file call and metadata change, a separate broker process makes
+  them under the same deny/ro/rw vector, and the exec trust chain keeps every
+  guest process on the loader image (docs/ISOLATION.md). `--backend in-process`
+  keeps the earlier guard inside the guest's address space (a policy for
+  cooperating programs, not a boundary). `--print` shows which one
+  (`enforcement`: `isolate-broker` or `experimental-file-access-guard`).
+- Both backends show the same view (`test/fs_policy/agent_launch.py` compares
+  their output; `agent_brew.py` runs harmonybrew python3 and git under both).
+  The denied root's placeholder directories are traversable in both: the
+  broker allows reading exactly the ancestors of mount targets.
+- Difference: datagram UNIX sockets are refused by the broker (a datagram may
+  go to any name), so HarmonyOS hilog logging reports "Can't create socket"
+  under the broker backend; the program goes on.
+- Limits: 64 mounts (private ones included), 512 environment entries,
+  255-byte paths and entries, no ":" in paths; payload ABI 27.
+- Neither backend is a complete hostile-agent guarantee: kernel bugs,
+  resource exhaustion, same-uid processes, network and the other residual
+  risks in docs/ISOLATION.md remain.
+
+The sections after "Launching an agent" record how the in-process guard was
+built up increment by increment; ABI numbers and "not connected" remarks in
+them are historical.
 
 The primary product direction is an agent filesystem sandbox using existing
 system/brew tools. A separate Linux rootfs is a secondary mode. This repository
@@ -6,9 +33,9 @@ contains the ELF execution backend and vendored PRoot path semantics together;
 bubblewrap is not a build or runtime dependency.
 
 `plan.py` validates and prints a filesystem plan only; its output is marked
-`not-connected`. `launch.py` connects the same plan to the FD-experiment
-backend's file access guard (see "Launching an agent" below). Do not pass the
-plan to the legacy bind CLI expecting readonly or default-deny isolation.
+`not-connected`. `launch.py` connects the same plan to a backend (see
+"Launching an agent" below). Do not pass the plan to the plain bind CLI
+expecting readonly or default-deny isolation.
 
 From the repository root, with real absolute paths:
 
@@ -62,7 +89,7 @@ host directories. It is recreated on every launch; an existing `root` without
 the launcher's marker is refused, never deleted. Private home/tmp/cache persist.
 
 Every mount becomes a loader volume with its ro/rw access, behind deny for the
-root: `--guard-file-access` plus `--allow-stdio-output`, `--allow-pipe-output`,
+root: `--isolate` (unless `--backend in-process`), `--guard-file-access` plus `--allow-stdio-output`, `--allow-pipe-output`,
 `--allow-local-output`, `--allow-stream-input` and `--revalidate-file-fds`.
 `--allow-local-output` admits write/sizing/shared mapping only for sockets,
 socket pairs, accepted connections, eventfds and memfds created by the current
@@ -77,11 +104,12 @@ LANG, TMPDIR/XDG_CACHE_HOME for private tmp/cache, the host TERM, and explicit
 `--env KEY=VALUE`; no other host variable is passed. `--print` shows the
 launch as JSON without creating state.
 
-Backend limits are checked before launch: at most 16 mounts (private ones
-included), 16 environment entries, 255-byte paths/entries, no ":" in paths.
+Backend limits are checked before launch: at most 64 mounts (private ones
+included), 512 environment entries, 255-byte paths/entries, no ":" in paths.
 `profiles/harmonyos-agent.json` is a verified HarmonyOS profile: brew prefix,
 /system, /lib (from /system/lib) and /etc readonly, workspace and /dev/null
-writable, and the hilog input socket so libc logging does not fail. A source
+writable, and the hilog input socket so libc logging does not fail (in-process
+backend; the broker refuses datagram UNIX sockets). A source
 whose canonical spelling cannot be resolved because of EACCES (that socket and
 its directory are connectable but not stat-able) keeps its explicit spelling,
 is marked `unresolved` in the plan and only gets lexical overlap checks.
@@ -95,7 +123,8 @@ service owner) as owned by 0, so tools such as git accept the workspace.
 The command needs an absolute guest path. Profiles must expose the platform
 programs, libraries and the dynamic linker's guest path (on merged-usr systems
 `/lib` is a symlink to expose explicitly). This is the experimental file access
-mode, not hostile-code isolation; see the known gaps above and docs/STATUS.md.
+mode under `--backend in-process`, not hostile-code isolation; the default
+broker backend's residual risks are in docs/ISOLATION.md.
 
 For the functioning experimental path backend and its tests, see
 [docs/SVC_PORT.md](../../docs/SVC_PORT.md).
@@ -127,6 +156,8 @@ Choose sensitive persistent storage for Linux rootfs names; /tmp is temporary.
 Do not repair policy matching by lowercasing paths or emulate linkat with copies.
 The planner's `access_for` remains only a string model: case variants are not
 covered by a runtime permission guarantee. See [storage observations](../../docs/STORAGE_CAPABILITIES.md).
+
+## History: how the in-process guard was built
 
 ## Native permission decision core
 

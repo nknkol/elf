@@ -62,13 +62,22 @@ with tempfile.TemporaryDirectory(prefix='agent-launch-', dir=build) as tmp:
     p = run(*common, '--print', '--', '/bin/sh', '-c', 'true')
     assert p.returncode == 0, p.stderr
     printed = json.loads(p.stdout)
-    assert printed['enforcement'] == 'experimental-file-access-guard', printed
+    assert printed['enforcement'] == 'isolate-broker' and '--isolate' in printed['argv'], printed
     assert '--guard-file-access' in printed['argv'] and not state.exists(), printed
-    print('PASS: dry run prints the enforced launch without creating state')
+    p = run(*common, '--backend', 'in-process', '--print', '--', '/bin/sh', '-c', 'true')
+    printed = json.loads(p.stdout)
+    assert printed['enforcement'] == 'experimental-file-access-guard' and '--isolate' not in printed['argv'], printed
+    print('PASS: dry run prints the enforced launch (broker by default) without creating state')
 
     env = dict(os.environ, ELF_SENTINEL_SECRET='host-only')
+    p = run(*common, '--backend', 'in-process', '--', '/bin/sh', '-c', SCRIPT, env=env)
+    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    inproc = p.stdout
+    for leftover in (workspace / 'made', state / 'home/h', state / 'tmp/t'):
+        leftover.unlink()
     p = run(*common, '--', '/bin/sh', '-c', SCRIPT, env=env)
     assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    assert p.stdout == inproc, ('the broker backend shows a different view', inproc, p.stdout)
     lines = p.stdout.splitlines()
     assert lines[0] == '/workspace', p.stdout
     assert 'HOME=/home/agent TMPDIR=/tmp' in lines and 'sentinel=0' in lines, p.stdout
@@ -81,7 +90,8 @@ with tempfile.TemporaryDirectory(prefix='agent-launch-', dir=build) as tmp:
     assert (workspace / 'made').read_text() == 'made\n'
     assert (state / 'home/h').read_text() == 'h\n' and (state / 'tmp/t').read_text() == 't\n'
     assert not (alpine / 'bin/x').exists()
-    print('PASS: guest shell runs with clean env, private state, filtered root and policy')
+    print('PASS: guest shell runs with clean env, private state, filtered root and policy '
+          '(broker backend, same view as in-process)')
 
     # Private state persists; the skeleton root is rebuilt on each launch.
     p = run(*common, '--', '/bin/sh', '-c', 'cat "$HOME/h"')

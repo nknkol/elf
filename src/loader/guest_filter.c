@@ -6,12 +6,13 @@
  * the broker into other processes fails with EPERM, whatever address it
  * comes from: the payload asks the broker instead.
  *
- * With --isolate-device the guest opens the selected devices itself (their
- * drivers bind a context to the opener's address space): openat is allowed
- * for the device path constants of the loader's constant page only, and the
- * filter keeps that page in place and every guest process on the loader
- * image (docs/ISOLATION.md, "GPU 设备"). Without it the program is the same
- * as before, instruction for instruction (test/isolation/device.py). */
+ * The exec trust chain holds in every isolated process: execveat runs only
+ * the loader FD (898, which cannot be closed or replaced) with the empty
+ * string of the loader's constant page, and that page stays mapped, so
+ * every guest process runs the loader image (docs/ISOLATION.md, "执行可信链").
+ * With --isolate-device the guest also opens the selected devices itself
+ * (their drivers bind a context to the opener's address space): openat is
+ * allowed for the device path constants of that page only ("GPU 设备"). */
 #include <asm/unistd.h>
 #include "loader.h"
 
@@ -257,31 +258,25 @@ static void build(uint32_t mask)
 	JEQ(AUDIT_ARCH_AARCH64, 1, 0);
 	RET(RET_KILL_PROCESS);
 	LD(NR);
-	if (mask) {
-		far_deny = new_label();
-		for (unsigned i = 0; i < sizeof(device_calls) / sizeof(device_calls[0]); i++) {
-			sections[n] = new_label();
-			dispatch(device_calls[i], sections[n++]);
-		}
-		/* Namespaces could change what a device path names (the host
-		 * sandbox refuses them too). */
-		dispatch(97 /* unshare */, far_deny);
-		dispatch(268 /* setns */, far_deny);
+	far_deny = new_label();
+	/* openat has a section only for selected devices; else the base
+	 * list below refuses it. */
+	for (unsigned i = mask ? 0 : 1; i < sizeof(device_calls) / sizeof(device_calls[0]); i++) {
+		sections[n] = new_label();
+		dispatch(device_calls[i], sections[n++]);
 	}
+	/* Namespaces could change what a path names (the host sandbox
+	 * refuses them too). */
+	dispatch(97 /* unshare */, far_deny);
+	dispatch(268 /* setns */, far_deny);
 	for (unsigned i = 0; i < sizeof(denied) / sizeof(denied[0]); i++)
 		JEQ(denied[i], L_DENY, L_NEXT);
-	JEQ(281 /* execveat */, L_EXECVEAT, L_NEXT);
 	JEQ(198 /* socket */, L_SOCKET, L_NEXT);
 	JEQ(199 /* socketpair */, L_SOCKETPAIR, L_NEXT);
 	JEQ(261 /* prlimit64 */, L_PRLIMIT, L_NEXT);
 	JEQ(29 /* ioctl */, L_IOCTL, L_NEXT);
 	RET(RET_ALLOW);
 
-	/* Only an FD runs: the path must be empty (unchecked here, see
-	 * docs/ISOLATION.md, residual risks). */
-	label(L_EXECVEAT);
-	LD(ARG(4));
-	JSET(AT_EMPTY_PATH, L_ALLOW, L_DENY);
 	/* UNIX sockets come from the broker; unnamed pairs only as streams or
 	 * sequenced packets (a datagram may be sent to any name). */
 	label(L_SOCKET);
@@ -307,13 +302,12 @@ static void build(uint32_t mask)
 	RET(RET_ALLOW);
 	label(L_DENY);
 	RET(RET_ERRNO_EPERM);
-	if (!mask)
-		return;
 
 	const unsigned loader_fd = CONFIG_ISOLATE_LOADER_FD;
 	int s = 0;
 	/* openat: a selected device constant, absolute (dirfd unused), with
 	 * plain open flags. */
+	if (mask) {
 	section(sections[s++]);
 	LD(ARG(2));
 	AND(~DEVICE_OPEN_FLAGS);
@@ -331,6 +325,7 @@ static void build(uint32_t mask)
 	}
 	JA(d_deny);
 	section_end();
+	}
 	/* execveat: only the loader FD, with the page's empty path: every
 	 * filtered process runs the loader image. */
 	section(sections[s++]);

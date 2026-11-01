@@ -650,6 +650,36 @@ def erofs_tests(home, work):
     check(p.returncode == 0 and p2.stdout == 'w\ngone\n', 'layer images: commit', p.stderr + p2.stdout + p2.stderr)
     docker(home, 'rm', name)
     docker(home, 'rmi', '-f', 'test/erofs-commit:1')
+    # Contract: the payload's merged view (union_view.c, lazy_layer.c) and the
+    # host's (guestfs.py, union.py, erofs.py) show the same tree, names and
+    # contents, after whiteouts, an opaque directory and writes in the upper.
+    cname = 'contract'
+    docker(home, 'run', '-d', '--cow', '--name', cname, '-u', 'root', img,
+           'rm -r /etc/apk && mkdir /etc/apk && echo y > /etc/apk/z && rm /srv/l5 && echo w > /srv/l6 && '
+           'mkdir -p /etc/newdir && echo x > /etc/newdir/f && touch /tmp/ready && sleep 300')
+    for _ in range(100):
+        if docker(home, 'exec', cname, 'test', '-e', '/tmp/ready').returncode == 0:
+            break
+        time.sleep(0.1)
+    inside = docker(home, 'exec', cname, 'sh', '-c',
+                    'find /etc /srv | sort; find /etc /srv -type f | sort | xargs md5sum')
+    names, sums = set(), {}
+    for top in ('/etc', '/srv'):
+        p = docker(home, 'cp', f'{cname}:{top}', '-', text=False)
+        with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tar:
+            for m in tar:
+                names.add('/' + m.name.rstrip('/'))
+                if m.isfile():
+                    sums['/' + m.name] = hashlib.md5(tar.extractfile(m).read()).hexdigest()
+    lines = inside.stdout.splitlines()
+    in_names = {line for line in lines if line.startswith('/')}
+    in_sums = {line.split()[1]: line.split()[0] for line in lines if not line.startswith('/') and line.strip()}
+    check(inside.returncode == 0 and in_names == names and in_sums == sums and '/srv/l5' not in names and
+          '/etc/apk/z' in names and not any(n.startswith('/etc/apk/') and n != '/etc/apk/z' for n in names),
+          'contract: the payload and the host show the same merged view (names and contents)',
+          [sorted(in_names ^ names)[:20], sorted(k for k in in_sums.keys() | sums.keys()
+                                                  if in_sums.get(k) != sums.get(k))[:20], inside.stderr])
+    docker(home, 'rm', '-f', cname)
     # --prune: no unpacked rootfs; --cow needs none, a copy unpacks it again.
     image_id = docker(home, 'inspect', '-f', '{{.Id}}', img).stdout.strip()[7:]
     unpacked = home / 'images' / image_id / 'rootfs'

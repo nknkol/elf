@@ -1,5 +1,44 @@
 # 当前进度与验收快照
 
+## 当前版本（2026-11-01，分支 `feat/fexecve`，payload ABI 27）
+
+本节是唯一的当前状态说明；下面“历史增量”按时间记录每次改动，其中的 ABI 号、容量与“尚未接入”等描述
+只代表当时。架构总览见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+**组成与强度**
+
+| 部分 | 状态 |
+| --- | --- |
+| 默认构建 `elfloader` | PRoot 语义视图：root、bind、身份、挂载表（R4）、属主（R5）、写时复制与层镜像（R6）、`mount -o loop`、容器网络。不是边界 |
+| guarded 构建 `elfloader-guarded` | 进程内按挂载 deny/ro/rw 检查（`--guard-*`），对合作程序有效，不是对抗边界 |
+| `--isolate`（两种构建） | guest 过滤器 + broker 进程代办按路径的调用；执行可信链（FD 898、常量页空串、常量页与 loader 文件受保护）对所有 `--isolate` 生效；`--isolate-device` 另放行选中 GPU 设备的 openat |
+| agent 启动器 `tools/agent_sandbox/launch.py` | 默认 `--backend isolate`（broker）；`--backend in-process` 为进程内 guard。两种后端视图一致 |
+| Docker/OCI `tools/oci/` | R1–R6 与 compose 网络、副本已实现（[OCI.md](OCI.md)）；宿主侧 Python，容器运行期间监视进程与 `-p` 转发器常驻 |
+
+**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-01）：`make check` 282、`make check-guarded` 172、
+`make check-isolation` 205（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑）、
+`make check-oci` 184（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18，
+`test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过。
+
+**已知限制**
+
+- `--isolate` 的剩余风险：内核漏洞、资源耗尽（无 cgroup）、侧信道、同 uid 进程与系统服务、网络（见 ISOLATION.md）。
+- UDP（无连接的 sendto）不经 broker 检查；容器网络在不加 `--isolate` 时只是视图。
+- broker 拒绝数据报 UNIX 套接字：HarmonyOS hilog 在 broker 后端下报错但程序继续。
+- 自己 setsid 换了进程组的进程不随容器停止（主进程与 exec 都是）。
+- util-linux 的 `mount -o loop` 挂载成功但更新 utab 得到 EPERM、退出码 1（BusyBox 正常）。
+- `docker` 命令依赖宿主 python3（harmonybrew）；loader 本身不依赖。
+
+**维护风险**
+
+- 同一语义多套实现：合并视图（payload `union_view.c` 与宿主 `union.py`/`guestfs.py`）、erofs（C 与 `erofs.py`）、
+  路径到权限的解析（payload 与 broker）。以共享验收用例约束（ARCHITECTURE.md“同一语义的多套实现”）。
+- 大文件：`proot_bridge.c` 约 3500 行，`broker.c`、`compose.py`、`build.py`、`engine.py`、`docker` 各一千多行，
+  宜按职责逐步拆分。
+
+## 历史增量
+
+
 核查日期：2026-10-28。最近完整核查基线：`105e8c2`，分支 `feat/proot-svc-bridge`。
 完整核查补充 SIGSYS 扫描记录与运行时回归的逐项核对，并纠正文档的过期接入状态。
 后续更新：绝对路径及已知目录 FD 相对 open 的挂载来源已接入实验 FD 表；

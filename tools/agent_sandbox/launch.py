@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Launch a command under an agent profile with the experimental file access guard.
+"""Launch a command under an agent profile.
 
 Compiles the profile with plan.py, prepares private state and a minimal
-mountpoint-only root, then runs the FD-experiment loader with every mount's
+mountpoint-only root, then runs the guarded loader with every mount's
 deny/ro/rw access, a clean environment and a static exec helper. The helper
 execs the guest command through the payload, so target, shebang and dynamic
 linker resolution follow the same policy as later guest execs.
 
-This enforces the documented file access mode of the experimental backend;
-it is not a complete hostile-agent isolation guarantee (see docs/STATUS.md).
+Backends (--backend):
+  isolate     (default) the guest runs under the seccomp guest filter and
+              every file access is made by a separate broker process that
+              enforces the same deny/ro/rw vector (docs/ISOLATION.md); the
+              loader and payload in the guest's address space are no longer
+              the boundary.
+  in-process  the experimental file access guard inside the guest's own
+              address space: a policy for cooperating programs, not a
+              boundary against hostile code (docs/STATUS.md).
+Neither is a complete hostile-agent guarantee: see the residual risks in
+docs/ISOLATION.md (kernel bugs, resources, same-uid processes, network).
 """
 import argparse
 import hashlib
@@ -105,7 +114,10 @@ def prepare_state(compiled):
     return root
 
 
-def command_line(compiled, root, loader, workdir, command, env):
+BACKENDS = {'isolate': 'isolate-broker', 'in-process': 'experimental-file-access-guard'}
+
+
+def command_line(compiled, root, loader, workdir, command, env, backend='isolate'):
     if len(compiled['mounts']) > MAX_BINDS:
         raise ProfileError(f'Backend supports at most {MAX_BINDS} mounts; profile has '
                            f'{len(compiled["mounts"])}')
@@ -116,6 +128,10 @@ def command_line(compiled, root, loader, workdir, command, env):
     if not command or not command[0].startswith('/'):
         raise ProfileError('Command must start with an absolute guest path')
     argv = [str(loader), '--mode', 'container', '--root', str(root)]
+    if backend == 'isolate':
+        argv.append('--isolate')
+    elif backend != 'in-process':
+        raise ProfileError(f'Unknown backend {backend!r}')
     vector = 'd'
     for mount in compiled['mounts']:
         if ':' in mount['source'] or ':' in mount['target']:
@@ -139,6 +155,8 @@ def main():
     parser.add_argument('--loader', type=Path, default=BUILD / 'elfloader-guarded')
     parser.add_argument('--cwd', help='Guest working directory (default: /workspace target)')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE')
+    parser.add_argument('--backend', choices=sorted(BACKENDS), default='isolate',
+                        help='isolate (default): seccomp filter + broker; in-process: the guard only')
     parser.add_argument('--print', action='store_true', help='Print the launch as JSON instead of running it')
     parser.usage = '%(prog)s profile [options] -- /guest/command [args...]'
     # The guest command follows an explicit "--" so its options never reach argparse.
@@ -161,12 +179,12 @@ def main():
         helper = verified_backend(loader)
         if args.print:
             root = Path(compiled['state']) / 'root'
-            argv = command_line(compiled, root, loader, workdir, command, env)
-            print(json.dumps(dict(compiled, enforcement='experimental-file-access-guard',
+            argv = command_line(compiled, root, loader, workdir, command, env, args.backend)
+            print(json.dumps(dict(compiled, enforcement=BACKENDS[args.backend],
                                   argv=argv), indent=2))
             return
         root = prepare_state(compiled)
-        argv = command_line(compiled, root, loader, workdir, command, env)
+        argv = command_line(compiled, root, loader, workdir, command, env, args.backend)
         shutil.copy2(helper, root / HELPER)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

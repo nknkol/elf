@@ -5,6 +5,7 @@ itself; `run -d`/`start` hand it to a small per-container monitor process
 (`docker __monitor <id>`) that writes the log, records the exit code and
 applies the restart policy (docs/OCI.md, R2). The container's processes are
 one process group; its id and start time are recorded in run.json."""
+import io
 import os
 import posixpath
 import shutil
@@ -209,6 +210,17 @@ def create(st, record, quiet=False):
             else:
                 owners_mod.from_meta(rootfs, meta, work / 'owners.db')
         runspec.install_helper(rootfs)
+        # The container's etc files are binds: as Docker, a missing mount
+        # point is made in the rootfs (the upper with --cow), so listings
+        # inside and docker cp both show it.
+        if not host.get('ReadonlyRootfs') and not host.get('InPlace'):
+            view = guestfs.View((rootfs, lower) if host.get('Cow') else rootfs, [])
+            for name in ('hosts', 'hostname', 'resolv.conf'):
+                if not view.exists(['etc', name]) and view.is_dir(['etc']):
+                    sink = guestfs.GuestSink(view, ['etc'])
+                    sink.put(guestfs.Entry([name], 'f', 0o644, time.time(), 0, None,
+                                           lambda: io.BytesIO(b'')))
+                    sink.finish()
         # Docker creates a missing working directory (not in a read-only root).
         cwd = record['Config'].get('WorkingDir')
         binds = [(b[0], b[1]) for b in all_binds(st, record, work)]
@@ -599,7 +611,11 @@ def container_path(st, record, path, follow=True):
 
 def guest_view(st, record):
     """The container's files as its processes see them (guestfs.View)."""
-    return guestfs.View(view_of(st, record), all_binds(st, record),
+    etc = st.container_dir(record['Id']) / 'etc'
+    # The container's own etc files are binds as in runspec.build (host
+    # /proc, /sys and devices are left out: not the container's files).
+    own = [(str(etc / name), f'/etc/{name}', 'rw') for name in ('hosts', 'hostname', 'resolv.conf')]
+    return guestfs.View(view_of(st, record), own + all_binds(st, record),
                         readonly_root=bool(record['HostConfig'].get('ReadonlyRootfs')))
 
 

@@ -57,9 +57,11 @@ static long sys(long n, long a, long b, long c, long d, long e, long f)
 	return z_syscall(n, a, b, c, d, e, f);
 }
 
-/* --isolate-device (docs/ISOLATION.md, "GPU 设备"): the guest opens the
- * selected device paths itself, so what they name and the loader file that
- * holds them must not change through the broker. */
+/* The exec trust chain (docs/ISOLATION.md, "执行可信链"): every guest exec
+ * runs the loader file through FD 898 and its constant page, so the loader
+ * file (and /proc/<pid>/mem, which writes through page protections) must
+ * not change through the broker. With --isolate-device the guest also
+ * opens the selected device paths itself: what they name stays too. */
 static struct {
 	int on;
 	unsigned long loader_dev, loader_ino;
@@ -72,10 +74,10 @@ static int same_file(const struct stat *st, unsigned long dev, unsigned long ino
 	return st->st_dev == dev && st->st_ino == ino;
 }
 
-/* Run by the initial loader before the broker starts: every directory a
- * selected device path walks through is a real directory (no symlink), the
- * device a character device; both recorded with the loader file. */
-void broker_guard_devices(uint32_t mask, const char *loader_path)
+/* Run by the initial loader before the broker starts: the loader file is
+ * recorded; every directory a selected device path walks through is a real
+ * directory (no symlink), the device a character device, recorded too. */
+void broker_guard_trust(uint32_t mask, const char *loader_path)
 {
 	struct stat st;
 	if (sys(__NR_newfstatat, AT_FDCWD, (long)loader_path, (long)&st, 0, 0, 0) < 0)
@@ -172,6 +174,51 @@ static int identity(int fd, const char *name, int flags, unsigned long *dev, uns
 	*dev = st.st_dev;
 	*ino = st.st_ino;
 	return 0;
+}
+
+/* A denied root may still be walked to reach the mounts in it: the
+ * directories of the root that are strict ancestors of a bind's guest
+ * destination (the guarded build's FS_TRAVERSE, fs_policy.c) can be opened
+ * and examined, never written; their listings are filtered by the payload
+ * to the exposed names. Taken from the broker's own copy of the
+ * configuration, by dev/ino. */
+#define TRAVERSE_MAX (CONFIG_MAX_BINDS * 4)
+static unsigned long traverse[TRAVERSE_MAX][2];
+static int traverse_count;
+
+static void add_traverse(const char *root, const char *guest)
+{
+	char path[PATH_BYTES];
+	size_t r = z_strlen(root), g = z_strlen(guest);
+	if (r + g + 2 > sizeof(path))
+		return;
+	z_memcpy(path, root, r);
+	while (r > 1 && path[r - 1] == '/')
+		r--;
+	for (size_t i = 0; i < g; i++) {
+		if (guest[i] != '/' || (i && guest[i - 1] == '/'))
+			continue;
+		/* guest[0..i) is a strict ancestor ("" is the root). */
+		size_t n = r;
+		if (i) {
+			if (r == 1)
+				n = 0;
+			z_memcpy(path + n, guest, i);
+			n += i;
+		}
+		path[n] = 0;
+		struct stat st;
+		if (sys(__NR_newfstatat, AT_FDCWD, (long)path, (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) < 0 ||
+		    (st.st_mode & 0170000) != 0040000)
+			continue;
+		int known = 0;
+		for (int k = 0; k < traverse_count; k++)
+			known |= traverse[k][0] == st.st_dev && traverse[k][1] == st.st_ino;
+		if (!known && traverse_count < TRAVERSE_MAX) {
+			traverse[traverse_count][0] = st.st_dev;
+			traverse[traverse_count++][1] = st.st_ino;
+		}
+	}
 }
 
 static void add_tree(const char *path, char access)
@@ -461,8 +508,24 @@ static int resolve(const char *input, int follow, struct target *t)
 	}
 }
 
+static int traversable(const struct target *t)
+{
+	struct stat st;
+	if (!traverse_count || t->dir < 0 ||
+	    sys(__NR_newfstatat, t->dir, (long)t->name, (long)&st,
+		AT_SYMLINK_NOFOLLOW | (t->name[0] ? 0 : AT_EMPTY_PATH), 0, 0) < 0 ||
+	    (st.st_mode & 0170000) != 0040000)
+		return 0;
+	for (int k = 0; k < traverse_count; k++)
+		if (traverse[k][0] == st.st_dev && traverse[k][1] == st.st_ino)
+			return 1;
+	return 0;
+}
+
 static int check(const struct target *t, int write)
 {
+	if (t->access == 'd' && !write && traversable(t))
+		return 0;
 	if (t->access == 'd' || t->access == 'g')
 		return -ENOENT_;
 	if (write && t->access != 'w')
@@ -832,9 +895,16 @@ static long execute(struct call *c, long nr)
 		rc = target_of(c, 1, &next, !(flags & AT_SYMLINK_NOFOLLOW), &t);
 		if (rc >= 0)
 			rc = check(&t, (int)a[2] & 2);
-		if (rc >= 0)
+		if (rc >= 0 && t.name[0]) {
 			rc = sys(__NR_faccessat2, t.dir, (long)t.name, a[2],
-				 (flags & AT_EACCESS_) | AT_SYMLINK_NOFOLLOW | (t.name[0] ? 0 : AT_EMPTY_PATH), 0, 0);
+				 (flags & AT_EACCESS_) | AT_SYMLINK_NOFOLLOW, 0, 0);
+		} else if (rc >= 0) {
+			/* A tree's root (an O_PATH FD): HongMeng's faccessat2 refuses
+			 * AT_EMPTY_PATH (EINVAL), the FD's magic link names it. */
+			char magic[32];
+			fd_path(magic, t.dir);
+			rc = sys(__NR_faccessat2, AT_FDCWD, (long)magic, a[2], flags & AT_EACCESS_, 0, 0);
+		}
 		break;
 	}
 	case __NR_readlinkat:
@@ -1310,6 +1380,10 @@ static void broker_run(int control, const payload_config_t *cfg)
 	add_tree(cfg->root[0] ? cfg->root : "/", access[0] ? access[0] : 'w');
 	for (int i = 0; i < cfg->bind_count; i++)
 		add_tree(cfg->binds[i].dst, access[0] ? access[i + 1] : 'w');
+	if (access[0] == 'd')
+		for (int i = 0; i < cfg->bind_count; i++)
+			if (access[i + 1] != 'd')
+				add_traverse(cfg->root[0] ? cfg->root : "/", cfg->binds[i].src);
 	/* R6: the root's lower layers are never written (copy-up goes to the root). */
 	for (int i = 0; i < cfg->lower_count; i++)
 		add_tree(cfg->lower[i], access[0] == 'd' ? 'd' : 'r');

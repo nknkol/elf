@@ -359,10 +359,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		container_state_open(&cfg, &opt);
 	/* The broker starts before anything of the guest is loaded. */
 	if (opt.isolate && !cfg.isolate) {
-		/* Devices the guest opens itself: checked, and their paths and the
-		 * loader file protected, before the broker starts. */
-		if (cfg.device_mask)
-			broker_guard_devices(cfg.device_mask, cfg.loader_path);
+		/* The loader file (the exec trust chain) and the devices the guest
+		 * opens itself: checked and protected before the broker starts. */
+		broker_guard_trust(cfg.device_mask, cfg.loader_path);
 		broker_start(&cfg);
 		/* Every guest exec re-executes this binary through an FD. */
 		int self = z_openat(AT_FDCWD, cfg.loader_path, O_RDONLY);
@@ -372,11 +371,9 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 			z_errx(1, "isolate: cannot open the loader binary");
 		z_close(self);
 		/* The filter lets only this FD number run. */
-		if (cfg.device_mask) {
-			if (high != CONFIG_ISOLATE_LOADER_FD)
-				z_errx(1, "isolate: FD %d is taken", CONFIG_ISOLATE_LOADER_FD);
-			broker_guard_loader_fd((int)high);
-		}
+		if (high != CONFIG_ISOLATE_LOADER_FD)
+			z_errx(1, "isolate: FD %d is taken", CONFIG_ISOLATE_LOADER_FD);
+		broker_guard_loader_fd((int)high);
 		cfg.loader_fd = (int32_t)high;
 		/* The owners fake_id0 reports as root, for every guest process. */
 		int n = 0;

@@ -112,7 +112,7 @@ void debugger_install(void);
 
 /* broker.c (isolation mode) */
 void broker_start(payload_config_t *cfg);
-void broker_guard_devices(uint32_t mask, const char *loader_path);
+void broker_guard_trust(uint32_t mask, const char *loader_path);
 void broker_guard_loader_fd(int fd);
 void guest_filter_install(uint32_t device_mask);
 void guest_filter_dump(uint32_t device_mask);

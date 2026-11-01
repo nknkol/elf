@@ -204,11 +204,12 @@ with tempfile.TemporaryDirectory(prefix='iso-accept-', dir=socket_capable()) as 
             p, v = run('d', 'filter')
             table = {k: x for k, x in v.items() if k.startswith('nr')}
             bad = {k: x for k, x in table.items() if not eperm(x)}
-            # --isolate-device: execveat runs only the loader FD with the
-            # loader's own empty path (docs/ISOLATION.md, "GPU 设备").
-            device = '--isolate-device' in lib.ISOLATE_EXTRA
+            # The exec trust chain: execveat runs only the loader FD with the
+            # loader's own empty path, in every isolated process
+            # (docs/ISOLATION.md, "执行可信链"); another FD or an empty string
+            # of the program's own is refused.
             rules = {'execveat-path': eperm,
-                     'execveat-empty': eperm if device else lambda x: x not in (None, EPERM),
+                     'execveat-empty': eperm,
                      'socket-unix': eperm, 'socket-inet': lambda x: x == 1,
                      'socketpair-dgram': eperm, 'socketpair-stream': zero, 'prlimit-self': zero,
                      'prlimit-other': eperm, 'ioctl-setflags': eperm, 'getpid-ok': lambda x: x == 1,

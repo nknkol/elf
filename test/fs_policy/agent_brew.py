@@ -41,26 +41,32 @@ result["log"] = run("log", "--format=%s").strip()
 print(json.dumps(result))
 '''
 
-with tempfile.TemporaryDirectory(prefix='agent-brew-', dir=build) as tmp:
-    base = Path(tmp)
-    workspace = base / 'workspace'
-    workspace.mkdir()
-    (workspace / 'note').write_text('workspace-note\n')
-    p = subprocess.run(['python3', str(repo / 'tools/agent_sandbox/launch.py'),
-                        str(repo / 'profiles/harmonyos-agent.json'), '--brew-prefix', str(brew),
-                        '--workspace', str(workspace), '--state', str(base / 'state'), '--',
-                        str(python.resolve()), '-c', SCRIPT, str(brew / 'bin/git'), str(Path.home())],
-                       capture_output=True, text=True, timeout=120)
-    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr[-2000:])
-    assert 'HiLogBase' not in p.stderr, p.stderr[-2000:]
-    import json
-    result = json.loads(p.stdout.strip().splitlines()[-1])
-    top = str(brew).split('/')[1]
-    assert result['cwd'] == '/workspace' and result['home'] == '/home/agent', result
-    assert result['root'] == sorted({'dev', 'etc', 'home', 'lib', 'system', 'tmp', 'workspace', top}), result
-    assert result['dev'] == ['null', 'unix'] and result['note'] == 'workspace-note', result
-    assert result['host_projects_visible'] is False, result
-    assert result['system_write'] == 30, result  # EROFS
-    assert result['log'] == 'from sandbox', result
-    assert (workspace / '.git').is_dir()
-    print('PASS: harmonybrew python3 and git under the HarmonyOS agent profile')
+import json
+for backend in ('in-process', 'isolate'):
+    with tempfile.TemporaryDirectory(prefix='agent-brew-', dir=build) as tmp:
+        base = Path(tmp)
+        workspace = base / 'workspace'
+        workspace.mkdir()
+        (workspace / 'note').write_text('workspace-note\n')
+        p = subprocess.run(['python3', str(repo / 'tools/agent_sandbox/launch.py'),
+                            str(repo / 'profiles/harmonyos-agent.json'), '--backend', backend,
+                            '--brew-prefix', str(brew), '--workspace', str(workspace),
+                            '--state', str(base / 'state'), '--',
+                            str(python.resolve()), '-c', SCRIPT, str(brew / 'bin/git'), str(Path.home())],
+                           capture_output=True, text=True, timeout=120)
+        assert p.returncode == 0, (backend, p.returncode, p.stdout, p.stderr[-2000:])
+        # The system log takes datagrams on a UNIX socket: the in-process guard
+        # lets it through; the broker refuses datagram UNIX sockets (a datagram
+        # may go to any name), so HiLog reports it and the program goes on.
+        if backend == 'in-process':
+            assert 'HiLogBase' not in p.stderr, p.stderr[-2000:]
+        result = json.loads(p.stdout.strip().splitlines()[-1])
+        top = str(brew).split('/')[1]
+        assert result['cwd'] == '/workspace' and result['home'] == '/home/agent', result
+        assert result['root'] == sorted({'dev', 'etc', 'home', 'lib', 'system', 'tmp', 'workspace', top}), result
+        assert result['dev'] == ['null', 'unix'] and result['note'] == 'workspace-note', result
+        assert result['host_projects_visible'] is False, result
+        assert result['system_write'] == 30, result  # EROFS
+        assert result['log'] == 'from sandbox', result
+        assert (workspace / '.git').is_dir()
+        print('PASS: harmonybrew python3 and git under the HarmonyOS agent profile:', backend)

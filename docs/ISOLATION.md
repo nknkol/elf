@@ -66,9 +66,22 @@
   kcmp、bpf、perf_event_open、mount 一族与新挂载 API、`socket(AF_UNIX)`、`socketpair(…, SOCK_DGRAM)`、
   针对其他进程的 prlimit64、FS_IOC_SET* 类 ioctl、Linux 6.13+ 的 *xattrat/file_*attr。
 
-**放行**：其余调用。exec 只能用 `execveat(fd, "", …, AT_EMPTY_PATH)`（过滤器检查标志位；
-过滤器无法检查路径内容，带非空路径时内核仍会按路径执行，但新程序继承过滤器，打不开任何文件，
-最多泄露可执行文件本身的内容，记为剩余风险）。
+**放行**：其余调用。exec 只能是 `execveat(898, E, …, AT_EMPTY_PATH)`：FD 898 是 loader 自身，`E` 是 loader
+常量页里的空串（过滤器比较指针，路径内容因此确定为空）。这条执行可信链在所有 `--isolate` 进程里成立，
+不依赖 `--isolate-device`，见下节。
+
+### 执行可信链（2026-11-01 起所有 `--isolate` 通用）
+
+过滤器读不到路径字符串，只能比较指针。所以 execveat 只放行 `fd == 898`、`pathname == E`（常量页里空串的
+固定地址）、带 `AT_EMPTY_PATH`，于是每个受过滤进程运行的都是 loader 映像（归纳）。为了让这条链不被改写：
+FD 898 不可关闭或替换（过滤器拒绝 close(898)、覆盖它的 close_range、以它为目标的 dup3、fcntl(F_SETFD)、
+ioctl(FIOCLEX)）；常量页不可解除映射、改保护或被覆盖（与之相交的 munmap/mprotect/pkey_mprotect/madvise/
+remap_file_pages、MAP_FIXED 的 mmap、mremap、SHM_REMAP 的 shmat 都拒绝，userfaultfd 整体拒绝）；常量页
+内容不可改（broker 拒绝写 loader 文件，按 dev/ino 识别，含大小写别名与硬链接，打开后再核对；拒绝写
+`/proc/<pid>/mem`）；unshare、setns 也拒绝。初始 loader 启动时 FD 898 被占用则拒绝启动。这些规则原先只在
+`--isolate-device` 下生效（见“GPU 设备”中的不变量 1–3），现在是基础隔离模式的一部分；设备模式只在此之上
+放行选中设备路径常量的 openat。验收：`test/isolation/device.py` 的过滤器、exec、broker 三组检查在
+`--isolate` 与 `--isolate --isolate-device` 下都跑。
 
 过滤器装在 loader 跳到程序之前，跨 exec 继承；与 `--seccomp-backstop` 可同时使用（TRAP 优先于
 ERRNO：未改写的调用先交给 payload，再经 broker 执行）。
@@ -213,10 +226,9 @@ guest 视图里的设备路径必须翻译成同一宿主路径：compat 模式�
 - **常量页**：`src/loader/devices.c` 的 `g_isolate_page`，单独占 `.rodata` 里按页对齐的一页（当前构建为
   `0x3f00003000`）：16 字节标记 `elf-isolate-pg1`（供探针定位）、空串 `E`、四个设备路径各 64 字节。
   `--guest-filter-dump [--isolate-device …]` 打印过滤器程序与该页地址后退出（测试用）。
-- **过滤器**（`guest_filter.c`）：不加选项时程序与之前逐条相同（`test/isolation/guest_filter_base.txt`
-  由提交 e5bc7df 的生成器导出，`device.py` 比较）。加选项时在调用号判断之前插入跳转（`JEQ` + `JA`），
-  各规则段放在原程序之后、自带返回（经典 BPF 只能前跳，条件跳转不超过 255 条）：openat（选中的 `P_i`，
-  标志只允许上表五类）、execveat（fd 898、`E`、`AT_EMPTY_PATH`）、close/close_range/dup3/fcntl(F_SETFD)/
+- **过滤器**（`guest_filter.c`）：在调用号判断之前插入跳转（`JEQ` + `JA`），各规则段放在基础程序之后、
+  自带返回（经典 BPF 只能前跳，条件跳转不超过 255 条）。2026-11-01 起除 openat 段外都不再依赖选项
+  （执行可信链）；加选项时多出 openat 段（选中的 `P_i`，标志只允许上表五类）。其余规则段：execveat（fd 898、`E`、`AT_EMPTY_PATH`）、close/close_range/dup3/fcntl(F_SETFD)/
   ioctl(FIOCLEX) 对 898、与常量页相交的 munmap/mprotect/pkey_mprotect/madvise/remap_file_pages、
   `MAP_FIXED` 的 mmap、mremap（旧区间或 `MREMAP_FIXED` 新区间）、`SHM_REMAP` 的 shmat、userfaultfd，
   另加 unshare、setns（宿主沙箱也拦截，这里不依赖它）。区间相交用 32 位两半比较，`g0 - a` 存在 BPF 草稿
@@ -267,8 +279,8 @@ guest 视图里的设备路径必须翻译成同一宿主路径：compat 模式�
 - 资源耗尽与拒绝服务（无 cgroup；guest 可以杀掉 broker，结果是失败即关闭）；
 - 侧信道；
 - 与宿主应用同一 uid：kill 其他同 uid 进程、网络、经 binder 等访问系统服务；
-- 不加 `--isolate-device` 时：`execveat` 带非空路径可执行任意可执行文件（不能读写文件，但可读取其映像内容）；
-  加了该选项时过滤器只放行 loader FD 与常量页的空串，这一条不再存在；
+- （已消除，2026-11-01）原先不加 `--isolate-device` 时 `execveat` 带非空路径可执行任意文件；现在执行可信链对
+  所有 `--isolate` 生效；
 - 加 `--isolate-device` 时：所选设备驱动的 ioctl 面（内核驱动漏洞），由用户显式接受；
 - 宿主上已有的跨区硬链接（同一 inode 在只读与可写区都可见）；
 - 从宿主继承来的数据报 UNIX 套接字（可向任意路径名发送）。

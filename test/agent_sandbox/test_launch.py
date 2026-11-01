@@ -37,6 +37,15 @@ class LaunchTests(unittest.TestCase):
                                                    '/bin/sh', '/bin/sh', '-c', 'true'])
         self.assertIn('--revalidate-file-fds', argv)
         self.assertIn('--allow-local-output', argv)
+        self.assertIn('--isolate', argv[:argv.index('--')])   # the broker by default
+
+    def test_backends(self):
+        args = (self.compiled, self.state/'root', Path('/l'), '/workspace', ['/bin/true'], [])
+        inproc = launch.command_line(*args, backend='in-process')
+        self.assertNotIn('--isolate', inproc)
+        self.assertEqual(inproc[inproc.index('--guard-file-access') + 1], 'drwwww')
+        with self.assertRaises(launch.ProfileError):
+            launch.command_line(*args, backend='none')
 
     def test_limits(self):
         many = dict(self.compiled, mounts=self.compiled['mounts'] * 16)
