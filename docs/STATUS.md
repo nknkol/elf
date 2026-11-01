@@ -33,8 +33,9 @@
 
 - 同一语义多套实现：合并视图（payload `union_view.c` 与宿主 `union.py`/`guestfs.py`）、erofs（C 与 `erofs.py`）、
   路径到权限的解析（payload 与 broker）。以共享验收用例约束（ARCHITECTURE.md“同一语义的多套实现”）。
-- 大文件：`proot_bridge.c` 约 3500 行，`broker.c`、`compose.py`、`build.py`、`engine.py`、`docker` 各一千多行，
-  宜按职责逐步拆分。
+- 大文件：`proot_bridge.c` 已按职责拆成路径翻译与分发（约 2400 行）、挂载（`proot_mounts.c`，约 770 行）、
+  `/proc`（`proot_procfs.c`，约 260 行），共享部分在 `proot_bridge_internal.h`；`broker.c`、`compose.py`、`build.py`、
+  `engine.py`、`docker` 各一千多行，宜继续按职责逐步拆分。
 
 ## 历史增量
 

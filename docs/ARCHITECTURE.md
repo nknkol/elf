@@ -69,7 +69,11 @@ guest svc → 桩（stub.c 模板，按 w8 判断 rt_sigreturn/clone）
 | `src/payload/include/elf_abi.h` | loader、payload、测试共用的固定数字（ABI 版本、固定地址、私有 prctl） |
 | `src/payload/include/integrity.h` | 自身完整性规则（loader 与 payload 共用 W^X 判定） |
 | `src/payload/logic/dispatch.c` | 通用分发（见上） |
-| `src/payload/logic/proot_*.c` | PRoot 路径语义、exec 链、auxv |
+| `src/payload/logic/proot_bridge.c` | PRoot 路径翻译、系统调用分发、每次调用的 Bridge 生命周期 |
+| `src/payload/logic/proot_mounts.c` | R4 挂载表（mount/umount2）、tmpfs、R6 overlay 与 loop 设备、`/proc/filesystems` |
+| `src/payload/logic/proot_procfs.c` | `/proc` 伪造：loader 进程的 exe/cwd/fd 链接、cmdline、readlink、按挂载表生成的 mounts/mountinfo |
+| `src/payload/logic/proot_bridge_internal.h` | 上面三者共享的 Bridge 结构与 `pb_` 前缀的内部函数（不对外） |
+| `src/payload/logic/proot_exec.c`、`proot_auxv.c` | exec 链、auxv |
 | `src/payload/logic/fd_*.c`、`fs_policy.c`、`vm_write_guard.c` | guarded 构建的 FD 运行时与策略 |
 | `src/payload/logic/broker_client.c` | `--isolate` 下按路径的调用改由 broker 执行（协议 `broker_proto.h`） |
 | `src/payload/logic/container_state.c` | 共享挂载表（FD 901）、属主库（FD 902）、loop 设备槽 |
