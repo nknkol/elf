@@ -396,6 +396,9 @@ SLOW_SYSCALL(__NR_open_tree)
 #ifdef __NR_move_mount
 SLOW_SYSCALL(__NR_move_mount)
 #endif
+#ifdef __NR_mount_setattr
+SLOW_SYSCALL(__NR_mount_setattr)
+#endif
 #ifdef __NR_close_range
 SLOW_SYSCALL(__NR_close_range)
 #endif

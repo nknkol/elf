@@ -14,6 +14,7 @@ import tarfile
 import time
 from pathlib import Path
 
+import owners as owners_mod
 import runspec
 import store as store_mod
 from store import StoreError
@@ -83,6 +84,10 @@ def create(st, record, quiet=False):
         for tmpfs in host.get('Tmpfs') or []:
             (work / 'tmpfs' / tmpfs.strip('/').replace('/', '_')).mkdir(parents=True, exist_ok=True)
         rootfs = image_root if host.get('ReadonlyRootfs') or host.get('InPlace') else work / 'rootfs'
+        if host.get('Owners'):
+            # R5: owners and modes of the image, by inode of this rootfs.
+            meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
+            owners_mod.from_meta(rootfs, meta, work / 'owners.db')
         runspec.install_helper(rootfs)
         # Docker creates a missing working directory (not in a read-only root).
         cwd = record['Config'].get('WorkingDir')
@@ -193,9 +198,18 @@ def spawn(argv, env_path, stdin, stdout, stderr, cwd, foreground_tty):
                             env={'PATH': env_path}, preexec_fn=child, close_fds=True)
 
 
+def reset_mounts(cdir):
+    """A new start has no mounts of its own yet (R4): the table and the
+    tmpfs directories of the previous run go."""
+    (cdir / 'mounts.table').unlink(missing_ok=True)
+    if (cdir / 'mounts').exists():
+        store_mod.remove(cdir / 'mounts')
+
+
 def run_once(st, record, stdio, interactive, tty):
     """One run of the container in this process; returns its exit code."""
     cid = record['Id']
+    reset_mounts(st.container_dir(cid))
     argv, _ = command_line(st, record)
     rootfs = rootfs_of(st, record)
     runspec.install_helper(rootfs)

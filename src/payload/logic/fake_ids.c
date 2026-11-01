@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "config.h"
 #include "fake_ids.h"
+#include "container_state.h"
 #include "host_syscall.h"
 
 extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6);
@@ -151,6 +152,8 @@ int fake_ids_syscall(long number, long a[6], long *result)
 int fake_ids_privileged(void) { return privileged(); }
 
 uint32_t fake_ids_owner(int group) { return set_of(group)[SAVED]; }
+uint32_t fake_ids_effective(int group) { return set_of(group)[EFFECTIVE]; }
+uint32_t fake_ids_fs(int group) { return set_of(group)[FS]; }
 
 int fake_ids_groups(uint32_t out[32])
 {
@@ -209,13 +212,20 @@ static void collect_owners(void)
     owner_count = n;
     __atomic_store_n(&owner_state, 2, __ATOMIC_RELEASE);
 }
-uint32_t fake_ids_reported_owner(uint32_t id, int group)
+int fake_ids_host_owned(uint32_t id, int group)
 {
     collect_owners();
-    if (__atomic_load_n(&owner_state, __ATOMIC_ACQUIRE) != 2) return id;
+    if (__atomic_load_n(&owner_state, __ATOMIC_ACQUIRE) != 2) return 0;
     for (int i = 0; i < owner_count; i++)
-        if (id == (group ? owner_gid[i] : owner_uid[i])) return fake_ids_owner(group);
-    return id;
+        if (id == (group ? owner_gid[i] : owner_uid[i])) return 1;
+    return 0;
+}
+/* With an owner database (R5) the user's own files without a record are
+ * the image's: root's. */
+static uint32_t own_files_owner(int group) { return owners_enabled() ? 0 : fake_ids_owner(group); }
+uint32_t fake_ids_reported_owner(uint32_t id, int group)
+{
+    return fake_ids_host_owned(id, group) ? own_files_owner(group) : id;
 }
 void fake_ids_stat_owner(long sys_no, const long *a)
 {
@@ -236,7 +246,7 @@ void fake_ids_stat_owner(long sys_no, const long *a)
         gid_hit |= owner[1] == owner_gid[i];
     }
     /* The caller's own files belong to its fake saved ids, as in PRoot. */
-    if (uid_hit) owner[0] = fake_ids_owner(0);
-    if (gid_hit) owner[1] = fake_ids_owner(1);
+    if (uid_hit) owner[0] = own_files_owner(0);
+    if (gid_hit) owner[1] = own_files_owner(1);
 }
 

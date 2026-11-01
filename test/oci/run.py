@@ -373,6 +373,111 @@ def registry_tests(home, work):
 
 
 # ------------------------------------------------------------ running
+def root_owned(info):
+    """Image files belong to root, as in real images (not the app uid)."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = ''
+    return info
+
+
+def layer_owners(home, image, work):
+    """{path: (uid, gid, mode)} of the last layer of a saved image."""
+    archive = work / 'owners-save.tar'
+    p = docker(home, 'save', '-o', str(archive), image)
+    assert p.returncode == 0, p.stderr
+    with tarfile.open(archive) as outer:
+        manifest = json.load(outer.extractfile('manifest.json'))
+        blob = outer.extractfile(manifest[0]['Layers'][-1]).read()
+    if blob[:2] == b'\x1f\x8b':
+        blob = gzip.decompress(blob)
+    with tarfile.open(fileobj=io.BytesIO(blob)) as layer:
+        return {m.name.rstrip('/'): (m.uid, m.gid, m.mode) for m in layer}
+
+
+def mount_owner_tests(home, work):
+    """R4 mounts inside containers, R5 owners (docs/OCI.md)."""
+    img = 'test/alpine:1'
+    for mode in ([], ['--isolate']):
+        tag = ' (--isolate)' if mode else ''
+        p = docker(home, 'run', '--rm', *mode, '-u', 'root', img,
+                   'mkdir -p /mnt/t /mnt/b && mount -t tmpfs -o mode=0700 none /mnt/t && echo x > /mnt/t/f && '
+                   'mount --bind /etc /mnt/b && grep -c " /mnt/" /proc/mounts && stat -c %a /mnt/t && '
+                   'ls /mnt/b/alpine-release && umount /mnt/t && umount /mnt/b && ls /mnt/t | wc -l && '
+                   'grep -c " /mnt/" /proc/mounts; mount -t ext4 /dev/sda /mnt/t 2>/dev/null || echo refused')
+        check(p.returncode == 0 and p.stdout == '2\n700\n/mnt/b/alpine-release\n0\n0\nrefused\n',
+              'mount: tmpfs, --bind, /proc/mounts, umount, unsupported type' + tag, p.stdout + p.stderr)
+    # docker exec joins the container's mounts.
+    name = 'mounter'
+    docker(home, 'run', '-d', '--name', name, '-u', 'root', img,
+           'mkdir -p /mnt/x; mount -t tmpfs none /mnt/x; echo shared > /mnt/x/f; sleep 30')
+    time.sleep(1.5)
+    p = docker(home, 'exec', name, 'cat', '/mnt/x/f')
+    cdir = home / 'containers' / docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+    check(p.stdout == 'shared\n' and not (cdir / 'rootfs/mnt/x/f').exists(),
+          'mount: docker exec sees the container\'s mounts; the rootfs does not', p.stdout + p.stderr)
+    docker(home, 'stop', '-t', '1', name)
+    docker(home, 'rm', '-f', name)
+    # R5: an image with owners and modes the host cannot hold.
+    docker(home, 'save', '-o', str(work / 'alpine-base.tar'), img)
+    with tarfile.open(work / 'alpine-base.tar') as outer:
+        manifest = json.load(outer.extractfile('manifest.json'))
+        base_blob = outer.extractfile(manifest[0]['Layers'][0]).read()
+    plain_base = gzip.decompress(base_blob) if base_blob[:2] == b'\x1f\x8b' else base_blob
+    extra, extra_id = layer_bytes([member('srv/', 'dir'), member('srv/owned', data=b'o', mode=0o640,
+                                                                 uid=1000, gid=1001),
+                                   member('srv/suid', data=b's', mode=0o4755),
+                                   member('srv/locked', 'dir', mode=0o500, uid=70, gid=70)])
+    oci_layout(work / 'owned', [(base_blob, sha(plain_base)), (extra, extra_id)],
+               {'Entrypoint': ['/bin/sh', '-c'], 'Env': ['PATH=/usr/sbin:/usr/bin:/sbin:/bin']},
+               name='test/owned:1')
+    p = docker(home, 'load', '-i', str(work / 'owned'))
+    check(p.returncode == 0, 'owners: image with recorded owners loads', p.stderr)
+    probe = 'stat -c "%n %u %g %a" /srv/owned /srv/suid /srv/locked; stat -c "%n %u %g" /etc/passwd'
+    for mode in ([], ['--isolate']):
+        tag = ' (--isolate)' if mode else ''
+        p = docker(home, 'run', '--rm', '--owners', *mode, 'test/owned:1', probe)
+        check(p.stdout == '/srv/owned 1000 1001 640\n/srv/suid 0 0 4755\n/srv/locked 70 70 500\n'
+              '/etc/passwd 0 0\n', '--owners: stat reports the image\'s owners and modes' + tag,
+              p.stdout + p.stderr)
+        p = docker(home, 'run', '--rm', '--owners', *mode, '-u', 'root', 'test/owned:1',
+                   'adduser -D -u 1234 pg && mkdir /data && chown pg:pg /data && chmod 700 /data && '
+                   'su pg -s /bin/sh -c "touch /data/x; stat -c \'%U %a\' /data /data/x; '
+                   'chown root /data/x 2>/dev/null || echo eperm"')
+        check(p.stdout == 'pg 700\npg 644\neperm\n',
+              '--owners: chown, chmod, a user\'s new files, EPERM to give away' + tag, p.stdout + p.stderr)
+    p = docker(home, 'run', '--rm', 'test/owned:1', 'stat -c "%u %g" /srv/owned')
+    check(p.stdout == '0 0\n', 'without --owners every file reads as root\'s (fake_id0)', p.stdout + p.stderr)
+    # commit writes the recorded owners into the layer.
+    docker(home, 'run', '--owners', '--name', 'chowner', '-u', 'root', 'test/owned:1',
+           'echo c > /srv/new && chown 4321:4322 /srv/new && chmod 4711 /srv/new && chown 99 /srv/owned')
+    p = docker(home, 'diff', 'chowner')
+    check({'A /srv/new', 'C /srv/owned'} <= set(p.stdout.splitlines()),
+          'diff: an owner change alone is a change', p.stdout + p.stderr)
+    p = docker(home, 'commit', 'chowner', 'test/chowned:1')
+    heads = layer_owners(home, 'test/chowned:1', work) if p.returncode == 0 else {}
+    check(heads.get('srv/new') == (4321, 4322, 0o4711) and heads.get('srv/owned', (0,))[:2] == (99, 1001),
+          'commit: layer tar headers carry the recorded owners and modes', str(heads) + p.stderr)
+    p = docker(home, 'run', '--rm', '--owners', 'test/chowned:1', 'stat -c "%u %g %a" /srv/new /srv/locked')
+    check(p.stdout == '4321 4322 4711\n70 70 500\n', 'commit: the new image keeps the owners', p.stdout + p.stderr)
+    docker(home, 'rm', 'chowner')
+    # build: chown in RUN and COPY --chown reach the layers.
+    ctx = work / 'owners-ctx'
+    ctx.mkdir()
+    (ctx / 'file').write_text('f\n')
+    (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nUSER root\n'
+                                    'RUN adduser -D -u 2345 app && mkdir /app && chown app:app /app && '
+                                    'chmod 750 /app\nCOPY --chown=2345:2346 file /app/file\n'
+                                    'COPY --chown=app file /app/named\n')
+    p = docker(home, 'build', '-q', '-t', 'test/owners-built:1', str(ctx), timeout=600)
+    heads = layer_owners(home, 'test/owners-built:1', work) if p.returncode == 0 else {}
+    check(heads.get('app/named', (0, 0))[:2] == (2345, 2345), 'build: COPY --chown=name', str(heads) + p.stderr)
+    p2 = docker(home, 'run', '--rm', '--owners', 'test/owners-built:1', 'stat -c "%n %u %g %a" /app /app/file')
+    check(p2.stdout == '/app 2345 2345 750\n/app/file 2345 2346 644\n',
+          'build: chown in RUN and COPY --chown in the image', p2.stdout + p2.stderr + p.stderr)
+    for image in ('test/owners-built:1', 'test/chowned:1', 'test/owned:1'):
+        docker(home, 'rmi', '-f', image)
+
+
 def alpine_image(home, work):
     root = lib.require(lib.ALPINE, 'Alpine test rootfs')
     raw = io.BytesIO()
@@ -383,7 +488,7 @@ def alpine_image(home, work):
                 rel = str(p.relative_to(root))
                 if rel.startswith('.elf'):
                     continue
-                tar.add(str(p), rel, recursive=False)
+                tar.add(str(p), rel, recursive=False, filter=root_owned)
     plain = raw.getvalue()
     blob = gzip.compress(plain, mtime=0, compresslevel=1)
     config = {'Entrypoint': ['/bin/sh', '-c'], 'Cmd': ['echo default-cmd'],
@@ -620,6 +725,7 @@ def main():
             check('test/alpine yes' in p2.stdout, '--in-place marks the image modified', p2.stdout)
             docker(home, 'rm', 'inplace')
             build_tests(home, work)
+            mount_owner_tests(home, work)
         else:
             print('SKIP: container runs need', lib.ALPINE)
         p = docker(home, 'system', 'prune', '-af', '--volumes')

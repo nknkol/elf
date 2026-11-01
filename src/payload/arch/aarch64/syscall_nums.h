@@ -9,6 +9,10 @@
 #ifndef __NR_fchmodat2
 #define __NR_fchmodat2 452
 #endif
+/* The new mount API (Linux 5.2-5.12), refused under emulated mounts. */
+#ifndef __NR_mount_setattr
+#define __NR_mount_setattr 442
+#endif
 /* Path-taking calls newer than the target headers (Linux 6.13-6.17). The
  * backends do not translate them, and a raw pass would resolve guest paths
  * on the host: they are routed slowly and refused with ENOSYS, as an older

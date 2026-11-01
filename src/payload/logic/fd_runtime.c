@@ -12,6 +12,7 @@
 #include "vm_write_guard.h"
 #include "reentry_guard.h"
 #include "fd_runtime.h"
+#include "container_state.h"
 #include "fs_policy.h"
 #include "fd_handoff.h"
 #include "config.h"
@@ -365,7 +366,7 @@ static int room(struct fd_runtime *s,struct fd_table *t,int target,int assign,si
     s->reserved+=need;
     return (int)need;
 }
-int fd_runtime_mount_access(enum fs_access access[CONFIG_MAX_BINDS+1], size_t *count)
+int fd_runtime_mount_access(enum fs_access access[CONFIG_MOUNT_IDS], size_t *count)
 {
     const char *v=g_payload_config.mount_access_observe;
     if(!v[0])return -ENODATA;
@@ -375,14 +376,19 @@ int fd_runtime_mount_access(enum fs_access access[CONFIG_MAX_BINDS+1], size_t *c
         access[n]=v[n]=='d'?FS_DENY:v[n]=='r'?FS_READ_ONLY:FS_READ_WRITE;
     }
     if(v[n])return -EINVAL;
-    struct fs_policy policy={access,n};
+    size_t configured=n;
+    char slots[CONFIG_MAX_MOUNTS];
+    int used=mounts_enabled()?mounts_access(slots,CONFIG_MAX_MOUNTS):0;
+    for(int i=0;i<used;i++,n++)
+        access[n]=slots[i]=='r'?FS_READ_ONLY:slots[i]=='w'?FS_READ_WRITE:FS_DENY;
+    struct fs_policy policy={access,configured};
     int valid=fs_policy_validate(&policy,g_payload_config.bind_count);
     if(valid)return valid;
     *count=n;return 0;
 }
 static int mount_decision(size_t mount, bool known, enum fs_operation operation)
 {
-    enum fs_access access[CONFIG_MAX_BINDS+1];
+    enum fs_access access[CONFIG_MOUNT_IDS];
     size_t count;
     int rc=fd_runtime_mount_access(access,&count);
     if(rc)return rc;

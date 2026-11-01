@@ -420,6 +420,8 @@ def run_parser(prog):
     p.add_argument('--pull', default='missing', choices=['missing', 'always', 'never'])
     p.add_argument('--platform')
     p.add_argument('--isolate', action='store_true', help='run under the isolation broker (ELF)')
+    p.add_argument('--owners', action='store_true',
+                   help='record chown/chmod and report image owners (ELF, docs/OCI.md R5)')
     p.add_argument('--isolate-device', action='append', default=[])
     p.add_argument('-a', '--attach', action='append', default=[])
     p.add_argument('--sig-proxy', default='true')
@@ -537,6 +539,7 @@ def new_record(st, a, image_id, image_text):
                    'Volumes': config.get('Volumes') or {}},
         'HostConfig': {'Binds': binds, 'AutoRemove': a.rm, 'ReadonlyRootfs': a.read_only,
                        'InPlace': a.in_place, 'Isolate': a.isolate, 'IsolateDevices': a.isolate_device,
+                       'Owners': a.owners,
                        'RestartPolicy': restart, 'Tmpfs': tmpfs, 'ExtraHosts': hosts, 'Dns': a.dns,
                        'PortBindings': a.publish},
         'State': {'Status': 'created', 'Running': False, 'Pid': 0, 'ExitCode': 0,

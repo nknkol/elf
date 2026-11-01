@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import images
 import layers
+import owners as owners_mod
 import registry
 import runspec
 import runtime
@@ -510,6 +511,7 @@ class Builder:
                 self.say(' ---> Using cache')
                 if cached.get('layer'):
                     extractor = unpack.Extractor(s.rootfs)
+                    extractor.meta = s.meta  # the layer's owners and modes
                     try:
                         extractor.layer(self.st.blob(cached['layer']['digest']))
                     finally:
@@ -521,16 +523,21 @@ class Builder:
             else:
                 if s.snapshot is None:
                     s.snapshot = layers.scan(s.rootfs)
+                meta_before = json.loads(json.dumps(s.meta))
                 prepare()
                 after = layers.scan(s.rootfs)
                 changed, deleted = layers.changes(s.snapshot, after)
+                # chown/chmod alone (R5) change a path for the layer too.
+                changed = sorted(set(changed) | {p for p in layers.owner_changes(meta_before, s.meta)
+                                                 if p in after})
                 created = store_mod.now()
                 history = {'created': created, 'created_by': self.created_by(ins),
                            'comment': 'elf-oci build'}
                 entry = {'history': history}
                 if changed or deleted:
                     plain = self.work / f'layer-{key}.tar'
-                    diff_id = layers.write_layer(s.rootfs, changed, deleted, plain, s.meta.get('modes'))
+                    diff_id = layers.write_layer(s.rootfs, changed, deleted, plain, s.meta.get('modes'),
+                                                 s.meta.get('owners'))
                     digest, size = layers.compress(self.st, plain)
                     plain.unlink()
                     layer = {'mediaType': images.OCI_LAYER_GZIP, 'digest': digest, 'size': size}
@@ -687,13 +694,17 @@ class Builder:
             env = [f'{k}={v}' for k, v in s.args.items()] + list(s.config.get('Env') or [])
             record = {'Config': {'Hostname': 'buildkitsandbox', 'User': s.config.get('User', ''),
                                  'Env': env, 'WorkingDir': s.config.get('WorkingDir') or '/'},
-                      'HostConfig': {'Binds': binds}}
+                      'HostConfig': {'Binds': binds, 'Owners': True}}
             runspec.install_helper(s.rootfs)
+            # R5: chown/chmod in RUN are recorded and go into the layer.
+            owners_mod.from_meta(s.rootfs, s.meta, cdir / 'owners.db')
             argv, _ = runspec.build(record, s.rootfs, cdir, isolate=self.isolate, command=command)
             proc = subprocess.run(argv, cwd=str(s.rootfs), stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL if self.quiet else None,
                                   env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
             (s.rootfs / runspec.HELPER).unlink(missing_ok=True)
+            if not proc.returncode:
+                owners_mod.update_meta(s.meta, owners_mod.guest_view(s.rootfs, cdir / 'owners.db'))
             store_mod.remove(cdir)
             if proc.returncode:
                 shown = json.dumps(command) if form else ' '.join(command[:-1]) + ' ' + command[-1]
@@ -803,6 +814,28 @@ class Builder:
                 out.append(self.source_path(root, w, ins))
         return out
 
+    def chown_copied(self, s, ins, scope, targets):
+        """COPY --chown (R5): the copied files' owner, in the stage's meta."""
+        spec = ins.flags.get('chown')
+        if not spec:
+            return
+        try:
+            uid, gid, _ = runspec.resolve_user(s.rootfs, expand(spec, scope, ins.line))
+        except runspec.SpecError as e:
+            raise BuildError(f'line {ins.line}: --chown: {e}') from None
+        if ':' not in spec:
+            gid = uid  # Docker: without a group, the GID is the UID
+        root = str(s.rootfs)
+        owners = s.meta.setdefault('owners', {})
+        for target in targets:
+            host = str(target)
+            for path in [host] + [os.path.join(d, n) for d, ds, fs in os.walk(host) for n in ds + fs]:
+                guest = path[len(root):] or '/'
+                if uid or gid:
+                    owners[guest] = [uid, gid]
+                else:
+                    owners.pop(guest, None)
+
     def do_COPY(self, s, ins, scope, plan=False, add=False):
         chmod = int(ins.flags['chmod'], 8) if 'chmod' in ins.flags else None
         if 'parents' in ins.flags:
@@ -825,6 +858,7 @@ class Builder:
                     host.write_text(body)
                     if chmod is not None:
                         os.chmod(host, chmod)
+                    self.chown_copied(s, ins, scope, [host])
             return extra, act
         if len(words) < 2:
             raise BuildError(f'line {ins.line}: {ins.cmd} requires at least two arguments')
@@ -849,6 +883,7 @@ class Builder:
         extra = json.dumps([hashes, urls, ins.flags.get('checksum')])
 
         def act():
+            copied = []
             for p in paths:
                 host_dest = runspec.guest_resolve(s.rootfs, [], dest_path)
                 if add and p.is_file() and not p.is_symlink() and is_archive(p):
@@ -858,9 +893,12 @@ class Builder:
                 if p.is_dir() and not p.is_symlink():
                     copy_into(p, host_dest, ignore if root == self.context else None,
                               root if root == self.context else p, chmod)
+                    copied.append(host_dest)
                 else:
                     target = host_dest / p.name if (dest.endswith('/') or host_dest.is_dir()) else host_dest
                     copy_into(p, target, chmod=chmod)
+                    copied.append(target)
+            self.chown_copied(s, ins, scope, copied)
             for url in urls:
                 host_dest = runspec.guest_resolve(s.rootfs, [], dest_path)
                 name = os.path.basename(url.split('?')[0]) or 'download'
@@ -873,6 +911,7 @@ class Builder:
                     if actual != ins.flags['checksum']:
                         raise BuildError(f'line {ins.line}: checksum of {url} is {actual}')
                 os.chmod(target, chmod if chmod is not None else 0o600)
+                self.chown_copied(s, ins, scope, [target])
         return extra, act
 
     def do_ADD(self, s, ins, scope, plan=False):
@@ -1106,13 +1145,29 @@ def container_diff(st, record):
     return layers.scan(image_root), layers.scan(container_root), container_root
 
 
+def container_meta(st, record, root):
+    """(image meta, the container's meta): with an owner database (R5)
+    its owners and modes, else the image's."""
+    meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
+    db = st.container_dir(record['Id']) / 'owners.db'
+    new = json.loads(json.dumps(meta))
+    if root is not None and db.exists():
+        owners_mod.update_meta(new, owners_mod.guest_view(root, db))
+    return meta, new
+
+
 def cmd_diff(st, args):
     docker = cli()
     p = docker.parser('diff', 'Inspect changes to files or directories on a container\'s filesystem')
     p.add_argument('container')
     a = p.parse_args(args)
-    before, after, _ = container_diff(st, st.resolve_container(a.container))
-    for kind, path in layers.kinds(before, after):
+    record = st.resolve_container(a.container)
+    before, after, root = container_diff(st, record)
+    meta, new = container_meta(st, record, root)
+    shown = layers.kinds(before, after)
+    known = {path for _, path in shown}
+    extra = [('C', p) for p in layers.owner_changes(meta, new) if p in after and p not in known]
+    for kind, path in sorted(shown + extra, key=lambda x: x[1]):
         print(kind, path)
 
 
@@ -1130,6 +1185,8 @@ def cmd_commit(st, args):
     base = st.image_info(record['Image'])
     before, after, root = container_diff(st, record)
     changed, deleted = layers.changes(before, after)
+    meta, new_meta = container_meta(st, record, root)
+    changed = sorted(set(changed) | {p for p in layers.owner_changes(meta, new_meta) if p in after})
     cfg = json.loads(json.dumps(base['config']))
     cc = record['Config']
     image_cfg = cfg.setdefault('config', {})
@@ -1155,8 +1212,8 @@ def cmd_commit(st, args):
     work = st.tmpdir('commit')
     try:
         if changed or deleted:
-            meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
-            diff_id = layers.write_layer(root, changed, deleted, work / 'layer.tar', meta.get('modes'))
+            diff_id = layers.write_layer(root, changed, deleted, work / 'layer.tar', new_meta.get('modes'),
+                                         new_meta.get('owners'))
             digest, size = layers.compress(st, work / 'layer.tar')
             manifest['layers'] = list(manifest.get('layers', [])) + [
                 {'mediaType': images.OCI_LAYER_GZIP, 'digest': digest, 'size': size}]
@@ -1177,8 +1234,7 @@ def cmd_commit(st, args):
             runspec.copy_rootfs(st.image_dir(record['Image']) / 'rootfs', image_root)
         else:
             runspec.copy_rootfs(root, image_root)
-        meta = store_mod.read_json(st.image_dir(record['Image']) / 'meta.json', {})
-        image_id = install_built(st, config_bytes, manifest, image_root, meta)
+        image_id = install_built(st, config_bytes, manifest, image_root, new_meta)
     finally:
         store_mod.remove(work)
     if a.repository:

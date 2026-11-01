@@ -446,10 +446,19 @@ long host_syscall(long nr, long a0, long a1, long a2, long a3, long a4, long a5)
 
 /* The control socket, the loader binary and the channels stay open and
  * keep their flags whatever the guest closes (closefrom loops, dup2 over
- * them): without them no file can be reached. */
+ * them): without them no file can be reached. So do the container's mount
+ * table and owner database (container_state.h), in every mode. */
+static int container_fds(void)
+{
+    return g_payload_config.mount_table_fd >= 0 || g_payload_config.owner_db_fd >= 0;
+}
 static int reserved(long fd)
 {
     if (fd < 0)
+        return 0;
+    if (fd == g_payload_config.mount_table_fd || fd == g_payload_config.owner_db_fd)
+        return 1;
+    if (!g_payload_config.isolate)
         return 0;
     if (fd == g_payload_config.isolate_fd || fd == g_payload_config.loader_fd)
         return 1;
@@ -479,9 +488,11 @@ static void close_unreserved(unsigned long fd, unsigned flags)
 /* The kernel call on the stretches between the reserved FDs. */
 static long close_range_between(unsigned first, unsigned last, unsigned flags)
 {
-    int held[CHANNELS + 2], count = 0;
-    held[count++] = g_payload_config.isolate_fd;
-    held[count++] = g_payload_config.loader_fd;
+    int held[CHANNELS + 4], count = 0;
+    held[count++] = g_payload_config.isolate ? g_payload_config.isolate_fd : -1;
+    held[count++] = g_payload_config.isolate ? g_payload_config.loader_fd : -1;
+    held[count++] = g_payload_config.mount_table_fd;
+    held[count++] = g_payload_config.owner_db_fd;
     for (int i = 0; i < CHANNELS; i++) {
         int fd = __atomic_load_n(&channels[i].fd, __ATOMIC_RELAXED);
         if (fd > 0)
@@ -569,7 +580,7 @@ static long close_range_unreserved(unsigned first, unsigned last, unsigned flags
 
 int broker_fd_guard(long nr, const long a[6], long *result)
 {
-    if (!g_payload_config.isolate)
+    if (!g_payload_config.isolate && !container_fds())
         return 0;
     switch (nr) {
     case __NR_close:
@@ -628,7 +639,7 @@ void broker_clone_finish(unsigned long flags, long result)
  * own: glibc's closefrom fallback and FD-walking tools see only the guest's. */
 long broker_hide_fds(int fd, void *buffer, long length)
 {
-    if (!g_payload_config.isolate)
+    if (!g_payload_config.isolate && !container_fds())
         return length;
     unsigned long fs[16]; /* struct statfs; f_type first */
     if (raw_syscall(__NR_fstatfs, fd, (long)fs, 0, 0, 0, 0) || (unsigned)fs[0] != 0x9fa0 /* PROC_SUPER_MAGIC */)

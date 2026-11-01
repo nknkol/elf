@@ -15,6 +15,7 @@
 #include "syscall_nums.h"
 #include "proot_bridge.h"
 #include "fake_ids.h"
+#include "container_state.h"
 #ifdef GUARDED
 #include "fd_runtime.h"
 #include "fs_policy.h"
@@ -86,9 +87,9 @@ typedef struct {
     int walk_fd[4], walk_count;
 #ifdef GUARDED
     bool reads; /* Immutable read policy snapshot below is active. */
-    enum fs_access access[CONFIG_MAX_BINDS + 1];
+    enum fs_access access[CONFIG_MOUNT_IDS];
     struct fs_policy policy;
-    const char *exposed[CONFIG_MAX_BINDS];
+    const char *exposed[CONFIG_MOUNT_IDS];
     size_t exposed_count;
     /* Private getdents64 bounce: hidden names never reach guest memory. */
     unsigned char dirents[4096];
@@ -97,7 +98,10 @@ typedef struct {
     const struct proot_path_context *context;
     int anchor_fd;
     struct proot_open_origin anchor;
-    PathBinding bindings[CONFIG_MAX_BINDS];
+    PathBinding bindings[CONFIG_MOUNT_IDS - 1];
+    /* R4: the mount table as this call sees it (bindings point into it). */
+    struct mount_entry mounts[CONFIG_MAX_MOUNTS];
+    int mount_count;
     char cwd[PATH_MAX], guest[PATH_MAX], host[PATH_MAX];
     char first_guest[PATH_MAX], first_host[PATH_MAX];
     struct sockaddr_un address;
@@ -118,15 +122,18 @@ typedef struct {
 
 size_t proot_bridge_scratch_size(void) { return sizeof(Bridge); }
 
+/* A free or hidden mount slot: a prefix no path has. */
+static const char UNMOUNTED[] = "/\001elf-unmounted";
+
 /* A case variant of a marked mountpoint names it on this host storage: use
  * its exact spelling, so mount selection and policy see the same object. */
 static void respell(void *opaque, char *path)
 {
     Bridge *b = opaque;
-    for (size_t i = 0; i < b->table.count; i++) {
+    for (size_t i = 0; i < b->table.count && i < (size_t)g_payload_config.bind_count; i++) {
         const PathBinding *e = &b->table.entries[i];
         uint32_t fold = g_payload_config.binds[i].fold;
-        if (!fold) continue;
+        if (!fold || e->guest == UNMOUNTED) continue;
         size_t from = fold - 1, n = strlen(e->guest), k = from;
         if (strncmp(path, e->guest, from)) continue;
         for (; k < n; k++) {
@@ -849,14 +856,21 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow);
  * host path walk is the expensive part on this storage), kept at a high
  * number and close-on-exec. The guest may close or reuse that number, so
  * each use checks it still names the same directory, else reopens it. */
-static long mount_root_fd[CONFIG_MAX_BINDS + 1];
-static unsigned long mount_root_dev[CONFIG_MAX_BINDS + 1], mount_root_ino[CONFIG_MAX_BINDS + 1];
+static long mount_root_fd[CONFIG_MOUNT_IDS];
+static unsigned long mount_root_dev[CONFIG_MOUNT_IDS], mount_root_ino[CONFIG_MOUNT_IDS];
+/* An emulated mount's slot is reused by later mounts: its id tags the FD. */
+static uint32_t mount_root_tag[CONFIG_MOUNT_IDS];
 
 static long mount_root(Bridge *b, size_t mount, const char *prefix, size_t plen)
 {
+    if (mount >= CONFIG_MOUNT_IDS) return -EINVAL;
+    size_t slot = mount - 1 - (size_t)g_payload_config.bind_count;
+    uint32_t tag = mount > (size_t)g_payload_config.bind_count && slot < (size_t)b->mount_count ?
+        b->mounts[slot].id : 0;
     long fd = __atomic_load_n(&mount_root_fd[mount], __ATOMIC_ACQUIRE) - 1;
     struct stat st;
-    if (fd >= 0 && !raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) &&
+    if (fd >= 0 && __atomic_load_n(&mount_root_tag[mount], __ATOMIC_ACQUIRE) == tag &&
+        !raw_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) &&
         st.st_dev == __atomic_load_n(&mount_root_dev[mount], __ATOMIC_ACQUIRE) &&
         st.st_ino == __atomic_load_n(&mount_root_ino[mount], __ATOMIC_ACQUIRE) &&
         (st.st_mode & S_IFMT) == S_IFDIR)
@@ -870,6 +884,7 @@ static long mount_root(Bridge *b, size_t mount, const char *prefix, size_t plen)
     if (high >= 0) { raw_syscall(__NR_close, opened, 0, 0, 0, 0, 0); opened = high; }
     if (raw_syscall(__NR_fstat, opened, (long)&st, 0, 0, 0, 0) < 0) return opened;
     /* Publish; a concurrent opener's copy is simply kept by whoever won. */
+    __atomic_store_n(&mount_root_tag[mount], tag, __ATOMIC_RELEASE);
     __atomic_store_n(&mount_root_dev[mount], st.st_dev, __ATOMIC_RELEASE);
     __atomic_store_n(&mount_root_ino[mount], st.st_ino, __ATOMIC_RELEASE);
     __atomic_store_n(&mount_root_fd[mount], opened + 1, __ATOMIC_RELEASE);
@@ -1086,6 +1101,9 @@ static int resolve_once(Bridge *b, int dirfd, const char *path, bool follow)
 int proot_handles_syscall(long number)
 {
     switch (number) {
+    case __NR_mount:
+    case __NR_umount2:
+        return mounts_enabled();
     case __NR_setxattr: case __NR_lsetxattr:
     case __NR_getxattr: case __NR_lgetxattr:
     case __NR_listxattr: case __NR_llistxattr:
@@ -1194,6 +1212,49 @@ static long copy_link(Bridge *b, long error)
     return ret < 0 ? (out == -EEXIST ? -EEXIST : error) : 0;
 }
 
+/* ---- R5: owners and modes the host cannot hold (container_state.h) ---- */
+static long host_stat(const char *host, bool follow, struct stat *st)
+{
+    return raw_syscall(__NR_newfstatat, AT_FDCWD, (long)host, (long)st,
+                       follow ? 0 : AT_SYMLINK_NOFOLLOW, 0, 0);
+}
+
+/* chmod with an owner database: the host keeps owner rw (rwx for a
+ * directory); bits the host refuses (setuid, sticky) are dropped there.
+ * The guest's mode is recorded when the host's differs. */
+static long owners_apply_mode(long fd, const char *host, const struct stat *st, unsigned mode)
+{
+    long rc = owners_may_chmod(st);
+    if (rc < 0) return rc;
+    unsigned wanted = owners_host_mode(st, mode);
+    static const unsigned drops[] = {0, 06000, 07000};
+    for (size_t i = 0; i < 3; i++) {
+        unsigned applied = wanted & ~drops[i];
+        rc = host ? raw_syscall(__NR_fchmodat, AT_FDCWD, (long)host, applied, 0, 0, 0) :
+            raw_syscall(__NR_fchmod, fd, applied, 0, 0, 0, 0);
+        if (rc == -EPERM && i < 2) continue;
+        if (rc < 0) return rc;
+        owners_chmod_done(st, mode, applied);
+        return 0;
+    }
+    return rc;
+}
+
+/* After a call that made a new name at b->host. */
+static void owners_new_name(Bridge *b)
+{
+    struct stat st;
+    if (owners_enabled() && !host_stat(b->host, false, &st))
+        owners_created(&st);
+}
+
+/* The object an unlink or a replacing rename takes the last name of. */
+static void owners_last_name(const struct stat *st, bool known)
+{
+    if (known && ((st->st_mode & S_IFMT) == S_IFDIR || st->st_nlink <= 1))
+        owners_forget(st);
+}
+
 static long mutate(Bridge *b, long number, long a[6])
 {
     long ret;
@@ -1204,7 +1265,9 @@ static long mutate(Bridge *b, long number, long a[6])
         ret = resolve(b, (int)a[1], (const char *)a[2], false);
         if (ret < 0)
             return ret;
-        return raw_syscall(number, a[0], AT_FDCWD, (long)b->host, 0, 0, 0);
+        ret = raw_syscall(number, a[0], AT_FDCWD, (long)b->host, 0, 0, 0);
+        if (!ret) owners_new_name(b);
+        return ret;
     }
     if (number == __NR_mkdirat || number == __NR_unlinkat) {
         ret = resolve(b, (int)a[0], (const char *)a[1], false);
@@ -1212,7 +1275,12 @@ static long mutate(Bridge *b, long number, long a[6])
             return ret;
         if (number == __NR_unlinkat && contains_mount(b, b->guest))
             return -EBUSY;
-        return raw_syscall(number, AT_FDCWD, (long)b->host, a[2], 0, 0, 0);
+        struct stat old;
+        bool known = number == __NR_unlinkat && owners_enabled() && !host_stat(b->host, false, &old);
+        ret = raw_syscall(number, AT_FDCWD, (long)b->host, a[2], 0, 0, 0);
+        if (!ret && number == __NR_mkdirat) owners_new_name(b);
+        if (!ret) owners_last_name(&old, known);
+        return ret;
     }
 
     bool hardlink = number == __NR_linkat;
@@ -1242,10 +1310,18 @@ static long mutate(Bridge *b, long number, long a[6])
         return -EBUSY;
     if (first_mount != second_mount)
         return -EXDEV;
+    /* A rename that replaces a name may take its object's last one. */
+    struct stat old, moved;
+    bool known = !hardlink && owners_enabled() && !(a[4] & 2 /* RENAME_EXCHANGE */) &&
+        !host_stat(b->host, false, &old) && !host_stat(b->first_host, false, &moved) &&
+        (old.st_dev != moved.st_dev || old.st_ino != moved.st_ino);
     ret = raw_syscall(number, AT_FDCWD, (long)b->first_host,
                       AT_FDCWD, (long)b->host, a[4], 0);
-    if (hardlink && g_payload_config.link_copy && (ret == -EPERM || ret == -EACCES))
+    if (hardlink && g_payload_config.link_copy && (ret == -EPERM || ret == -EACCES)) {
         ret = copy_link(b, ret);
+        if (!ret) owners_new_name(b);
+    }
+    if (!ret) owners_last_name(&old, known);
     return ret;
 }
 
@@ -1434,6 +1510,353 @@ static long socket_address(Bridge *b, long number, long a[6])
     return ret;
 }
 
+/* ---- R4: mount, umount2 and the /proc mount tables (docs/OCI.md) ----
+ * A mount changes the shared table every process of the container reads
+ * into its binding table; nothing is mounted in the kernel. */
+#define MS_RDONLY_ 1ul
+#define MS_NOSUID_ 2ul
+#define MS_NODEV_ 4ul
+#define MS_NOEXEC_ 8ul
+#define MS_REMOUNT_ 32ul
+#define MS_BIND_ 4096ul
+#define MS_MOVE_ 8192ul
+#define MS_REC_ 16384ul
+#define MS_PROPAGATION_ ((1ul << 17) | (1ul << 18) | (1ul << 19) | (1ul << 20))
+#define MS_MGC_MSK_ 0xffff0000ul
+#define MS_MGC_VAL_ 0xc0ed0000ul
+
+/* Filesystems shown from the host's own directory. */
+static const struct { const char *type, *host; } host_filesystems[] = {
+    {"proc", "/proc"}, {"sysfs", "/sys"}, {"devpts", "/dev/pts"}, {"devtmpfs", "/dev"},
+    {"mqueue", "/dev/mqueue"}, {"cgroup", "/sys/fs/cgroup"}, {"cgroup2", "/sys/fs/cgroup"},
+    {"securityfs", "/sys/kernel/security"}, {"debugfs", "/sys/kernel/debug"},
+    {"tracefs", "/sys/kernel/tracing"}, {"pstore", "/sys/fs/pstore"}, {"bpf", "/sys/fs/bpf"},
+    {"configfs", "/sys/kernel/config"}, {"fusectl", "/sys/fs/fuse/connections"},
+    {"hugetlbfs", "/dev/hugepages"},
+};
+
+static bool guest_string(const char *s, size_t max)
+{
+    return s && strnlen(s, max) < max;
+}
+
+/* The mount id of a resolved guest path, and its access in the guarded
+ * policy ('w' without one). */
+static uint32_t mount_access_of(Bridge *b, const char *guest)
+{
+#ifdef GUARDED
+    size_t id;
+    if (!g_payload_config.mount_access_observe[0] || g_payload_config.guard < GUARD_PATHS ||
+        binding_table_mount_id(&b->table, guest, &id) < 0)
+        return 'w';
+    if (id <= (size_t)g_payload_config.bind_count) {
+        char c = g_payload_config.mount_access_observe[id];
+        return c == 'r' || c == 'd' ? (uint32_t)c : 'w';
+    }
+    size_t slot = id - 1 - (size_t)g_payload_config.bind_count;
+    return slot < (size_t)b->mount_count && b->mounts[slot].access ? b->mounts[slot].access : 'd';
+#else
+    (void)b; (void)guest;
+    return 'w';
+#endif
+}
+
+static uint32_t cap_access(uint32_t access, unsigned long flags)
+{
+    return (flags & MS_RDONLY_) && access == 'w' ? 'r' : access;
+}
+
+/* A directory of its own under the mount scratch (never reused, so a
+ * remount cannot show an old tmpfs). */
+static long scratch_dir(Bridge *b, char *host, unsigned mode)
+{
+    const char *base = g_payload_config.mount_scratch;
+    if (!base[0])
+        return -EPERM;
+    static unsigned long serial;
+    long pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+    for (int attempt = 0; attempt < 64; attempt++) {
+        unsigned long n = __atomic_add_fetch(&serial, 1, __ATOMIC_RELAXED);
+        char name[48] = "/tmpfs-";
+        size_t at = strlen(name);
+        char digits[24];
+        int count = 0;
+        unsigned long v = (unsigned long)pid;
+        do { digits[count++] = '0' + v % 10; v /= 10; } while (v);
+        while (count) name[at++] = digits[--count];
+        name[at++] = '-';
+        v = n;
+        do { digits[count++] = '0' + v % 10; v /= 10; } while (v);
+        while (count) name[at++] = digits[--count];
+        name[at] = 0;
+        if (strlen(base) + at >= CONFIG_MAX_PATH)
+            return -ENAMETOOLONG;
+        strcpy(host, base);
+        strcat(host, name);
+        long rc = raw_syscall(__NR_mkdirat, AT_FDCWD, (long)host, 0700, 0, 0, 0);
+        if (rc == -EEXIST)
+            continue;
+        if (rc < 0)
+            return rc;
+        raw_syscall(__NR_fchmodat, AT_FDCWD, (long)host, (mode & 07777) | 0700, 0, 0, 0);
+        if (owners_enabled()) {
+            struct stat st;
+            if (!raw_syscall(__NR_newfstatat, AT_FDCWD, (long)host, (long)&st, 0, 0, 0))
+                owners_chmod_done(&st, mode, (mode & 07777) | 0700);
+        }
+        (void)b;
+        return 0;
+    }
+    return -EEXIST;
+}
+
+/* "mode=1777,uid=0,size=64m": the options a tmpfs keeps. */
+static void tmpfs_options(const char *data, unsigned *mode, long *uid, long *gid)
+{
+    for (const char *p = data; p && *p;) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        long value = 0;
+        int base = !strncmp(p, "mode=", 5) ? 8 : 10;
+        const char *v = !strncmp(p, "mode=", 5) ? p + 5 : !strncmp(p, "uid=", 4) ? p + 4 :
+            !strncmp(p, "gid=", 4) ? p + 4 : NULL;
+        if (v) {
+            for (; v < p + len && *v >= '0' && *v <= (base == 8 ? '7' : '9'); v++)
+                value = value * base + (*v - '0');
+            if (p[0] == 'm') *mode = (unsigned)value & 07777;
+            else if (p[0] == 'u') *uid = value;
+            else *gid = value;
+        }
+        p = end ? end + 1 : NULL;
+    }
+}
+
+static long mount_call(Bridge *b, long a[6])
+{
+    const char *source = (const char *)a[0], *target = (const char *)a[1];
+    const char *type = (const char *)a[2], *data = (const char *)a[4];
+    unsigned long flags = (unsigned long)a[3];
+    if ((flags & MS_MGC_MSK_) == MS_MGC_VAL_)
+        flags &= ~MS_MGC_MSK_;
+    if (!guest_string(target, PATH_MAX) || (type && !guest_string(type, 64)) ||
+        (source && !guest_string(source, PATH_MAX)) || (data && !guest_string(data, 4096)))
+        return -EFAULT;
+    b->optimistic_allowed = false;
+    long ret = resolve(b, AT_FDCWD, target, true);
+    if (ret < 0)
+        return ret;
+    struct stat target_st;
+    ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&target_st, 0, 0, 0);
+    if (ret < 0)
+        return ret;
+    char *guest = b->first_guest;
+    strcpy(guest, b->guest);
+    if (strlen(guest) >= CONFIG_MAX_PATH)
+        return -ENAMETOOLONG;
+    struct mount_entry *e = (struct mount_entry *)b->proc_data;
+    _Static_assert(sizeof(struct mount_entry) <= sizeof(((Bridge *)0)->proc_data), "scratch");
+    memset(e, 0, sizeof(*e));
+    unsigned long per_mount = flags & (MS_RDONLY_ | MS_NOSUID_ | MS_NODEV_ | MS_NOEXEC_);
+
+    if (flags & MS_REMOUNT_) {
+        int slot = mounts_find(b->mounts, b->mount_count, guest);
+        if (slot < 0) {
+            /* The root and the configured binds cannot change. */
+            size_t id;
+            if (binding_table_mount_id(&b->table, guest, &id) < 0) return -EINVAL;
+            const char *at = id ? b->table.entries[id - 1].guest : "/";
+            return strcmp(at, guest) ? -EINVAL : -EPERM;
+        }
+        uint32_t access = b->mounts[slot].access;
+        /* Read-only can always be added; taking it away needs the source's
+         * own access again (for a bind, the mount it came from). */
+        if (per_mount & MS_RDONLY_) access = cap_access(access, MS_RDONLY_);
+        else if (access == 'r' && !(b->mounts[slot].flags & MS_RDONLY_)) access = 'r';
+        else if (access == 'r') access = b->mounts[slot].kind == MOUNT_BIND ? access : 'w';
+        return mounts_set_flags(guest, (uint32_t)per_mount, access);
+    }
+    if (flags & MS_MOVE_) {
+        if (!source) return -EFAULT;
+        ret = resolve(b, AT_FDCWD, source, true);
+        if (ret < 0) return ret;
+        if (!strcmp(guest, "/") || !strcmp(b->guest, "/")) return -EINVAL;
+        if (mounts_find(b->mounts, b->mount_count, b->guest) < 0) return -EINVAL;
+        if (!strcmp(b->guest, guest)) return 0;
+        Comparison c = compare_paths(b->guest, guest);
+        if (c == PATH1_IS_PREFIX) return -ELOOP;
+        return mounts_move(b->guest, guest);
+    }
+    if (flags & MS_BIND_) {
+        if (!source) return -EFAULT;
+        if (!strcmp(guest, "/")) return -EINVAL; /* the root stays the root */
+        ret = resolve(b, AT_FDCWD, source, true);
+        if (ret < 0) return ret;
+        struct stat st;
+        ret = raw_syscall(__NR_newfstatat, AT_FDCWD, (long)b->host, (long)&st, 0, 0, 0);
+        if (ret < 0) return ret;
+        memset(e, 0, sizeof(*e)); /* resolution may use the same scratch */
+        if (((st.st_mode & S_IFMT) == S_IFDIR) != ((target_st.st_mode & S_IFMT) == S_IFDIR))
+            return -ENOTDIR;
+        if (strlen(b->host) >= CONFIG_MAX_PATH) return -ENAMETOOLONG;
+        strcpy(e->host, b->host);
+        strcpy(e->guest, guest);
+        e->kind = MOUNT_BIND;
+        e->flags = (uint32_t)per_mount;
+        e->access = cap_access(mount_access_of(b, b->guest), flags);
+        /* Shown as the source's filesystem, like the kernel does. */
+        int from = -1;
+        size_t id;
+        if (binding_table_mount_id(&b->table, b->guest, &id) >= 0 && id > (size_t)g_payload_config.bind_count)
+            from = (int)(id - 1 - (size_t)g_payload_config.bind_count);
+        if (from >= 0 && from < b->mount_count) {
+            memcpy(e->source, b->mounts[from].source, sizeof(e->source));
+            memcpy(e->fstype, b->mounts[from].fstype, sizeof(e->fstype));
+        } else {
+            const char *name = mounts_fs_name(b->host);
+            strncpy(e->fstype, name, sizeof(e->fstype) - 1);
+            strncpy(e->source, strcmp(name, "proc") && strcmp(name, "sysfs") && strcmp(name, "devpts") &&
+                    strcmp(name, "tmpfs") ? "/dev/root" : name, sizeof(e->source) - 1);
+        }
+        char *source_guest = b->first_host; /* the source, canonical */
+        strcpy(source_guest, b->guest);
+        ret = mounts_add(e);
+        if (ret < 0 || !(flags & MS_REC_))
+            return ret;
+        /* --rbind: the mounts below the source appear below the target. */
+        size_t slen = strlen(source_guest), glen = strlen(guest);
+        for (size_t i = 0; i < b->table.count; i++) {
+            const PathBinding *p = &b->table.entries[i];
+            if (p->guest == UNMOUNTED || compare_paths(source_guest, p->guest) != PATH1_IS_PREFIX)
+                continue;
+            const char *rest = p->guest + (slen == 1 ? 0 : slen);
+            if (glen + strlen(rest) >= CONFIG_MAX_PATH || strlen(p->host) >= CONFIG_MAX_PATH)
+                return -ENAMETOOLONG;
+            struct mount_entry *sub = e;
+            strcpy(sub->guest, guest);
+            strcat(sub->guest, rest);
+            strcpy(sub->host, p->host);
+            sub->access = cap_access(mount_access_of(b, p->guest), flags);
+            if (i >= (size_t)g_payload_config.bind_count) {
+                const struct mount_entry *m = &b->mounts[i - (size_t)g_payload_config.bind_count];
+                memcpy(sub->source, m->source, sizeof(sub->source));
+                memcpy(sub->fstype, m->fstype, sizeof(sub->fstype));
+                sub->flags = m->flags | (uint32_t)per_mount;
+            } else {
+                const char *name = mounts_fs_name(p->host);
+                memset(sub->fstype, 0, sizeof(sub->fstype));
+                memset(sub->source, 0, sizeof(sub->source));
+                strncpy(sub->fstype, name, sizeof(sub->fstype) - 1);
+                strncpy(sub->source, name, sizeof(sub->source) - 1);
+            }
+            ret = mounts_add(sub);
+            if (ret < 0) return ret;
+        }
+        return 0;
+    }
+    if (flags & MS_PROPAGATION_)
+        return 0; /* --make-private and the like: nothing propagates anyway */
+    if (!type) return -EFAULT;
+    if (!strcmp(guest, "/")) return -EBUSY;
+    if ((target_st.st_mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
+    const char *host = NULL;
+    for (size_t i = 0; i < sizeof(host_filesystems) / sizeof(host_filesystems[0]); i++)
+        if (!strcmp(type, host_filesystems[i].type))
+            host = host_filesystems[i].host;
+    bool tmpfs = !strcmp(type, "tmpfs") || !strcmp(type, "ramfs");
+    if (!host && !tmpfs)
+        return -ENODEV; /* overlay, block devices, network filesystems, FUSE */
+    struct stat st;
+    if (host && (raw_syscall(__NR_newfstatat, AT_FDCWD, (long)host, (long)&st, 0, 0, 0) < 0 ||
+                 (st.st_mode & S_IFMT) != S_IFDIR))
+        host = NULL, tmpfs = true; /* missing on this host: an empty directory */
+    e->kind = host ? MOUNT_HOST : MOUNT_TMPFS;
+    if (host) {
+        strcpy(e->host, host);
+    } else {
+        unsigned mode = 01777;
+        long uid = -1, gid = -1;
+        tmpfs_options(data, &mode, &uid, &gid);
+        ret = scratch_dir(b, e->host, mode);
+        if (ret < 0) return ret;
+        if (owners_enabled() && (uid > 0 || gid > 0) &&
+            !raw_syscall(__NR_newfstatat, AT_FDCWD, (long)e->host, (long)&st, 0, 0, 0))
+            owners_chown(&st, uid, gid);
+    }
+    strcpy(e->guest, guest);
+    strncpy(e->fstype, type, sizeof(e->fstype) - 1);
+    strncpy(e->source, source && *source ? source : type, sizeof(e->source) - 1);
+    e->flags = (uint32_t)per_mount;
+    e->access = cap_access(mount_access_of(b, guest) == 'd' ? 'd' : host ? mount_access_of(b, guest) : 'w',
+                           flags);
+    return mounts_add(e);
+}
+
+static long umount_call(Bridge *b, long a[6])
+{
+    const char *target = (const char *)a[0];
+    long flags = (int)a[1];
+    if (flags & ~(1 | 2 | 4 | 8)) /* MNT_FORCE, MNT_DETACH, MNT_EXPIRE, UMOUNT_NOFOLLOW */
+        return -EINVAL;
+    if (!guest_string(target, PATH_MAX))
+        return -EFAULT;
+    b->optimistic_allowed = false;
+    long ret = resolve(b, AT_FDCWD, target, !(flags & 8));
+    if (ret < 0)
+        return ret;
+    if (mounts_find(b->mounts, b->mount_count, b->guest) < 0) {
+        size_t id;
+        if (binding_table_mount_id(&b->table, b->guest, &id) < 0) return -EINVAL;
+        const char *at = id ? b->table.entries[id - 1].guest : "/";
+        return strcmp(at, b->guest) ? -EINVAL : -EBUSY;
+    }
+    return mounts_remove(b->guest, (flags & 2) != 0);
+}
+
+/* /proc/<pid>/mounts, mountinfo (and the task/<tid> ones) of a process of
+ * this view: generated from the table. -ENOENT: the kernel's file. */
+static long proc_mounts(Bridge *b, int flags)
+{
+    if (compare_paths("/proc", b->guest) != PATH1_IS_PREFIX)
+        return -ENOENT;
+    const char *cursor = b->guest + strlen("/proc/");
+    long pid = 0;
+    /* A file of its own on HongMeng, a link to self/mounts on Linux. */
+    if (!strcmp(cursor, "mounts")) {
+        pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+        cursor--;
+    } else if (!strncmp(cursor, "self/", 5) || !strncmp(cursor, "thread-self/", 12)) {
+        pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+        cursor = strchr(cursor, '/');
+    } else {
+        if (*cursor < '1' || *cursor > '9') return -ENOENT;
+        while (*cursor >= '0' && *cursor <= '9') pid = pid * 10 + (*cursor++ - '0');
+    }
+    if (!strncmp(cursor, "/task/", 6)) {
+        cursor += 6;
+        if (*cursor < '1' || *cursor > '9') return -ENOENT;
+        while (*cursor >= '0' && *cursor <= '9') cursor++;
+    }
+    int info;
+    if (!strcmp(cursor, "/mounts")) info = 0;
+    else if (!strcmp(cursor, "/mountinfo")) info = 1;
+    else return -ENOENT;
+    if (pid != raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0)) {
+        size_t start;
+        const char *exe;
+        if (!loader_argv(b, pid, &start, &exe)) return -ENOENT;
+    }
+    long fd = raw_syscall(__NR_memfd_create, (long)(info ? "mountinfo" : "mounts"),
+                          (flags & O_CLOEXEC) ? 1 /* MFD_CLOEXEC */ : 0, 0, 0, 0, 0);
+    if (fd < 0) return fd;
+    long rc = mounts_render((int)fd, info);
+    if (rc >= 0) rc = raw_syscall(__NR_lseek, fd, 0, 0, 0, 0, 0);
+    if (rc < 0) {
+        raw_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+        return rc;
+    }
+    return fd;
+}
+
 static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin *origin)
 {
     if(number==__NR_faccessat || number==__NR_faccessat2) {
@@ -1453,6 +1876,10 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     b->creates = number == __NR_mkdirat || number == __NR_mknodat || number == __NR_symlinkat ||
         number == __NR_bind;
     b->traverse = path_traversal(number, a);
+    if (number == __NR_mount)
+        return mount_call(b, a);
+    if (number == __NR_umount2)
+        return umount_call(b, a);
     if (number == __NR_bind || number == __NR_connect ||
         number == __NR_sendto || number == __NR_sendmsg)
         return socket_address(b, number, a);
@@ -1489,6 +1916,13 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
         return raw_syscall(number, a[0], (long)b->host, a[2], 0, 0, 0);
     }
     /* Descriptor operations retain kernel identity; FD policy is a later layer. */
+    if ((number == __NR_fchown || number == __NR_fchmod) && owners_enabled()) {
+        struct stat st;
+        ret = raw_syscall(__NR_fstat, a[0], (long)&st, 0, 0, 0, 0);
+        if (ret < 0) return ret;
+        return number == __NR_fchown ? owners_chown(&st, (int)a[1], (int)a[2]) :
+            owners_apply_mode(a[0], NULL, &st, (unsigned)a[1]);
+    }
     if (number == __NR_fchown)
         return fake_chown(raw_syscall(number, a[0], a[1], a[2], 0, 0, 0));
     if (number == __NR_fchmod || number == __NR_fstatfs || number == __NR_ftruncate)
@@ -1509,6 +1943,18 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
             return raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
         if (!a[1]) return -EFAULT;
         const char *path = (const char *)a[1];
+        if (number == __NR_fchownat && owners_enabled()) {
+            struct stat st;
+            if (!*path && (flags & AT_EMPTY_PATH)) {
+                ret = a[0] == AT_FDCWD ? host_stat(".", true, &st) :
+                    raw_syscall(__NR_fstat, a[0], (long)&st, 0, 0, 0, 0);
+            } else {
+                ret = resolve(b, (int)a[0], path, !(flags & AT_SYMLINK_NOFOLLOW));
+                if (ret < 0) return ret;
+                ret = host_stat(b->host, !(flags & AT_SYMLINK_NOFOLLOW), &st);
+            }
+            return ret < 0 ? ret : owners_chown(&st, (int)a[2], (int)a[3]);
+        }
         if (!*path && number == __NR_fchownat && (flags & AT_EMPTY_PATH))
             ret = raw_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
         else {
@@ -1521,6 +1967,14 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
     if (number == __NR_mkdirat || number == __NR_unlinkat || number == __NR_symlinkat ||
         number == __NR_linkat || number == __NR_renameat || number == __NR_renameat2)
         return mutate(b, number, a);
+    if (number == __NR_fchmodat && owners_enabled()) {
+        if (!a[1]) return -EFAULT;
+        ret = resolve(b, (int)a[0], (const char *)a[1], true);
+        if (ret < 0) return ret;
+        struct stat st;
+        ret = host_stat(b->host, true, &st);
+        return ret < 0 ? ret : owners_apply_mode(-1, b->host, &st, (unsigned)a[2]);
+    }
     if (number == __NR_getcwd) {
         ret = guest_cwd(b);
         if (ret < 0)
@@ -1638,9 +2092,17 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
                         AT_SYMLINK_NOFOLLOW, 0, 0) == -ENOENT)
             strcpy(b->host, b->table.root);
     }
-    if (number == __NR_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT)))
+    /* R5: an O_CREAT open that makes the file records its owner. */
+    bool fresh = false;
+    if (number == __NR_openat && owners_enabled() && ((a[2] & O_CREAT) || (a[2] & O_TMPFILE) == O_TMPFILE)) {
+        struct stat probe;
+        fresh = (a[2] & O_EXCL) || (a[2] & O_TMPFILE) == O_TMPFILE || host_stat(b->host, true, &probe) == -ENOENT;
+    }
+    if (number == __NR_openat && !(a[2] & (O_ACCMODE | O_PATH | O_CREAT))) {
         ret = proc_cmdline(b, (int)a[2]);
-    else ret = -ENOENT;
+        if (ret == -ENOENT && mounts_enabled())
+            ret = proc_mounts(b, (int)a[2]);
+    } else ret = -ENOENT;
     if (ret == -ENOENT && number == __NR_newfstatat && follow && b->final_match) {
         /* Copied by the kernel so a bad buffer is still EFAULT. */
         struct { const void *base; size_t length; } local = {&b->final_stat, sizeof(b->final_stat)},
@@ -1667,6 +2129,13 @@ static long dispatch(Bridge *b, long number, long a[6], struct proot_open_origin
  opened:
     if (ret >= 0 && observed_open)
         *origin = (struct proot_open_origin){mount_id, true};
+    if (ret >= 0 && fresh) {
+        struct stat st;
+        if (!raw_syscall(__NR_fstat, ret, (long)&st, 0, 0, 0, 0))
+            owners_created(&st);
+    }
+    if (!ret && number == __NR_mknodat)
+        owners_new_name(b);
     return ret;
 }
 
@@ -1740,10 +2209,17 @@ static long bridge_create(Bridge **out)
     b->hints = NULL;
     b->anchor_fd = AT_FDCWD;
     b->anchor = (struct proot_open_origin){0, false};
-    b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings,
-                             (size_t)cfg->bind_count};
+    size_t count = (size_t)cfg->bind_count;
+    b->mount_count = mounts_enabled() ? mounts_snapshot(b->mounts, CONFIG_MAX_MOUNTS) : 0;
     for (int i = 0; i < cfg->bind_count; i++)
-        b->bindings[i] = (PathBinding){cfg->binds[i].src, cfg->binds[i].dst};
+        b->bindings[i] = b->mount_count && mounts_bind_hidden(b->mounts, b->mount_count, cfg->binds[i].src) ?
+            (PathBinding){UNMOUNTED, UNMOUNTED} : (PathBinding){cfg->binds[i].src, cfg->binds[i].dst};
+    /* R4: slot i is mount id bind_count + 1 + i; a free or hidden slot
+     * keeps its id but matches nothing. */
+    for (int i = 0; i < b->mount_count; i++)
+        b->bindings[count++] = mounts_hidden(b->mounts, b->mount_count, i) ?
+            (PathBinding){UNMOUNTED, UNMOUNTED} : (PathBinding){b->mounts[i].guest, b->mounts[i].host};
+    b->table = (BindingTable){cfg->root[0] ? cfg->root : "/", b->bindings, count};
     long ret = binding_table_validate(&b->table);
 #ifdef GUARDED
     b->reads = false;
@@ -1756,7 +2232,7 @@ static long bridge_create(Bridge **out)
             size_t id;
             ret = binding_table_mount_id(&b->table, b->bindings[i].guest, &id);
             /* Shadowed duplicate destinations expose nothing. */
-            if (ret >= 0 && id == i + 1 && b->access[id] != FS_DENY)
+            if (ret >= 0 && id == i + 1 && b->access[id] != FS_DENY && b->bindings[i].guest != UNMOUNTED)
                 b->exposed[b->exposed_count++] = b->bindings[i].guest;
         }
         b->reads = ret >= 0;

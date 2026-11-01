@@ -10,7 +10,9 @@
 /* Partial path mutation guard only; disabled in observation/legacy mode. */
 int fd_runtime_check_path_mutation(size_t mount, bool known);
 /* Validated root+bind access vector; ENODATA without a configured policy. */
-int fd_runtime_mount_access(enum fs_access access[CONFIG_MAX_BINDS + 1], size_t *count);
+/* Root, binds, then the emulated mount slots (R4: a slot's access was
+ * fixed when it was mounted; a free slot is denied). */
+int fd_runtime_mount_access(enum fs_access access[CONFIG_MOUNT_IDS], size_t *count);
 long fd_runtime_scratch_alloc(size_t);
 /* False in the vfork child, which must keep its reserved scratch. */
 bool fd_runtime_shared_scratch(void);

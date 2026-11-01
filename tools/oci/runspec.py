@@ -192,6 +192,11 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
         for device in host.get('IsolateDevices') or []:
             argv += ['--isolate-device', device]
     argv += ['--mode', 'container', '--root', str(rootfs), '--link-copy']
+    # Mounts the container makes (R4): a table every process of it shares
+    # (docker exec joins it through the file), tmpfs directories below.
+    argv += ['--mount-table', str(cdir / 'mounts.table'), '--mount-scratch', str(cdir / 'mounts')]
+    if host.get('Owners'):
+        argv += ['--owner-db', str(cdir / 'owners.db')]
     vector = 'r' if ro_root else 'w'
     for src, dst, mode in all_binds:
         if ':' in src or ':' in dst:
@@ -203,6 +208,8 @@ def build(record, rootfs, cdir, isolate=False, extra_env=(), workdir=None, user=
     argv += ['--cwd', cwd, '--user', f'{uid}:{gid}', '--hostname', cfg['Hostname'][:64]]
     for key, value in env.items():
         argv += ['-e', f'{key}={value}']
+    if len(str(cdir / 'mounts').encode()) >= MAX_PATH - 48:
+        raise SpecError(f'the container directory path is too long for the loader: {cdir}')
     for value in [str(rootfs), cwd, *(p for b in all_binds for p in b[:2])]:
         if len(value.encode()) >= MAX_PATH:
             raise SpecError(f'path exceeds the loader limit of {MAX_PATH - 1} bytes: {value[:80]}...')

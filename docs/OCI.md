@@ -1,7 +1,7 @@
 # Docker/OCI 镜像支持
 
-**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建已实现（`tools/oci/docker`），在 HarmonyOS 真机上通过验收
-（见文末“R1–R3 实现记录”）；R4–R7 仍是设计。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
+**状态（2026-11-01）**：R1 运行、R2 管理、R3 构建、R4 容器内 mount、R5 属主已实现（`tools/oci/docker`），在
+HarmonyOS 真机上通过验收（见文末“R1–R3 实现记录”“R4–R5 实现记录”）；R6、R7 仍是设计。下文各节保留设计原文，实现与设计不同之处集中写在“实现与设计的差异”。
 
 ## 目标
 
@@ -137,7 +137,7 @@ build-cache/                       R3：构建缓存索引
 - **信号**：stop/kill 与前台的信号转发只发给容器主进程（与 Docker 相同）；主进程退出后，同一进程组里剩下的进程被
   SIGKILL（相当于 PID 命名空间的 init 退出）。主进程放在自己的进程组，`-it` 时设为终端前台进程组。
 - **`--init`、`-p` 映射不同端口、`-P`、`--network` 非 host、cgroup 类参数**：报错退出 125（见 docker 的 UNSUPPORTED 表）。
-- **R2 的运行中追加卷**：未实现，它依赖 R4 的共享翻译表。
+- **R2 的运行中追加卷**：未实现。R4 的共享翻译表已有，但追加只能由容器外发起（见“外部 → 容器”），还没有入口。
 - **build**：输出为传统构建器格式（`Step n/m`、`Using cache`）；完全命中缓存时镜像 id 不变（config 的时间取自缓存的层）；
   `COPY --chown` 被忽略（R5 之前文件都属于 root），`COPY --parents`、`--mount=type=ssh`、远程上下文与 git 源报错；
   `RUN --mount=type=bind` 绑的是源的副本，写入被丢弃（与 BuildKit 默认只读的效果一致）；`--output` 支持 local/tar/docker。
@@ -383,7 +383,8 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 
 ## 已知限制（所有版本）
 
-- **属主**：R5 之前所有文件在 guest 中显示为 root（fake_id0），postgres、sshd StrictModes 等会失败或要配置。
+- **属主**：不加 `--owners` 时所有文件在 guest 中显示为 root（fake_id0），postgres、sshd StrictModes 等会失败或要配置；
+  加 `--owners` 见 R5。
 - **特权操作**：iptables、sysctl、modprobe、创建设备节点、真实挂载不能用；需要 `--privileged` 的镜像不行。
 - **进程模型**：没有 pid 命名空间，入口程序不是 pid 1；镜像自带的 tini/dumb-init 能 wait 自己的子进程，但收养不了孙进程。
   `exec` 进入的进程看得到宿主的其他进程。
@@ -393,7 +394,7 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 
 ## 待定问题
 
-1. R5 的属主数据库在不加 `--isolate` 时是否值得做（进程内可被篡改，但对兼容性仍有用）。
+1. ~~R5 的属主数据库在不加 `--isolate` 时是否值得做~~：做了，两种模式都在共享内存里，不作安全边界（见“R4–R5 实现记录”）。
 2. ~~守护进程何时引入~~：R1–R3 都不需要（每容器监视进程）；R7 的 Engine API 需要时再定。
 3. `docker` 命令名与真正的 Docker 冲突时的安装方式。
 4. R6 选 erofs 还是 squashfs：erofs 随机读更快、格式更简单，squashfs 工具更普及；需要各写一个读取器原型比较。
@@ -431,3 +432,57 @@ debian `apt-get install tree`、python venv + `pip install requests`、node `npm
 guest 执行时间相同；docker 自身的固定开销约 0.8 s（Python 启动与容器记录）加上复制 rootfs（python 镜像 144 MB 约 1.2 s），
 这正是 R6 写时复制要去掉的部分。交互 `-it` 已在 ssh 伪终端中验证（提示符、`tty` 显示 `/dev/pts/N`：宿主不允许列出
 /dev/pts，runspec 单独绑定继承的终端设备）。
+
+## R4–R5 实现记录（2026-11-01，HarmonyOS 真机）
+
+验收：`test/proot/test_mounts.py`、`test/proot/test_owners.py`（`make check`，两种构建 × 常规与 `--isolate`）；
+`make check-oci` 87 项（新增容器内 tmpfs/bind/umount、`docker exec` 加入挂载、`--owners` 的镜像属主与模式、
+chown/chmod/用户新文件/EPERM、diff、commit 与 build 的层 tar 头）全部通过。
+
+### R4 容器内 mount
+
+- **共享表**：`src/payload/include/container_state.h`。48 个槽，每槽 guest 挂载点、宿主路径、source、fstype、
+  MS_* 标志、创建序号、guarded 访问级别；写者持锁并把版本号置奇，读者复制后核对版本。loader 的 `--emulate-mounts`
+  新建一张（memfd），`--mount-table FILE` 打开或新建一个文件（docker 用 `containers/<id>/mounts.table`，`docker exec`
+  打开同一文件即加入容器的挂载；每次 start 删掉重建）。表以 FD 901 继承，子 loader 收 `--mount-table-fd`。
+  guest 不能关闭、dup 覆盖或 F_SETFD 这个 FD（与隔离模式的保留 FD 同一套守卫，现在不加 `--isolate` 也生效），
+  closefrom 循环和 /proc/self/fd 列表里看不到它。
+- **翻译**：每次路径调用把表追加在配置的 bind 之后：槽 i 的挂载编号固定为 bind 数 + 1 + i，空槽和被遮住的槽占位但
+  不匹配任何路径，所以 FD 与 cwd 记录的挂载编号在别的挂载变化后仍然有效。新挂载遮住它之下（含同一点）所有较早的挂载，
+  包括配置的 bind（内核挂载栈的语义），umount 后重新露出。
+- **支持**：`mount --bind`（含 `--rbind`：源之下的挂载复制到目标之下；`-o ro` 用 remount）、tmpfs/ramfs（挂载 scratch
+  下新建目录，`mode=`、`uid=`、`gid=` 生效，size 不生效）、proc、sysfs、devpts、mqueue、cgroup、cgroup2 等（宿主的
+  对应目录；宿主没有时给空目录）、MS_MOVE、MS_REMOUNT（只对容器内的挂载）、传播类型（接受，无事可做）、umount2
+  （有子挂载时 EBUSY，MNT_DETACH 一并卸下）。不支持的类型（ext4、overlay、nfs、fuse…）ENODEV；挂载点不存在
+  ENOENT；umount 非挂载点 EINVAL，root 与配置的 bind EBUSY。fsopen/fsmount/move_mount/open_tree/mount_setattr 等
+  新 API 返回 ENOSYS（util-linux 与 busybox 回退到 mount(2)）。
+- **/proc/<pid>/mounts、mountinfo**（含 /proc/mounts、self、thread-self、task/<tid>）：按 root、配置的 bind、
+  容器内挂载（创建顺序）生成到 memfd；mountinfo 的父编号取覆盖它的最近一条，设备号取宿主目录的 st_dev。
+  别的进程只有在它也是 loader 运行的进程时才伪造。
+- **只读**：guarded 构建里每个槽带访问级别（bind 取源所在挂载的级别，tmpfs 可写，宿主类取挂载点所在挂载的级别，
+  `ro` 降为只读），路径修改保护照此执行，`--read-only` 容器里的 tmpfs 仍可写；普通构建只显示 `ro` 不执行。
+- **隔离模式**：broker 不读这张表，挂载只能给 broker 已允许的树起别名；tmpfs 的 scratch 目录是 broker 的一棵可写树。
+  所以容器内 mount 不能扩权。普通构建加 `--isolate` 时 `-o ro` 不执行（broker 按自己的树判断）。
+- **差别**：loader 自己解析 PT_INTERP 与 `--cwd` 只看配置的 bind（挂在 /lib 上的 bind 不影响动态链接器的查找）；
+  `docker cp` 不经容器内的挂载；挂载传播不存在。
+
+### R5 属主
+
+- **数据库**：同一头文件，开放寻址散列，键为宿主文件的 (st_dev, st_ino)，记录 uid/gid（OWNER_IDS）与完整模式
+  （OWNER_MODE），删除留墓碑。`tools/oci/owners.py` 写同样的格式：`docker create --owners` 时按镜像 meta.json 的
+  属主与模式建 `containers/<id>/owners.db`（容量 2^16 起，负载不超过 7/8，满了 chown 返回 ENOSPC）。loader
+  `--owner-db FILE` 打开它并以 FD 902 继承（`--owner-db-fd`），同样受保留 FD 守卫。
+- **payload**：stat/fstat/newfstatat/statx 结果按记录改写 uid/gid 与权限位；没有记录时用户自己的文件报告为
+  root（不再是 fake 保存 uid，所以 `--user` 下镜像文件仍属 root）。chown/fchown/fchownat/lchown 只写记录，非特权的
+  fake 用户不能把文件给别人、只能把组改成自己的组（EPERM）；chmod 在宿主上保留属主 rw（目录 rwx），宿主拒绝的
+  setuid/sticky 去掉，guest 的模式与宿主不同才记录。新建的文件、目录、符号链接、设备节点、tmpfs 归当前 fake
+  fs uid/gid（root 时清掉旧记录，防止复用的 inode 带着旧属主）；unlink、rmdir 与替换目标的 rename 取走最后一个名字时
+  删除记录。setuid/setgid 程序按记录的属主与模式切换 fake 身份。
+- **build/commit/diff**：`build` 的 RUN 总是带数据库运行（按阶段的 meta 建立，结束后读回），`COPY --chown` 写进
+  meta（不带组时 GID = UID，名字从镜像的 /etc/passwd 解析）；只改了属主或模式的路径也算变化。层 tar 头的
+  uid/gid/mode 取 meta；`commit` 与 `diff` 读容器的数据库。缓存命中的层把自己的属主并回阶段 meta；展开时后面的层
+  覆盖前面层的记录。
+- **不是安全边界**：两张表都在 guest 可写的共享内存里，改写它们只改变 guest 看到的视图与报告的属主，碰不到
+  别的文件（隔离模式下 broker 只按自己的树判断）。待定问题 1 因此按“值得做”处理。
+- **差别**：宿主之外复制或解包产生的新 inode（例如 `docker cp` 进来的文件）没有记录，显示为 root；硬链接复制
+  （`--link-copy`）得到的新文件归创建者，不继承源的属主；chown 不清 setuid 位。

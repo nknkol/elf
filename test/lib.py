@@ -68,3 +68,21 @@ def guest(loader, command, root=ALPINE, volumes=(), options=(), mode='container'
     kwargs.setdefault('capture_output', True)
     kwargs.setdefault('text', True)
     return subprocess.run(argv, cwd=cwd or root, timeout=timeout, **kwargs)
+
+
+def mode_capable():
+    """A directory whose storage keeps the modes chmod sets (HarmonyOS
+    shared storage under /storage/Users forces its own)."""
+    import stat
+    import tempfile
+    for base in (BUILD, Path(tempfile.gettempdir()), Path('/data/storage/el2/base/cache')):
+        try:
+            with tempfile.TemporaryDirectory(prefix='mode-probe-', dir=base) as tmp:
+                probe = Path(tmp, 'd')
+                probe.mkdir()
+                os.chmod(probe, 0o750)
+                if stat.S_IMODE(probe.stat().st_mode) == 0o750:
+                    return base
+        except OSError:
+            continue
+    raise SystemExit('no backing directory keeps file modes')

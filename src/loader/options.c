@@ -141,6 +141,8 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 	cfg->fake_group_count = -1;
 	cfg->fd_state = -1;
 	cfg->loader_fd = -1;
+	cfg->mount_table_fd = -1;
+	cfg->owner_db_fd = -1;
 
 	for (int i = 1; i < argc; i++) {
 		const char *arg = argv[i];
@@ -232,6 +234,22 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			if (z_strlen(v) >= sizeof(cfg->hostname))
 				z_errx(1, "invalid value for %s", arg);
 			copy_cstr(cfg->hostname, sizeof(cfg->hostname), v);
+		} else if (is(arg, "--emulate-mounts")) {
+			opt->emulate_mounts = 1;
+		} else if (is(arg, "--mount-table")) {
+			opt->mount_table = value(argc, argv, &i);
+		} else if (is(arg, CONFIG_CHILD_MOUNT_SCRATCH)) {
+			const char *v = value(argc, argv, &i);
+			/* Room for the "/tmpfs-<pid>-<n>" names below it. */
+			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH - 48)
+				z_errx(1, "invalid value for %s", arg);
+			copy_cstr(cfg->mount_scratch, CONFIG_MAX_PATH, v);
+		} else if (is(arg, CONFIG_CHILD_MOUNT_TABLE_FD)) {
+			cfg->mount_table_fd = (int32_t)number(value(argc, argv, &i), 2147483647ul, "mount table fd");
+		} else if (is(arg, "--owner-db")) {
+			opt->owner_db = value(argc, argv, &i);
+		} else if (is(arg, CONFIG_CHILD_OWNER_DB_FD)) {
+			cfg->owner_db_fd = (int32_t)number(value(argc, argv, &i), 2147483647ul, "owner db fd");
 		} else if (is(arg, "--cwd")) {
 			const char *v = value(argc, argv, &i);
 			if (v[0] != '/' || z_strlen(v) >= CONFIG_MAX_PATH)
@@ -295,6 +313,11 @@ void options_parse(int argc, char **argv, payload_config_t *cfg, struct loader_o
 			z_errx(1, "unknown option %s", arg);
 		}
 	}
+	if (((opt->emulate_mounts || opt->mount_table) && cfg->mount_table_fd >= 0) ||
+	    (opt->emulate_mounts && opt->mount_table) || (opt->owner_db && cfg->owner_db_fd >= 0))
+		z_errx(1, "container state given twice");
+	if (cfg->mount_scratch[0] && !opt->emulate_mounts && !opt->mount_table && cfg->mount_table_fd < 0)
+		z_errx(1, "--mount-scratch requires --emulate-mounts");
 	if (cfg->device_mask && !opt->isolate && !cfg->isolate && !opt->filter_dump)
 		z_errx(1, "--isolate-device requires --isolate");
 #ifdef GUARDED

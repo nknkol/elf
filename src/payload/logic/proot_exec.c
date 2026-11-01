@@ -9,6 +9,7 @@
 #include <string.h>
 #include "config.h"
 #include "fake_ids.h"
+#include "container_state.h"
 #include "reentry_guard.h"
 #include "syscall_nums.h"
 #include "proot_bridge.h"
@@ -24,7 +25,7 @@
 /* Script levels the kernel follows (exec_binprm allows five rewrites
  * before ELOOP): the script plus four script interpreters. */
 #define SCRIPT_DEPTH 5
-#define CHAIN_EXTRA (64 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
+#define CHAIN_EXTRA (72 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2)
 #define CHAIN_ARGS (EXEC_ARGS + CHAIN_EXTRA)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
@@ -49,6 +50,7 @@ typedef struct {
     char interp_fd[16], loader_fd[16];
     char case_folds[CONFIG_MAX_BINDS * 11];
     char owners[CONFIG_OWNERS * 24];
+    char mount_table_fd[16], owner_db_fd[16];
 #ifdef GUARDED
     char fd_state[24];
 #endif
@@ -478,9 +480,16 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     struct stat program;
     if (!(target_fd >= 0 ? raw_syscall(__NR_fstat, target_fd, (long)&program, 0, 0, 0, 0) :
           raw_syscall(__NR_newfstatat, AT_FDCWD, (long)target, (long)&program, 0, 0, 0))) {
+        /* With an owner database: its owner and mode (the host may have
+         * refused the set-id bits). */
+        uint32_t owner_of[2] = {fake_ids_reported_owner(program.st_uid, 0),
+                                fake_ids_reported_owner(program.st_gid, 1)};
+        uint32_t mode = program.st_mode;
+        if (owners_enabled())
+            owners_lookup(&program, &owner_of[0], &owner_of[1], &mode);
         for (int group = 0; group < 2; group++) {
-            if (!(program.st_mode & (group ? 02000 : 04000))) continue;
-            uint32_t owner = fake_ids_reported_owner(group ? program.st_gid : program.st_uid, group);
+            if (!(mode & (group ? 02000 : 04000))) continue;
+            uint32_t owner = owner_of[group];
             ids[group * 4 + 1] = ids[group * 4 + 2] = ids[group * 4 + 3] = owner;
             changed |= owner != 0;
         }
@@ -542,6 +551,21 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     if (cfg->glue_dir[0]) {
         s->argv[pos++] = CONFIG_CHILD_GLUE_DIR;
         s->argv[pos++] = (char *)cfg->glue_dir;
+    }
+    /* The container's shared state: inherited FDs (container_state.h). */
+    if (cfg->mount_table_fd >= 0) {
+        fd_name(s->mount_table_fd, "", cfg->mount_table_fd);
+        s->argv[pos++] = CONFIG_CHILD_MOUNT_TABLE_FD;
+        s->argv[pos++] = s->mount_table_fd;
+        if (cfg->mount_scratch[0]) {
+            s->argv[pos++] = CONFIG_CHILD_MOUNT_SCRATCH;
+            s->argv[pos++] = cfg->mount_scratch;
+        }
+    }
+    if (cfg->owner_db_fd >= 0) {
+        fd_name(s->owner_db_fd, "", cfg->owner_db_fd);
+        s->argv[pos++] = CONFIG_CHILD_OWNER_DB_FD;
+        s->argv[pos++] = s->owner_db_fd;
     }
 #ifdef GUARDED
     if (dynamic && !cfg->isolate) {

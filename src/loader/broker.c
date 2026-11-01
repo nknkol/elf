@@ -12,7 +12,7 @@
 #include "loader.h"
 #include "broker_proto.h"
 
-#define TREES (CONFIG_MAX_BINDS + 4)
+#define TREES (CONFIG_MAX_BINDS + 5)
 #define PATH_BYTES 4096
 #define LINKS_MAX 40
 #define ENOENT_ 2
@@ -1186,6 +1186,8 @@ static void broker_run(int control, const payload_config_t *cfg)
 		add_tree(cfg->binds[i].dst, access[0] ? access[i + 1] : 'w');
 	add_tree(cfg->glue_dir, 'g');
 	add_tree(cfg->loader_path, 'r');
+	/* tmpfs mounts made inside the container (R4) live here. */
+	add_tree(cfg->mount_scratch, 'w');
 	/* Handlers are reaped by the kernel. */
 	signal_install(SIGCHLD, (signal_handler_t)1 /* SIG_IGN */, 0);
 	for (;;) {

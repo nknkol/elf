@@ -54,6 +54,9 @@ struct loader_options {
 	const char *case_folds;  /* isolation: bind fold marks, comma separated */
 	int filter_dump;         /* --guest-filter-dump: print the guest filter */
 	const char *cwd;         /* --cwd: guest working directory of the program */
+	int emulate_mounts;      /* --emulate-mounts: a new shared mount table */
+	const char *mount_table; /* --mount-table: a mount table file (shared by docker exec) */
+	const char *owner_db;    /* --owner-db: the owner database file */
 };
 
 /* devices.c: the isolation constant page (docs/ISOLATION.md, "GPU 设备"). */

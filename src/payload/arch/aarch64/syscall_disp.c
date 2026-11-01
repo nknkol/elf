@@ -6,6 +6,7 @@
 #include "integrity.h"
 #include "config.h"
 #include "proot_bridge.h"
+#include "container_state.h"
 #include "fake_ids.h"
 #include "host_syscall.h"
 #ifdef GUARDED
@@ -134,7 +135,10 @@ static long dispatch_here(long sys_no, pt_regs *regs)
         long again[6] = {a[0], a[1], a[2], a[3], a[4], a[5]};
         ret = DISPATCH(sys_no, again);
     }
-    if (!ret) fake_ids_stat_owner(sys_no, a);
+    if (!ret) {
+        fake_ids_stat_owner(sys_no, a);
+        owners_stat(sys_no, a); /* R5: recorded owners and modes */
+    }
     /* struct utsname: six 65-byte fields; sysname, nodename, release. */
     if (!ret && sys_no == __NR_uname && a[0]) {
         if (g_payload_config.kernel_sysname[0])

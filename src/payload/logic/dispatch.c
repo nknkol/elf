@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include "config.h"
+#include "container_state.h"
 #include "dispatch.h"
 #include "elf_abi.h"
 #include "fake_ids.h"
@@ -128,6 +129,11 @@ long dispatch_syscall(long number, long a[6])
     case __NR_rseq:
     case __NR_clone3:
         return -ENOSYS;
+    /* R4: util-linux tries the new mount API first and falls back to
+     * mount(2), which the bridge emulates, only on ENOSYS. */
+    case __NR_fsopen: case __NR_fsconfig: case __NR_fsmount: case __NR_fspick:
+    case __NR_open_tree: case __NR_move_mount: case __NR_mount_setattr:
+        return mounts_enabled() ? -ENOSYS : passthrough(number, a);
     /* The HarmonyOS sandbox kills these with SIGSYS: report them as not
      * implemented instead. Other kernels serve them natively. */
     case __NR_mount: case __NR_umount2: case __NR_pivot_root: case __NR_chroot:

@@ -235,6 +235,60 @@ static void rebuild_stack(unsigned long *sp, char **argv, int argc, int target,
 	*sp = (unsigned long)new_argc;
 }
 
+/* An FD at exactly the number every process of the view inherits. */
+static int fixed_fd(int fd, int number, const char *what)
+{
+	if (fd < 0)
+		z_errx(1, "cannot open the %s", what);
+	long high = z_syscall(__NR_fcntl, fd, 0 /* F_DUPFD */, number, 0, 0, 0);
+	z_close(fd);
+	if (high != number)
+		z_errx(1, "%s: FD %d is taken", what, number);
+	return number;
+}
+
+/* The container's shared state (docs/OCI.md R4, R5): a new mount table
+ * and the owner database, inherited by every guest process. */
+static void container_state_open(payload_config_t *cfg, const struct loader_options *opt)
+{
+	if (opt->emulate_mounts || opt->mount_table) {
+		/* A file joins the processes that use the same one (docker exec
+		 * into a running container); a new one is empty. */
+		long fd = opt->mount_table ?
+			z_syscall(__NR_openat, AT_FDCWD, (long)opt->mount_table, 02 /* O_RDWR */ | 0100 /* O_CREAT */,
+				  0600, 0, 0) :
+			z_syscall(__NR_memfd_create, (long)"elf-mounts", 0, 0, 0, 0, 0);
+		/* A file in use keeps its size; a new one (and the memfd, whose
+		 * fstat size HongMeng does not report as 0) gets the table's. */
+		struct stat st;
+		long size = -1;
+		if (fd >= 0 && opt->mount_table && z_syscall(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) == 0)
+			size = st.st_size;
+		int ready = size == CONFIG_MOUNT_TABLE_BYTES ||
+			((size == 0 || !opt->mount_table) &&
+			 z_syscall(__NR_ftruncate, fd, CONFIG_MOUNT_TABLE_BYTES, 0, 0, 0, 0) == 0);
+		if (fd >= 0 && !ready) {
+			z_close((int)fd);
+			fd = -1;
+		}
+		cfg->mount_table_fd = fixed_fd((int)fd, CONFIG_MOUNT_TABLE_FD, "mount table");
+		if (cfg->mount_scratch[0]) {
+			long rc = z_syscall(__NR_mkdirat, AT_FDCWD, (long)cfg->mount_scratch, 0700, 0, 0, 0);
+			if (rc < 0 && rc != -17 /* EEXIST */)
+				z_errx(1, "cannot create the mount scratch %s", cfg->mount_scratch);
+		}
+	}
+	if (opt->owner_db) {
+		int fd = z_openat(AT_FDCWD, opt->owner_db, O_RDWR);
+		char magic[8];
+		if (fd >= 0 && (z_read(fd, magic, 8) != 8 || z_strncmp(magic, "ELFOWN1", 8))) {
+			z_close(fd);
+			z_errx(1, "not an owner database: %s", opt->owner_db);
+		}
+		cfg->owner_db_fd = fixed_fd(fd, CONFIG_OWNER_DB_FD, "owner database");
+	}
+}
+
 void z_entry(unsigned long *sp, void (*fini)(void))
 {
 	static payload_config_t cfg;
@@ -290,6 +344,8 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 		z_errx(1, "target is not ELF: %s", file);
 	}
 	choose_exec_exe(&cfg, &opt, file);
+	if (!opt.child)
+		container_state_open(&cfg, &opt);
 	/* The broker starts before anything of the guest is loaded. */
 	if (opt.isolate && !cfg.isolate) {
 		/* Devices the guest opens itself: checked, and their paths and the

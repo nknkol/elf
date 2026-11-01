@@ -57,6 +57,21 @@
 #define CONFIG_ISOLATE_DEVICES 4
 /* Isolation mode: the loader FD every guest exec runs (the filter knows it). */
 #define CONFIG_ISOLATE_LOADER_FD 898
+/* Container mounts (docs/OCI.md, R4): the shared mount table every process
+ * of the view maps (inherited at this number), and where tmpfs mounts get
+ * their directories. The initial loader takes --emulate-mounts and
+ * --mount-scratch; child loaders get the FD. */
+#define CONFIG_MOUNT_TABLE_FD 901
+#define CONFIG_MAX_MOUNTS 48
+#define CONFIG_MOUNT_TABLE_BYTES 32768 /* container_state.h checks it */
+/* Mount ids of one view: 0 the root, 1.. the binds, then the table slots. */
+#define CONFIG_MOUNT_IDS (CONFIG_MAX_BINDS + 1 + CONFIG_MAX_MOUNTS)
+#define CONFIG_CHILD_MOUNT_TABLE_FD "--mount-table-fd"
+#define CONFIG_CHILD_MOUNT_SCRATCH "--mount-scratch"
+/* Owner metadata (docs/OCI.md, R5): the owner database file, opened by the
+ * initial loader (--owner-db PATH) and inherited at this number. */
+#define CONFIG_OWNER_DB_FD 902
+#define CONFIG_CHILD_OWNER_DB_FD "--owner-db-fd"
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -131,6 +146,12 @@ typedef struct payload_config {
     int32_t guard; /* enum guard_level; meaningful with mount_access_observe. */
     int32_t allow_stream_input; /* Inherited pipe/socket/verified TTY reads in read guard mode. */
     int32_t allow_local_output; /* Writes to locally created sockets/eventfd/memfd. */
+    /* R4: shared mount table FD (-1: mount calls are not emulated) and the
+     * host directory for tmpfs mounts (empty: tmpfs is refused). */
+    int32_t mount_table_fd;
+    char mount_scratch[CONFIG_MAX_PATH];
+    /* R5: owner database FD (-1: owners as fake_id0 reports them). */
+    int32_t owner_db_fd;
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
 } payload_config_t;

@@ -237,8 +237,12 @@ class Extractor:
                 os.close(fd)
             return
         touched.add(key)
+        # A later layer's entry replaces what an earlier one recorded.
         if m.uid or m.gid:
             self.meta['owners'][key] = [m.uid, m.gid]
+        else:
+            self.meta['owners'].pop(key, None)
+        self.meta['modes'].pop(key, None)
         if m.ischr() or m.isblk() or m.isfifo():
             self.meta['skipped'][key] = 'device' if not m.isfifo() else 'fifo'
             return
