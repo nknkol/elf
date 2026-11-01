@@ -300,3 +300,8 @@ guest 视图里的设备路径必须翻译成同一宿主路径：compat 模式�
 - 加 `--isolate-device` 时：所选设备驱动的 ioctl 面（内核驱动漏洞），由用户显式接受；
 - 宿主上已有的跨区硬链接（同一 inode 在只读与可写区都可见）；
 - 从宿主继承来的数据报 UNIX 套接字（可向任意路径名发送）。
+- 继承来的 FD：直接用 loader 时，调用者留给它的每个 FD 都是显式交给 guest 的能力，过滤器放行 FD 上的数据操作，
+  broker 不检查它们；调用者要么关掉，要么就是有意给出。agent 启动器默认把 stdio 以外的继承 FD 设为 close-on-exec，
+  只保留 `--pass-fd N` 列出的（`test/fs_policy/agent_launch.py` 验收）。
+- broker 代为展开层镜像缓存（`BROKER_LAZY_MOUNT` 与下层缓存）时，缓存里只要有别的访问（`r`、`d`、glue、loader 文件）
+  的树就拒绝：可写的缓存根不代表所有后代可写（`test/isolation/lazy_nested.py` 验收）。

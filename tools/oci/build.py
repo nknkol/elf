@@ -357,10 +357,28 @@ class Builder:
         self.labels = labels or {}
         self.work = st.tmpdir('build')
         self.ignore = None
+        if self.context:
+            self.context = self.stage_context(self.context)
         if self.context and (self.context / '.dockerignore').exists():
             self.ignore = Ignore((self.context / '.dockerignore').read_text())
         self.stages = []
         self.step = 0
+
+    def stage_context(self, context):
+        """The build reads its context from a private copy made here, as
+        Docker reads the tar it was sent: read through FDs opened from the
+        context's root without following links (guestfs), links kept as
+        links, modes and times exact. Whatever the context's links or a
+        later change of it, nothing outside it is read."""
+        import guestfs
+        staged = self.work / 'context'
+        staged.mkdir()
+        fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            guestfs.copy(guestfs.View(context, []).walk([], []), guestfs.DirSink(fd, exact=True))
+        except store_mod.StoreError as e:
+            raise BuildError(f'cannot read the build context: {e}') from None
+        return staged
 
     def say(self, text):
         if not self.quiet:
@@ -789,7 +807,8 @@ class Builder:
             return {'key': f'tmpfs:{target}', 'bind': bind}
         if kind == 'bind':
             src_root, ignore = self.source_root(fields.get('from'), ins)
-            src = self.source_path(src_root, fields.get('source') or fields.get('src') or '.', ins)
+            # A bind mounts what a final link names (resolved inside too).
+            src = self.source_path(src_root, fields.get('source') or fields.get('src') or '.', ins, follow=True)
             content = hash_tree(src, ignore if src_root == self.context else None)
 
             def bind(cdir, src=src, ignore=ignore):
@@ -814,12 +833,15 @@ class Builder:
         image_id = docker.ensure_image(self.st, ref, self.pull, quiet=self.quiet)
         return layer_images.rootfs(self.st, image_id), None
 
-    def source_path(self, root, path, ins):
+    def source_path(self, root, path, ins, follow=False):
         if root == self.context:
             rel = os.path.normpath(path).lstrip('/')
             if rel.startswith('..'):
                 raise BuildError(f'line {ins.line}: {path} is outside the build context')
-            p = root / rel
+            # Links on the way resolve inside the context (absolute targets
+            # restart at its root), as in the container view; a final link
+            # is copied as a link.
+            p = root.joinpath(*runspec.guest_parts(root, [], rel, follow=follow))
             if not p.exists() and not p.is_symlink():
                 raise BuildError(f'line {ins.line}: "{path}" not found in the build context')
             return p
@@ -1221,7 +1243,22 @@ def cmd_commit(st, args):
     p.add_argument('container')
     p.add_argument('repository', nargs='?')
     a = p.parse_args(args)
+    if str(a.pause).lower() not in ('true', '1', 'false', '0'):
+        raise docker.Fail(f'invalid --pause value {a.pause!r}')
     record = runtime.refresh(st, st.resolve_container(a.container))
+    # The container's processes stop while its files are read (the diff,
+    # the layer, the image rootfs), and continue whatever happens.
+    resume = runtime.pause(st, record['Id']) if str(a.pause).lower() in ('true', '1') else (lambda: None)
+    try:
+        image_id = commit_paused(st, record, a, docker)
+    finally:
+        resume()
+    if a.repository:
+        tag_image(st, image_id, [a.repository])
+    print('sha256:' + image_id)
+
+
+def commit_paused(st, record, a, docker):
     base = st.image_info(record['Image'])
     before, after, root = container_diff(st, record)
     changed, deleted = layers.changes(before, after)
@@ -1277,12 +1314,9 @@ def cmd_commit(st, args):
             union.apply(root.upper, image_root)
         else:
             runspec.copy_rootfs(root, image_root)
-        image_id = install_built(st, config_bytes, manifest, image_root, new_meta)
+        return install_built(st, config_bytes, manifest, image_root, new_meta)
     finally:
         store_mod.remove(work)
-    if a.repository:
-        tag_image(st, image_id, [a.repository])
-    print('sha256:' + image_id)
 
 
 def cmd_push(st, args):

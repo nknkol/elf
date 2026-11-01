@@ -100,6 +100,41 @@ with tempfile.TemporaryDirectory(prefix='agent-launch-', dir=build) as tmp:
     assert p.returncode == 127 and 'exec failed' in p.stderr, (p.returncode, p.stderr)
     print('PASS: persistent private state and guest exec errors')
 
+    # FDs the caller left open (a file outside the profile, a writable one,
+    # a directory, a UNIX socket) do not reach the guest; stdio and an
+    # explicit --pass-fd (here a pipe the guest reads) do.
+    outside = base / 'outside'
+    outside.mkdir()
+    (outside / 'secret').write_text('LEFT-OPEN-SECRET\n')
+    (outside / 'target').write_text('unchanged\n')
+    a, b = __import__('socket').socketpair()
+    r_secret = os.open(outside / 'secret', os.O_RDONLY)
+    w_target = os.open(outside / 'target', os.O_WRONLY | os.O_APPEND)
+    d_outside = os.open(outside, os.O_RDONLY | os.O_DIRECTORY)
+    for backend in ('isolate', 'in-process'):
+        granted_r, granted_w = os.pipe()
+        os.write(granted_w, b'granted\n')
+        os.close(granted_w)
+        fds = {'r': r_secret, 'w': w_target, 'd': d_outside, 's': a.fileno(), 'g': granted_r}
+        # (true, not ":": a failed redirection of a special built-in ends the shell)
+        probe = '; '.join(f'true <&{n} 2>/dev/null && echo open-{k} || echo closed-{k}' for k, n in fds.items())
+        probe += (f'; cat <&{r_secret} 2>/dev/null; echo leaked 2>/dev/null >&{w_target}; '
+                  f'cat <&{granted_r}')
+        p = subprocess.run(['python3', str(launch), *common, '--backend', backend, '--pass-fd', str(granted_r),
+                            '--', '/bin/sh', '-c', probe], capture_output=True, text=True, timeout=60,
+                           pass_fds=list(fds.values()))
+        os.close(granted_r)
+        lines = p.stdout.split()
+        assert all(f'closed-{k}' in lines for k in 'rwds') and 'open-g' in lines, (backend, p.stdout, p.stderr)
+        assert 'LEFT-OPEN-SECRET' not in p.stdout and (outside / 'target').read_text() == 'unchanged\n', \
+            (backend, p.stdout)
+        assert 'granted' in lines, (backend, p.stdout, p.stderr)
+    for fd in (r_secret, w_target, d_outside):
+        os.close(fd)
+    a.close()
+    b.close()
+    print('PASS: FDs the caller left open do not reach the guest; stdio and --pass-fd do')
+
     many = dict(json.loads(profile.read_text()))
     # 8 mounts used; 57 more exceed the 64-mount backend limit.
     for index in range(57):

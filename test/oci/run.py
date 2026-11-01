@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -500,6 +501,83 @@ def mount_owner_tests(home, work):
           'build: chown in RUN and COPY --chown in the image', p2.stdout + p2.stderr + p.stderr)
     for image in ('test/owners-built:1', 'test/chowned:1', 'test/owned:1'):
         docker(home, 'rmi', '-f', image)
+
+
+def pause_orphan_tests(home, work):
+    """commit --pause stops the container while it is read and continues
+    it whatever happens; a container whose monitor and entry process are
+    gone leaves nothing of its process group running."""
+    img = 'test/alpine:1'
+    for mode in ([], ['--isolate']):
+        tag = ' (--isolate)' if mode else ''
+        name = 'pausing' + ('-iso' if mode else '')
+        docker(home, 'run', '-d', *mode, '--name', name, '-u', 'root', img,
+               'i=0; while :; do i=$((i+1)); echo $i > /a; echo $i > /b; done')
+        time.sleep(1)
+        cid = docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+        state = json.loads((home / 'containers' / cid / 'run.json').read_text())['State']
+        image = f'test/paused{"-iso" if mode else ""}:1'
+        p = docker(home, 'commit', name, image)
+        # The layer of the new image and its local rootfs hold the same files.
+        saved = docker(home, 'save', image, text=False)
+        layer_files = {}
+        with tarfile.open(fileobj=io.BytesIO(saved.stdout)) as outer:
+            manifest = json.loads(outer.extractfile('manifest.json').read())
+            last = manifest[0]['Layers'][-1]
+            data = outer.extractfile(last).read()
+            if data[:2] == b'\x1f\x8b':
+                data = gzip.decompress(data)
+            with tarfile.open(fileobj=io.BytesIO(data)) as layer:
+                for m in layer:
+                    name_ = m.name[2:] if m.name.startswith('./') else m.name
+                    if name_ in ('a', 'b'):
+                        layer_files[name_] = layer.extractfile(m).read().decode()
+        p2 = docker(home, 'run', '--rm', image, 'cat /a /b')
+        running = proc_state(state['Pid'])
+        before = docker(home, 'exec', name, 'cat', '/a').stdout
+        time.sleep(0.5)
+        after = docker(home, 'exec', name, 'cat', '/a').stdout
+        check(p.returncode == 0 and layer_files.get('a', '') + layer_files.get('b', '') == p2.stdout and
+              running not in ('T', 't') and before != after,
+              'commit --pause: the layer and the image rootfs agree; the container runs on' + tag,
+              [p.stderr, layer_files, p2.stdout, running, before, after])
+        p = docker(home, 'commit', '-c', 'FROM busybox', name, image + 'x')
+        time.sleep(0.2)
+        check(p.returncode != 0 and proc_state(state['Pid']) not in ('T', 't') and
+              docker(home, 'exec', name, 'true').returncode == 0,
+              'commit --pause: a failed commit continues the container' + tag, p.stderr)
+        docker(home, 'rm', '-f', name)
+        docker(home, 'rmi', '-f', image)
+        # The monitor dies, then the entry process exits leaving a job in
+        # its group: refreshing the state ends the job.
+        name = 'orphan' + ('-iso' if mode else '')
+        docker(home, 'run', '-d', *mode, '--name', name, img, 'sleep 300 & sleep 2; exit 0')
+        cid = docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+        for _ in range(100):
+            state = json.loads((home / 'containers' / cid / 'run.json').read_text())['State']
+            if state.get('Pid') and state.get('MonitorPid'):
+                break
+            time.sleep(0.05)
+        pgid = state['Pid']
+        os.kill(state['MonitorPid'], signal.SIGKILL)
+        for _ in range(100):
+            if proc_start(pgid) is None:
+                break
+            time.sleep(0.1)
+        left = group_members(pgid)
+        p = docker(home, 'ps', '-a', '--format', '{{.Names}} {{.State}}')
+        time.sleep(0.3)
+        check(left and f'{name} exited' in p.stdout and not group_members(pgid),
+              'a container whose monitor died leaves no job of its process group' + tag,
+              [left, p.stdout, group_members(pgid)])
+        docker(home, 'rm', '-f', name)
+
+
+def proc_state(pid):
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+    except OSError:
+        return None
 
 
 def cow_tests(home, work):
@@ -1363,7 +1441,54 @@ def upper_build_tests(home, work, ctx):
     docker(home, 'rmi', '-f', 'test/upper:1')
 
 
+def context_link_tests(home, work):
+    """Links in the build context never lead outside it: COPY, local ADD, a
+    directory source and a RUN --mount bind source, through an absolute and
+    a relative intermediate link, read nothing of a sentinel outside."""
+    outside = work / 'outside-ctx'
+    outside.mkdir()
+    secret = 'OUTSIDE-SENTINEL-' + hashlib.sha256(str(work).encode()).hexdigest()[:12]
+    (outside / 'sentinel').write_text(secret + '\n')
+    (outside / 'dir').mkdir()
+    (outside / 'dir' / 'f').write_text(secret + '\n')
+    ctx = work / 'link-ctx'
+    ctx.mkdir()
+    os.symlink(str(outside), ctx / 'abs')
+    os.symlink('../outside-ctx', ctx / 'rel')
+    (ctx / 'inside').write_text('inside\n')
+    cases = []
+    for link in ('abs', 'rel'):
+        cases += [(f'COPY {link}/sentinel /got', 'cat /got'),
+                  (f'ADD {link}/sentinel /got', 'cat /got'),
+                  (f'COPY {link}/dir /got/', 'cat /got/f'),
+                  (f'COPY {link}/dir/ /got/', 'cat /got/f'),
+                  (f'RUN --mount=type=bind,source={link}/sentinel,target=/m cat /m > /got || true', 'cat /got'),
+                  (f'RUN --mount=type=bind,source={link},target=/m cat /m/sentinel > /got || true', 'cat /got')]
+    leaked = []
+    for i, (line, show) in enumerate(cases):
+        (ctx / 'Dockerfile').write_text(f'FROM test/alpine:1\nUSER root\nCOPY inside /inside\n{line}\n')
+        tag = f'test/ctxlink{i}:1'
+        p = docker(home, 'build', '-t', tag, str(ctx), timeout=300)
+        out = p.stdout + p.stderr
+        if p.returncode == 0:
+            out += docker(home, 'run', '--rm', tag, show + ' 2>&1; true').stdout
+            docker(home, 'rmi', '-f', tag)
+        if secret in out:
+            leaked.append((line, out[-300:]))
+    check(not leaked, 'build: context links never read outside the context (COPY, ADD, directory, '
+          'RUN --mount bind; absolute and relative links)', leaked)
+    # A link that stays inside still works, and a final link is copied as a link.
+    os.symlink('inside', ctx / 'alias')
+    (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nCOPY alias /alias\nCOPY inside /inside\n')
+    p = docker(home, 'build', '-t', 'test/ctxlink-ok:1', str(ctx), timeout=300)
+    p2 = docker(home, 'run', '--rm', 'test/ctxlink-ok:1', 'readlink /alias; cat /alias')
+    check(p.returncode == 0 and p2.stdout == 'inside\ninside\n', 'build: links inside the context still work',
+          p.stderr + p2.stdout + p2.stderr)
+    docker(home, 'rmi', '-f', 'test/ctxlink-ok:1')
+
+
 def build_tests(home, work):
+    context_link_tests(home, work)
     ctx = work / 'ctx'
     (ctx / 'src').mkdir(parents=True)
     (ctx / 'src' / 'a').write_text('file a\n')
@@ -1465,6 +1590,7 @@ def main():
             build_tests(home, work)
             mount_owner_tests(home, work)
             cow_tests(home, work)
+            pause_orphan_tests(home, work)
             erofs_tests(home, work)
             compose_tests(home, work)
             network_tests(home, work)

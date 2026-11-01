@@ -74,6 +74,16 @@ def refresh(st, record):
             record = st.load_container(record['Id'])
             state = record['State']
             if state['Status'] in ('running', 'restarting') and not alive(state):
+                # The entry process is gone with nobody left to wait for it:
+                # what it left in its process group goes now, as when its
+                # PID namespace's init exits (not a group that took its pid
+                # number since: group_alive).
+                pgid = state.get('Pid') or 0
+                if pgid > 0 and group_alive(pgid, state.get('PidStart')):
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
                 state.update(Status='exited', Running=False, Pid=0,
                              FinishedAt=state.get('FinishedAt') or store_mod.now())
                 if state.get('ExitCode') is None:
@@ -93,6 +103,8 @@ def exec_spawn(st, cid, launch):
         state = record['State']
         if state['Status'] != 'running' or not alive(state) or state.get('ExecsClosed'):
             raise StoreError(f'Container {cid[:12]} is not running')
+        if state.get('Paused'):
+            raise StoreError(f'Container {cid[:12]} is paused, unpause the container before exec')
         proc = launch()
         path = st.container_dir(cid) / 'execs.json'
         execs = [e for e in store_mod.read_json(path, []) if group_alive(e[0], e[1])]
@@ -109,6 +121,61 @@ def exec_done(st, cid, pid):
         if path.exists():
             store_mod.write_json(path, [e for e in store_mod.read_json(path, [])
                                         if e[0] != pid or group_alive(e[0], e[1])])
+
+
+def container_groups(st, record):
+    """Process groups of a running container: its main one and its execs'."""
+    state = record['State']
+    groups = [state['Pid']] if alive(state) else []
+    path = st.container_dir(record['Id']) / 'execs.json'
+    groups += [pid for pid, start in store_mod.read_json(path, []) if group_alive(pid, start)]
+    return groups
+
+
+def pause(st, cid):
+    """Stops a running container's processes (SIGSTOP to its process
+    groups) until the returned function is called, which continues them;
+    no exec starts meanwhile. A container that is not running: nothing."""
+    with st.lock():
+        record = st.load_container(cid)
+        if record['State']['Status'] != 'running' or not alive(record['State']):
+            return lambda: None
+        record['State']['Paused'] = True
+        st.save_container(record)
+        groups = container_groups(st, record)
+    for pgid in groups:
+        try:
+            os.killpg(pgid, signal.SIGSTOP)
+        except (ProcessLookupError, PermissionError):
+            pass
+    # Every process of those groups has stopped before the caller reads.
+    deadline = time.time() + 5
+    while time.time() < deadline and not all(stopped(pgid) for pgid in groups):
+        time.sleep(0.01)
+
+    def resume():
+        for pgid in groups:
+            try:
+                os.killpg(pgid, signal.SIGCONT)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if st.container_dir(cid).exists():
+            set_state(st, cid, Paused=False)
+    return resume
+
+
+def stopped(pgid):
+    """Whether every process of the group is stopped (or gone)."""
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        try:
+            fields = Path(f'/proc/{entry}/stat').read_text().rsplit(')', 1)[1].split()
+        except OSError:
+            continue
+        if int(fields[2]) == pgid and fields[0] not in ('T', 't', 'Z', 'X'):
+            return False
+    return True
 
 
 def end_execs(st, cid):

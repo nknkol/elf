@@ -79,6 +79,7 @@ check-isolation: build
 	$(PYTHON) test/isolation/case_alias.py
 	$(PYTHON) test/isolation/device.py
 	$(PYTHON) test/isolation/traverse.py
+	$(PYTHON) test/isolation/lazy_nested.py
 check-guarded: build
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py

@@ -158,6 +158,8 @@ def main():
     parser.add_argument('--loader', type=Path, default=BUILD / 'elfloader-guarded')
     parser.add_argument('--cwd', help='Guest working directory (default: /workspace target)')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE')
+    parser.add_argument('--pass-fd', type=int, action='append', default=[], metavar='N',
+                        help='Keep inherited FD N open for the guest (stdio 0-2 always are)')
     parser.add_argument('--backend', choices=sorted(BACKENDS), default='isolate',
                         help='isolate (default): seccomp filter + broker; in-process: the guard only')
     parser.add_argument('--print', action='store_true', help='Print the launch as JSON instead of running it')
@@ -194,7 +196,31 @@ def main():
     # The loader enters the root itself; the helper path is relative to it.
     os.chdir(root)
     sys.stdout.flush()
+    close_inherited({0, 1, 2, *args.pass_fd})
     os.execv(argv[0], argv)
+
+
+def close_inherited(keep):
+    """An FD the caller left open is a capability the policy never sees
+    (reads and writes through it need no path): every one not in keep is
+    closed on exec. Kept FDs are explicit grants."""
+    try:
+        fds = [int(name) for name in os.listdir('/proc/self/fd')]
+    except OSError:
+        fds = range(3, os.sysconf('SC_OPEN_MAX') if hasattr(os, 'sysconf') else 1024)
+    for fd in keep:
+        if fd > 2:
+            try:
+                os.set_inheritable(fd, True)
+            except OSError:
+                pass
+    for fd in fds:
+        if fd in keep:
+            continue
+        try:
+            os.set_inheritable(fd, False)
+        except OSError:
+            pass   # (the listing's own FD, already gone)
 
 
 if __name__ == '__main__':

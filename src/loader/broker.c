@@ -935,6 +935,80 @@ static long socket_name(struct call *c, long nr)
  * cache; lazy_layer.c walks it without following symlinks. */
 static const payload_config_t *broker_cfg;
 
+/* Whether directory dir is (dev, ino) or lies below it: walked up by "..",
+ * by identity, so no spelling of a host path matters. Too deep counts. */
+static int at_or_below(int dir, unsigned long dev, unsigned long ino)
+{
+	int fd = (int)sys(__NR_fcntl, dir, 1030 /* F_DUPFD_CLOEXEC */, 3, 0, 0, 0);
+	for (int depth = 0; fd >= 0 && depth < 512; depth++) {
+		struct stat st, up_st;
+		if (sys(__NR_fstat, fd, (long)&st, 0, 0, 0, 0) < 0)
+			break;
+		if (st.st_dev == dev && st.st_ino == ino) {
+			sys(__NR_close, fd, 0, 0, 0, 0, 0);
+			return 1;
+		}
+		int up = (int)sys(__NR_openat, fd, (long)"..", O_PATH_ | O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0);
+		sys(__NR_close, fd, 0, 0, 0, 0, 0);
+		if (up < 0 || sys(__NR_fstat, up, (long)&up_st, 0, 0, 0, 0) < 0 ||
+		    (up_st.st_dev == st.st_dev && up_st.st_ino == st.st_ino)) {
+			if (up >= 0)
+				sys(__NR_close, up, 0, 0, 0, 0, 0);
+			return 0; /* the top */
+		}
+		fd = up;
+	}
+	if (fd >= 0)
+		sys(__NR_close, fd, 0, 0, 0, 0, 0);
+	return fd >= 0;
+}
+
+/* A cache the broker expands or fills (lazy_layer.c walks it with
+ * O_NOFOLLOW but checks no access of its own): refused when any tree of
+ * other access ('r', 'd', glue, the loader file) lies inside it, so a
+ * writable cache root never stands for read-only or denied descendants.
+ * self: the cache's own tree (a lower) does not count. */
+static int cache_holds_protected(int cache, int self)
+{
+	struct stat cs;
+	if (sys(__NR_fstat, cache, (long)&cs, 0, 0, 0, 0) < 0)
+		return 1;
+	for (int i = 0; i < tree_count; i++) {
+		if (trees[i].access == 'w')
+			continue;
+		if (self && trees[i].dev == cs.st_dev && trees[i].ino == cs.st_ino)
+			continue;
+		int dir = trees[i].fd;
+		int own = -1;
+		struct stat ts;
+		if (sys(__NR_fstat, dir, (long)&ts, 0, 0, 0, 0) < 0)
+			return 1;
+		if ((ts.st_mode & 0170000) != 0040000) {
+			/* A file tree: its directory. */
+			own = (int)sys(__NR_openat, dir, (long)"..", O_PATH_ | O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0);
+			if (own < 0) {
+				char parent[CONFIG_MAX_PATH];
+				copy_cstr(parent, sizeof(parent), trees[i].path);
+				size_t n = z_strlen(parent);
+				while (n > 1 && parent[n - 1] != '/')
+					n--;
+				parent[n > 1 ? n - 1 : 1] = 0;
+				own = (int)sys(__NR_openat, AT_FDCWD, (long)parent, O_PATH_ | O_DIRECTORY_ | O_CLOEXEC_,
+					       0, 0, 0);
+			}
+			if (own < 0)
+				return 1;
+			dir = own;
+		}
+		int inside = at_or_below(dir, cs.st_dev, cs.st_ino);
+		if (own >= 0)
+			sys(__NR_close, own, 0, 0, 0, 0, 0);
+		if (inside)
+			return 1;
+	}
+	return 0;
+}
+
 static long lazy_request(const struct call *c)
 {
 	char path[4096];
@@ -949,6 +1023,12 @@ static long lazy_request(const struct call *c)
 		if (!broker_cfg->lower_image[i][0] || z_strncmp(path, cache, n) ||
 		    (path[n] && path[n] != '/'))
 			continue;
+		int fd = (int)sys(__NR_openat, AT_FDCWD, (long)cache, O_PATH_ | O_DIRECTORY_ | O_CLOEXEC_, 0, 0, 0);
+		int nested = fd < 0 || cache_holds_protected(fd, 1);
+		if (fd >= 0)
+			sys(__NR_close, fd, 0, 0, 0, 0, 0);
+		if (nested)
+			return -EACCES_;
 		return c->a[1] ? lazy_fill(broker_cfg->lower_image[i], cache, path + n)
 			       : lazy_expand(broker_cfg->lower_image[i], cache, path + n);
 	}
@@ -981,6 +1061,8 @@ static long lazy_mount_request(struct call *c)
 			    O_DIRECTORY_ | O_NOFOLLOW | O_CLOEXEC_, 0, 0, 0);
 		rc = image < 0 ? image : cache < 0 ? cache : 0;
 	}
+	if (rc >= 0 && cache_holds_protected((int)cache, 0))
+		rc = -EACCES_;
 	if (rc >= 0) {
 		char image_path[32], cache_path[32];
 		fd_path(image_path, (int)image);

@@ -417,9 +417,12 @@ class DirSink:
     """Writes entries under a directory FD (taken over), never following a
     link; upper: the directory is in a --cow container's upper."""
 
-    def __init__(self, fd, upper=False):
+    def __init__(self, fd, upper=False, exact=False):
+        """exact: modes exactly as the entries give them (a directory's
+        when the copy is done), not the container's owner-writable ones."""
         self.root = unpack.Rootfs(fd=fd)
         self.upper = upper
+        self.exact = exact
         self.dir_times = []
 
     def put(self, e):
@@ -478,7 +481,7 @@ class DirSink:
                 set_mode(dfd, e.mode, True)
             finally:
                 os.close(dfd)
-            self.dir_times.append((e.parts, e.mtime))
+            self.dir_times.append((e.parts, e.mtime, e.mode))
         elif e.kind == 'l':
             os.symlink(e.link, name, dir_fd=fd)
             try:
@@ -495,18 +498,23 @@ class DirSink:
                         break
                     unpack.write_all(out, chunk)
                 mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode) if e.kind == 'h' else e.mode
-                set_mode(out, mode, False)
+                if self.exact:
+                    os.chmod(out, mode)
+                else:
+                    set_mode(out, mode, False)
                 os.utime(out, (e.mtime, e.mtime))
             finally:
                 os.close(out)
 
     def finish(self):
-        for parts, mtime in reversed(self.dir_times):
+        for parts, mtime, mode in reversed(self.dir_times):
             try:
                 fd = self.root.open_dir(parts)
             except OSError:
                 continue
             try:
+                if self.exact:
+                    os.chmod(fd, mode)
                 os.utime(fd, (mtime, mtime))
             finally:
                 os.close(fd)

@@ -20,6 +20,12 @@
 - Difference: datagram UNIX sockets are refused by the broker (a datagram may
   go to any name), so HarmonyOS hilog logging reports "Can't create socket"
   under the broker backend; the program goes on.
+- Inherited FDs: every FD the caller left open other than stdio is closed
+  on exec (an open FD needs no path, so no policy would see its use);
+  `--pass-fd N` keeps one, as an explicit grant. The in-process guard still
+  applies its own rules to a kept FD (reading an inherited stream is
+  allowed, writing is not); under the broker backend the guest can use it
+  directly.
 - Limits: 64 mounts (private ones included), 512 environment entries,
   255-byte paths and entries, no ":" in paths; payload ABI 27.
 - Neither backend is a complete hostile-agent guarantee: kernel bugs,
