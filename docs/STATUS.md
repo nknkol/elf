@@ -19,6 +19,7 @@
 `make check-isolation` 255（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑）、
 `make check-oci` 216（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18，
 `test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过。
+本轮审查修复（R1–R5 及后续竞争与异常修复）的用例映射与待补项见 [REVIEW_FIX_TESTS.md](REVIEW_FIX_TESTS.md)。
 
 **已知限制**
 
