@@ -165,14 +165,14 @@ def pause(st, cid, timeout=5.0):
             return lambda: None
         if state.get('Paused') and pause_owner_alive(state.get('PauseOwner')):
             raise PauseError(f'Container {cid[:12]} is already paused')
+        groups = container_groups(st, record)
         state.update(Paused=True, PauseOwner=me)
         st.save_container(record)
-        groups = container_groups(st, record)
-    signalled = []
-    failure = None
 
     def resume():
-        for pgid in signalled:
+        # Every group (one stopped before an interruption is not yet in
+        # any list); SIGCONT to a running process changes nothing.
+        for pgid in groups:
             try:
                 os.killpg(pgid, signal.SIGCONT)
             except (ProcessLookupError, PermissionError):
@@ -184,33 +184,41 @@ def pause(st, cid, timeout=5.0):
                     record['State'].update(Paused=False, PauseOwner=None)
                     st.save_container(record)
 
-    for pgid in groups:
-        try:
-            os.killpg(pgid, signal.SIGSTOP)
-            signalled.append(pgid)
-        except ProcessLookupError:
-            pass      # (gone since: nothing left to write)
-        except OSError as e:
-            failure = f'cannot stop process group {pgid}: {e}'
-            break
-    if failure is None:
-        # Every process of those groups has stopped before the caller reads.
-        deadline = time.time() + timeout
-        while failure is None:
-            try:
-                if all(stopped(pgid) for pgid in groups):
-                    break
-            except StopUnknown as e:
-                failure = f'cannot tell whether its processes stopped ({e})'
-                break
-            if time.time() >= deadline:
-                failure = f'its processes did not stop within {timeout:g}s'
-                break
-            time.sleep(0.01)
+    # From here until resume is handed back, any failure (an error of any
+    # kind, an interruption) continues the groups and clears the state.
+    try:
+        failure = acquire_stop(groups, timeout)
+    except BaseException as e:
+        resume()
+        if isinstance(e, Exception):
+            raise PauseError(f'cannot pause container {cid[:12]}: {e}') from None
+        raise
     if failure is not None:
         resume()
         raise PauseError(f'cannot pause container {cid[:12]}: {failure}')
     return resume
+
+
+def acquire_stop(groups, timeout):
+    """SIGSTOP to every group, then waits until every thread is seen
+    stopped: None, or why the pause cannot be had."""
+    for pgid in groups:
+        try:
+            os.killpg(pgid, signal.SIGSTOP)
+        except ProcessLookupError:
+            pass      # (gone since: nothing left to write)
+        except OSError as e:
+            return f'cannot stop process group {pgid}: {e}'
+    deadline = time.time() + timeout
+    while True:
+        try:
+            if all(stopped(pgid) for pgid in groups):
+                return None
+        except StopUnknown as e:
+            return f'cannot tell whether its processes stopped ({e})'
+        if time.time() >= deadline:
+            return f'its processes did not stop within {timeout:g}s'
+        time.sleep(0.01)
 
 
 def resume_orphaned_pause(st, record):
@@ -285,7 +293,11 @@ def stopped(pgid):
     those): it cannot be in a container's group, which runs as this uid,
     nor could it be signalled."""
     me = os.getuid()
-    for entry in list_proc('/proc'):
+    try:
+        entries = list_proc('/proc')
+    except OSError as e:
+        raise StopUnknown(f'/proc: {e}') from None
+    for entry in entries:
         if not entry.isdigit():
             continue
         try:

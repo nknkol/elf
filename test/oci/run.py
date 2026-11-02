@@ -503,6 +503,10 @@ def mount_owner_tests(home, work):
         docker(home, 'rmi', '-f', image)
 
 
+def raise_(e):
+    raise e
+
+
 def last_layer_files(home, image, wanted):
     """{name: text} of the wanted files in the image's last layer."""
     saved = docker(home, 'save', image, text=False)
@@ -644,7 +648,14 @@ def pause_owner_tests(home, name, tag):
                         ('a process whose threads cannot be listed',
                          lambda: setattr(runtime_mod, 'list_proc', failing_list)),
                         ('a thread whose wchan cannot be read',
-                         lambda: setattr(runtime_mod, 'read_proc', failing_read('/wchan')))):
+                         lambda: setattr(runtime_mod, 'read_proc', failing_read('/wchan'))),
+                        ('/proc that cannot be listed',
+                         lambda: setattr(runtime_mod, 'list_proc', lambda path: raise_(OSError(24, 'injected'))
+                                         if str(path) == '/proc' else real_list(path))),
+                        ('an unexpected error while waiting',
+                         lambda: setattr(runtime_mod, 'stopped', lambda pgid: raise_(RuntimeError('injected')))),
+                        ('an interruption while waiting',
+                         lambda: setattr(runtime_mod, 'stopped', lambda pgid: raise_(KeyboardInterrupt())))):
         build_mod.commit_paused = lambda *a: read.append(a) or 'x'
         patch()
         try:
@@ -652,6 +663,8 @@ def pause_owner_tests(home, name, tag):
             error = None
         except store_mod.StoreError as e:
             error = str(e)
+        except KeyboardInterrupt:
+            error = 'cannot pause: interrupted'
         finally:
             build_mod.commit_paused, os.killpg, runtime_mod.stopped = real_commit, real_killpg, real_stopped
             runtime_mod.read_proc, runtime_mod.list_proc = real_read, real_list

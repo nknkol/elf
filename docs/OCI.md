@@ -283,6 +283,8 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
   `thread_precheck_deliver_signal`（信号投递停止）为准，睡在别处（含 `pause()`）的线程不算。读不到状态不等于停下：
   只有确已消失（ENOENT/ESRCH）才算；本 uid 进程的 stat、线程列表或 wchan 读取失败或内容异常时中止暂停（同上，恢复并清理）。
   `/proc` 下连条目都看不了的是别的用户的进程（HarmonyOS 隐藏它们），容器进程都以本 uid 运行，也无法向它们发信号，故跳过。
+  取得暂停（写入状态）之后、交出恢复函数之前的任何失败（各类错误、`/proc` 无法枚举、中断）都恢复全部进程组并清除状态；
+  进程组列表在写入状态之前取得。
 - **`stop`/`kill`/`restart`/`wait`**：容器入口进程放在自己的进程组，`run.json` 记录进程组；按 StopSignal 发信号，
   超时后 SIGKILL。
 - **`cp`**：在宿主路径与容器之间复制（`tools/oci/guestfs.py`，引擎的 archive 接口相同）。容器内路径按容器视图解析
