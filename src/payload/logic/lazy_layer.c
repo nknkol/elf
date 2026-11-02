@@ -434,6 +434,28 @@ static long make_child(struct work *w, long dir, const char *name, const struct 
     return place_child(dir, name);
 }
 
+/* The completion marker: made exclusively, never through a link (O_EXCL
+ * does not follow one). One already there (another expansion finished
+ * meanwhile) must be a regular file; anything else refuses. */
+static long make_marker(long dir)
+{
+    long rc = -EAGAIN;
+    for (int tries = 0; tries < 8 && rc == -EAGAIN; tries++) {
+        long marker = sys(__NR_openat, dir, (long)LAZY_MARKER,
+                          O_WRONLY_ | O_CREAT_ | O_EXCL_ | O_NOFOLLOW_ | O_CLOEXEC_, 0600, 0, 0);
+        if (marker >= 0) {
+            sys(__NR_close, marker, 0, 0, 0, 0, 0);
+            return 0;
+        }
+        if (marker != -EEXIST) return marker;
+        struct stat st;
+        rc = sys(__NR_newfstatat, dir, (long)LAZY_MARKER, (long)&st, AT_SYMLINK_NOFOLLOW_, 0, 0);
+        if (rc == -ENOENT) rc = -EAGAIN; /* removed meanwhile: made again */
+        else if (rc >= 0) rc = (st.st_mode & S_IFMT_) == S_IFREG_ ? 0 : -ELOOP;
+    }
+    return rc;
+}
+
 static long expand_at(struct work *w, const char *image, const char *cache, const char *rel)
 {
     long rc = image_open(&w->img, image);
@@ -477,9 +499,7 @@ static long expand_at(struct work *w, const char *image, const char *cache, cons
         if (rc >= 0) rc = make_child(w, fd, child, &ino);
     }
     if (rc >= 0) {
-        long marker = sys(__NR_openat, fd, (long)LAZY_MARKER, O_WRONLY_ | O_CREAT_ | O_CLOEXEC_, 0600, 0, 0);
-        rc = marker < 0 ? marker : 0;
-        if (marker >= 0) sys(__NR_close, marker, 0, 0, 0, 0, 0);
+        rc = make_marker(fd);
         long t[4];
         times_of(&dir, t, false);
         if (rc >= 0 && rel[0]) sys(__NR_utimensat, fd, 0, (long)t, 0, 0, 0);

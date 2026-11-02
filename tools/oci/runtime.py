@@ -196,7 +196,13 @@ def pause(st, cid, timeout=5.0):
     if failure is None:
         # Every process of those groups has stopped before the caller reads.
         deadline = time.time() + timeout
-        while not all(stopped(pgid) for pgid in groups):
+        while failure is None:
+            try:
+                if all(stopped(pgid) for pgid in groups):
+                    break
+            except StopUnknown as e:
+                failure = f'cannot tell whether its processes stopped ({e})'
+                break
             if time.time() >= deadline:
                 failure = f'its processes did not stop within {timeout:g}s'
                 break
@@ -228,31 +234,87 @@ def resume_orphaned_pause(st, record):
 STOP_WCHAN = 'thread_precheck_deliver_signal'
 
 
+class StopUnknown(Exception):
+    """A task's state could not be read: it is neither known stopped nor
+    known gone."""
+
+
+def read_proc(path):
+    """Text of a /proc file (one place, so tests can make it fail)."""
+    with open(path) as f:
+        return f.read()
+
+
+def list_proc(path):
+    return os.listdir(path)
+
+
+def _gone(e):
+    return isinstance(e, (FileNotFoundError, ProcessLookupError))
+
+
 def task_stopped(task):
-    """Whether the task (/proc/PID/task/TID) is stopped (or gone)."""
+    """Whether the task (/proc/PID/task/TID) is stopped or gone; a state
+    that cannot be read or makes no sense raises StopUnknown."""
     try:
-        state = (task / 'stat').read_text().rsplit(')', 1)[1].split()[0]
-        if state in ('T', 't', 'Z', 'X'):
+        text = read_proc(f'{task}/stat')
+    except OSError as e:
+        if _gone(e):
             return True
-        return (task / 'wchan').read_text().strip() == STOP_WCHAN
-    except (OSError, IndexError):
+        raise StopUnknown(f'{task}/stat: {e}') from None
+    try:
+        state = text.rsplit(')', 1)[1].split()[0]
+    except IndexError:
+        if not text:
+            return True   # (an exited task reads empty)
+        raise StopUnknown(f'{task}/stat: unreadable state') from None
+    if state in ('T', 't', 'Z', 'X'):
         return True
+    try:
+        return read_proc(f'{task}/wchan').strip() == STOP_WCHAN
+    except OSError as e:
+        if _gone(e):
+            return True
+        raise StopUnknown(f'{task}/wchan: {e}') from None
 
 
 def stopped(pgid):
     """Whether every thread of every process of the group is stopped (or
-    gone)."""
-    for entry in os.listdir('/proc'):
+    gone); StopUnknown when that cannot be told. A process whose /proc
+    entry cannot be looked at all is another user's (HarmonyOS hides
+    those): it cannot be in a container's group, which runs as this uid,
+    nor could it be signalled."""
+    me = os.getuid()
+    for entry in list_proc('/proc'):
         if not entry.isdigit():
             continue
         try:
-            fields = Path(f'/proc/{entry}/stat').read_text().rsplit(')', 1)[1].split()
-            if int(fields[2]) != pgid:
+            text = read_proc(f'/proc/{entry}/stat')
+        except OSError as e:
+            if _gone(e):
                 continue
-            tasks = os.listdir(f'/proc/{entry}/task')
-        except (OSError, IndexError, ValueError):
+            try:
+                if os.stat(f'/proc/{entry}').st_uid != me:
+                    continue
+            except OSError as e2:
+                if _gone(e2) or isinstance(e2, PermissionError):
+                    continue
+            raise StopUnknown(f'/proc/{entry}/stat: {e}') from None
+        try:
+            group = int(text.rsplit(')', 1)[1].split()[2])
+        except (IndexError, ValueError):
+            if not text:
+                continue
+            raise StopUnknown(f'/proc/{entry}/stat: unreadable') from None
+        if group != pgid:
             continue
-        if not all(task_stopped(Path(f'/proc/{entry}/task/{t}')) for t in tasks):
+        try:
+            tasks = list_proc(f'/proc/{entry}/task')
+        except OSError as e:
+            if _gone(e):
+                continue
+            raise StopUnknown(f'/proc/{entry}/task: {e}') from None
+        if not all(task_stopped(f'/proc/{entry}/task/{t}') for t in tasks):
             return False
     return True
 

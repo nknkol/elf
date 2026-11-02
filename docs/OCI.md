@@ -280,7 +280,9 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
   恢复会继续容器并清除状态。任何一组发不出 SIGSTOP（权限错误）或超时（5 秒）仍有进程未停，就恢复已停的组、清除状态并
   中止提交，不读任何文件。所有者中途死亡时，下次查看该容器（`ps`、`inspect` 等刷新状态）恢复它。
   “已停下”按线程判断：每个进程的每个线程都处于 T/t（或已退出）；HongMeng 把停止的线程显示为 `S`，此时以其 wchan 为
-  `thread_precheck_deliver_signal`（信号投递停止）为准，睡在别处（含 `pause()`）的线程不算。
+  `thread_precheck_deliver_signal`（信号投递停止）为准，睡在别处（含 `pause()`）的线程不算。读不到状态不等于停下：
+  只有确已消失（ENOENT/ESRCH）才算；本 uid 进程的 stat、线程列表或 wchan 读取失败或内容异常时中止暂停（同上，恢复并清理）。
+  `/proc` 下连条目都看不了的是别的用户的进程（HarmonyOS 隐藏它们），容器进程都以本 uid 运行，也无法向它们发信号，故跳过。
 - **`stop`/`kill`/`restart`/`wait`**：容器入口进程放在自己的进程组，`run.json` 记录进程组；按 StopSignal 发信号，
   超时后 SIGKILL。
 - **`cp`**：在宿主路径与容器之间复制（`tools/oci/guestfs.py`，引擎的 archive 接口相同）。容器内路径按容器视图解析

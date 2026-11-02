@@ -614,14 +614,37 @@ def pause_owner_tests(home, name, tag):
     # commit reads nothing, every group continues, the state clears.
     read = []
     real_commit, real_killpg, real_stopped = build_mod.commit_paused, os.killpg, runtime_mod.stopped
+    real_read, real_list = runtime_mod.read_proc, runtime_mod.list_proc
+    members = {str(m) for g in groups for m in group_members(g)}
 
     def failing_killpg(pgid, sig):
         if sig == signal.SIGSTOP and pgid == groups[-1]:
             raise PermissionError(1, 'injected')
         return real_killpg(pgid, sig)
+
+    def failing_read(suffix):
+        # Reading a member's own /proc file fails (not as "gone").
+        def read(path):
+            parts = str(path).split('/')
+            if len(parts) > 2 and parts[2] in members and str(path).endswith(suffix):
+                raise PermissionError(13, 'injected')
+            return real_read(path)
+        return read
+
+    def failing_list(path):
+        parts = str(path).split('/')
+        if len(parts) > 3 and parts[2] in members and parts[3] == 'task':
+            raise OSError(5, 'injected')
+        return real_list(path)
     for what, patch in (('a group that cannot be stopped', lambda: setattr(os, 'killpg', failing_killpg)),
                         ('processes that do not stop in time',
-                         lambda: setattr(runtime_mod, 'stopped', lambda pgid: False))):
+                         lambda: setattr(runtime_mod, 'stopped', lambda pgid: False)),
+                        ('a process whose stat cannot be read',
+                         lambda: setattr(runtime_mod, 'read_proc', failing_read(f'/{groups[0]}/stat'))),
+                        ('a process whose threads cannot be listed',
+                         lambda: setattr(runtime_mod, 'list_proc', failing_list)),
+                        ('a thread whose wchan cannot be read',
+                         lambda: setattr(runtime_mod, 'read_proc', failing_read('/wchan')))):
         build_mod.commit_paused = lambda *a: read.append(a) or 'x'
         patch()
         try:
@@ -631,6 +654,7 @@ def pause_owner_tests(home, name, tag):
             error = str(e)
         finally:
             build_mod.commit_paused, os.killpg, runtime_mod.stopped = real_commit, real_killpg, real_stopped
+            runtime_mod.read_proc, runtime_mod.list_proc = real_read, real_list
         time.sleep(0.2)
         check(error and 'cannot pause' in error and not read and running(groups) and
               paused_state() == (False, None),

@@ -16,7 +16,13 @@ Moved after the check: a writable directory holding a protected subtree
 cache (/rw/cache3) and out again, over and over, while forged requests
 expand and fill names inside holder/protected. Expected: no request
 succeeds (refused where the walk meets the protected tree, or the path is
-not there) and protected stays as it was."""
+not there) and protected stays as it was.
+
+Marker link: while forged requests expand /many (300 entries) over and
+over, the host removes the completion marker and puts a symlink in its
+place pointing to a path outside every tree. Expected: the outside path
+is never created; a request either finds the marker there (0) or
+refuses the link (ELOOP)."""
 import os
 import shutil
 import stat
@@ -173,6 +179,54 @@ with tempfile.TemporaryDirectory(prefix='iso-lazy-', dir=lib.mode_capable()) as 
               ok, results)
         check(f'{vector}: protected unchanged while moved in and out (names, contents, metadata)',
               snapshot(protected) == before, sorted(snapshot(protected)))
+
+    # A symlink put at the completion marker during expansions.
+    image3 = tmp / 'rw' / 'img3.erofs'
+    w = erofs.Writer(image3)
+    try:
+        w.put(['many'], erofs.Node(stat.S_IFDIR | 0o755, mtime=1700000000))
+        for i in range(300):
+            w.put(['many', f'f{i:03}'], erofs.Node(stat.S_IFREG | 0o644, mtime=1700000000))
+        w.finish(1700000000)
+    finally:
+        w.close()
+    cache4 = rw / 'cache4'
+    cache4.mkdir()
+    erofs.expand(image3, cache4, '')
+    secret = tmp / 'secret'
+    secret.mkdir()
+    sentinel = secret / 'created-by-marker'
+    marker = cache4 / 'many' / '.wh..elf-lazy'
+    stop = threading.Event()
+
+    def planter():
+        while not stop.is_set():
+            try:
+                if marker.is_file() and not marker.is_symlink():
+                    marker.unlink()
+                time.sleep(0.0003)
+                os.symlink(sentinel, marker)
+                time.sleep(0.0003)
+                marker.unlink()
+            except OSError:
+                pass
+    p = subprocess.Popen([str(loader), *lib.ISOLATE_EXTRA, '--isolate', '--mode', 'container',
+                          '--root', str(root), '-v', f'{rw}:/rw', '-v', f'{protected}:/prot',
+                          '--guard-file-access', 'dwr', '--allow-stdio-output', '--allow-stream-input',
+                          '--', './.elf-exec', 'h', 'lazy', str(image3), str(cache4), '/many', '0', '400'],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd='/')
+    first = p.stdout.readline()
+    t = threading.Thread(target=planter)
+    t.start()
+    try:
+        out, err = p.communicate('go\n', timeout=300)
+    finally:
+        stop.set()
+        t.join()
+    got = {int(x.split()[1]): int(x.split()[2]) for x in out.splitlines() if x.startswith('lazy-rc ')}
+    check('a symlink at the completion marker never creates the path it points to',
+          first == 'ready\n' and sum(got.values()) == 400 and set(got) <= {0, -40} and
+          not os.path.lexists(sentinel) and not os.listdir(secret), [got, first + out[-300:] + err[-300:]])
 
 if failures:
     print(f'{len(failures)} FAILED:', *failures, sep='\n  ')

@@ -12,6 +12,7 @@ demand into its cache directory (src/payload/include/lazy_layer.h holds
 the protocol); ensure() here does the same for the host side (docker cp,
 diff, commit, owners). Images that mkfs.erofs makes without compression are
 readable too; compressed or chunked files are refused."""
+import errno
 import fcntl
 import os
 import stat
@@ -551,6 +552,37 @@ def _times(ino, placeholder_mark=False):
     return ((ATIME_SEC * 10**9 + ATIME_NSEC) if placeholder_mark else m, m)
 
 
+def _make_marker(fd):
+    """The completion marker, made exclusively and never through a link; one
+    already there must be a regular file (lazy_layer.c make_marker)."""
+    for _ in range(8):
+        try:
+            os.close(os.open(MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                             dir_fd=fd))
+            return
+        except FileExistsError:
+            try:
+                mode = os.stat(MARKER, dir_fd=fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue   # removed meanwhile: made again
+            if not stat.S_ISREG(mode):
+                raise OSError(errno.ELOOP, 'the cache marker is not a regular file') from None
+            return
+    raise OSError(errno.EAGAIN, 'the cache marker keeps changing')
+
+
+def _chmod_made(fd, name, kind, mode):
+    """chmod of a name just made, never through a link put there since."""
+    f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC |
+                (os.O_DIRECTORY if kind == stat.S_IFDIR else 0), dir_fd=fd)
+    try:
+        if stat.S_IFMT(os.fstat(f).st_mode) != kind:
+            raise OSError(errno.EAGAIN, f'{name} changed while being made')
+        os.fchmod(f, mode)
+    finally:
+        os.close(f)
+
+
 def expand(image, cache, rel=''):
     """Expands the directory rel of the cache (lazy_expand)."""
     parts = [p for p in str(rel).split('/') if p]
@@ -581,7 +613,7 @@ def expand(image, cache, rel=''):
                 kind, perm = stat.S_IFMT(c.mode), c.mode & 0o7777
                 if kind == stat.S_IFDIR:
                     os.mkdir(TMP, 0o700, dir_fd=fd)
-                    os.chmod(TMP, perm | 0o700, dir_fd=fd)
+                    _chmod_made(fd, TMP, stat.S_IFDIR, perm | 0o700)
                 elif kind == stat.S_IFLNK:
                     os.symlink(img.read(c), TMP, dir_fd=fd)
                 elif kind == stat.S_IFIFO:
@@ -594,7 +626,7 @@ def expand(image, cache, rel=''):
                     except OSError:
                         continue   # storage that refuses FIFOs: skipped
                     try:
-                        os.chmod(child, perm, dir_fd=fd)
+                        _chmod_made(fd, child, stat.S_IFIFO, perm)
                         os.utime(child, ns=_times(c), dir_fd=fd, follow_symlinks=False)
                     except OSError:
                         pass
@@ -622,7 +654,7 @@ def expand(image, cache, rel=''):
                 except OSError:
                     pass
                 os.rename(TMP, child, src_dir_fd=fd, dst_dir_fd=fd)
-            os.close(os.open(MARKER, os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))
+            _make_marker(fd)
             if parts:
                 os.utime(fd, ns=_times(ino))
         finally:
