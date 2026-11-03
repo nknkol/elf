@@ -732,7 +732,7 @@ bind）。所以每个容器分到一个自己的回环地址，相当于有了�
 
 ### payload（`src/payload/include/net_view.h`）
 
-- loader `--net-addr 127.x.y.z`（必须在 127.128.0.0/9 里）与 `--net-peers FILE`，子 loader 收到同样的参数；payload ABI 27。
+- loader `--net-addr 127.x.y.z`（必须在 127.128.0.0/9 里）与 `--net-peers FILE`，子 loader 收到同样的参数（payload ABI 27 时引入）。
 - **bind**：通配地址与 127.0.0.1 改成容器自己的地址；绑池里别的地址 EADDRNOTAVAIL。
 - **connect/sendto/sendmsg**：127.0.0.1 与通配地址是容器自己（与网络命名空间里的 localhost 相同）；127.127.0.1
   是宿主的 127.0.0.1（`--add-host X:host-gateway` 写的就是它）；池里的地址只有自己的或 peers 文件里列出的才连，否则

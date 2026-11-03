@@ -1,6 +1,6 @@
 # 架构说明
 
-当前版本的总览（2026-11-01，payload ABI 27）。各子系统的设计与验收在专门文档里：隔离模式
+当前版本的总览（2026-11-01，payload ABI 28）。各子系统的设计与验收在专门文档里：隔离模式
 [ISOLATION.md](ISOLATION.md)、Docker/OCI [OCI.md](OCI.md)、agent 启动器 `tools/agent_sandbox/README.md`，
 当前状态与已知限制 [STATUS.md](STATUS.md) 开头的“当前版本”一节。
 

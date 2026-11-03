@@ -26,7 +26,7 @@
 |---|---|---|
 | R1 层镜像展开不越过受保护子树 | T-R1-01 至 T-R1-09 | — |
 | R2 构建上下文不读上下文外的文件 | T-R2-01 至 T-R2-08 | — |
-| R3 启动器不把继承的 FD 交给 guest | T-R3-01、T-R3-03 | T-R3-02（行为待定） |
+| R3 启动器不把继承的 FD 交给 guest | T-R3-01 至 T-R3-03 | — |
 | R4 `commit --pause` 真正暂停、唯一所有者、失败即恢复 | T-R4-01 至 T-R4-16 | — |
 | R5 监视进程失效后主进程组不残留 | T-R5-01、T-R5-02 | — |
 
@@ -140,25 +140,35 @@
 - 宿主后置：`protected` 的快照不变。
 - 修复前：59c7dd9 的 loader 在竞争变体下每组有 26–34 次成功（静态与对照用例照常通过）。
 
-### T-R1-09 宿主侧 `erofs.py` 的完成标记与 chmod（已有）
+### T-R1-09 宿主侧 `erofs.py` 与 `lazy_layer.c` 同输入同结果（已有）
 
-- 用例：`test/oci/run.py` 的 `host expansion: a link at the completion marker makes nothing through it` 与
-  `host expansion: links put at the marker and the temporary name change nothing outside`（不需要容器）。
-- 对应修复：`erofs._make_marker` 与 `_chmod_made`。这条路径由 `docker cp`、guestfs、`--cow` 的宿主读取
-  触发，以宿主身份执行。
-- 前置：镜像目录 `d` 含 100 个子目录；已展开缓存根；树外 `secret/` 内有模式 0600 的哨兵。
-- 操作：
-  - (a) 在 `d` 的标记位置预先放一个指向 `secret/created-by-marker` 的链接，然后调用 `erofs.expand`。
-  - (b) 宿主线程不停把临时名换成指向哨兵的链接、在标记位置放指向 `secret/created-by-marker` 的链接；同时
-    在本进程内展开 200 次，每次之后清空 `d`。
-- 预期：
-  - (a) 不报错（与 `lazy_layer.c` 相同，已存在的标记，链接也算，表示已完成），`d` 中只有这个链接，没有建出任何
-    条目。原先写的“得到 ELOOP”不对：ELOOP 只在检查之后、创建之前换进链接时出现。
-  - (b) 结果不作要求。
-- 宿主后置：`secret/created-by-marker` 不存在；哨兵的模式、mtime、内容不变。
-- 发现：`erofs.py` 只镜像了标记和 chmod 两项，没有镜像另外两项：`fill` 不核对写入 FD 与加锁 FD 是同一
-  inode，`expand` 用 `os.rename`，不是 `RENAME_NOREPLACE`。宿主侧缓存在存储里，加 `--isolate` 时 guest
-  写不到，所以这不是越界；但与 C 侧不一致，留作后续。
+- 用例：`test/isolation/lazy_parity.py`；以及 `test/oci/run.py` 的 `host expansion: ...` 两项（标记与临时名的
+  链接竞争）。
+- 统一的差异（涉及安全或数据语义，现在两侧一致）：
+  - 改名：`erofs.py` 原先用 `os.rename` 覆盖，现在用 `RENAME_NOREPLACE`。期间出现的同名条目保留，临时名删掉；
+    不支持时退回覆盖，与 C 相同。
+  - 填充的对象身份：写入前核对写入 FD 与加锁 FD 的 (dev, ino)，不符报 EAGAIN。
+  - 短写：继续写完。
+  - 失败清理：新建文件失败时删掉临时名；填充失败时仍恢复占位文件的模式。
+  - 新建目录的 chmod 失败：与 C 一样忽略，条目保留创建时的模式。原先会中止整个展开。
+  - 非法镜像条目：名字含 `/` 或 NUL、符号链接目标为空、过长或含 NUL，都报错（EIO 或 `ImageError`）。原先
+    `erofs.py` 跳过名字，链接则抛出别的异常。
+  - 未改：错误的报告方式（C 返回错误码，`erofs.fill` 遇到链接静默返回）和内部结构。数据结果相同。
+- 同输入对照：同一镜像、同样预设的缓存。C 侧经 broker 的 `BROKER_LAZY_PATH`，Python 侧经 `erofs.expand/fill`。
+  逐条比较类型、模式、大小、内容、链接目标，以及 mtime 是否为镜像时间。
+  1. 全量展开与填充：目录模式 0755、0750，setuid，空文件，多块文件，符号链接，FIFO。
+  2. 完成标记是符号链接：视为已完成，不经它建出任何东西。
+  3. 展开前已存在的名字：保留。
+  4. 占位文件被换成普通文件：不填充。
+  5. 占位文件被换成符号链接：不经它写入。
+  6. 镜像中符号链接目标为空：两侧都报 EIO，不放置该条目。
+- 仅 `erofs.py`，确定性注入（C 侧的同类情形由 `lazy_nested.py` 以竞争方式覆盖）：
+  - 临时名与改名之间出现同名条目：不覆盖，不留临时名。
+  - 检查之后把别的文件改名到占位文件上：不写入，报 EAGAIN。
+  - 每次只写 100 字节：仍写完整个内容。
+  - 新建文件时出错：不留临时名。
+  - 填充出错：占位文件的模式（0444）恢复，仍是占位文件。
+- 修复前：改动前的 `erofs.py` 在空链接目标一项上失败；之后的注入用例依赖新增的 `_place`，在旧版本上直接中断。
 
 ## R2 构建上下文
 
@@ -238,7 +248,8 @@
 
 ## R3 agent 启动器的继承 FD
 
-需求：启动器把 stdio 以外的继承 FD 全部设为 close-on-exec，只有用 `--pass-fd` 显式交出的 FD 到达 guest。
+需求：启动器把 stdio 以外的继承 FD 全部设为 close-on-exec，只有用 `--pass-fd` 显式交出的 FD 到达 guest；交出的
+可写 FD 保持可写；参数在启动前校验。
 来源：R3（59c7dd9）。
 
 ### T-R3-01 留着的 FD 到不了 guest，stdio 和 `--pass-fd` 可以（已有）
@@ -253,26 +264,53 @@
   `LEFT-OPEN-SECRET`。
 - 宿主后置：`target` 内容仍为 `unchanged`。
 
-### T-R3-02 `--pass-fd` 的参数处理（待补，行为待定）
+### T-R3-02 `--pass-fd` 的参数处理（已有）
 
-- 位置：`test/agent_sandbox/test_launch.py`。
-- 现状：`launch.py` 不校验，未打开的 FD 和负数都被静默忽略，0–2 与重复值无影响。
-- 待定：未打开的 FD 是否应报错（建议报错，以免调用者误以为已交出）。定下后用例固定该行为。
-- 操作：`--pass-fd` 分别给未打开的 FD、负数、0–2、重复值。
-- 预期：按定下的行为；无论如何，stdio 始终保留，其他未列出的 FD 始终被关闭。
+- 用例：`agent_launch.py` 的 `--pass-fd refuses negative, unopened and runtime-reserved FDs before starting;
+  repeats count once`。
+- 行为（已定）：`--pass-fd` 是显式授权，启动前校验全部指定的 FD。负数、未打开的 FD、与运行时保留 FD 冲突的
+  编号（898 及以上：loader FD、控制套接字、broker 通道、挂载表、属主数据库）都明确拒绝；重复指定去重；0–2
+  可以指定。loader 自己的 `--pass-fd` 也做同样的检查。
+- 操作：
+  - 启动器分别给 `-1`、刚关闭的 FD、`898`、`901`，命令为 `echo started`。
+  - `--pass-fd 1 --pass-fd 1 --pass-fd 2 --print`。
+  - 直接运行 loader，`--pass-fd` 分别给未打开的 FD 和 `899`。
+- 预期：
+  - 前四种退出码 2，报 `not an FD number`、`not an open FD` 或 `runtime's own`，guest 没有启动（输出中没有
+    `started`）。
+  - `--print` 打出的 loader 参数里 `--pass-fd` 恰好两个。
+  - loader 以非 0 退出，报同样的原因。
 
-### T-R3-03 交出的 pipe 写端在两种后端下都写不了（已有）
+### T-R3-03 交出的 FD 保留原有能力，经 payload 与直接调用一致（已有）
 
-- 用例：`agent_launch.py` 的 `a pipe write end given with --pass-fd is not written by the guest under either
-  backend`。
-- 依据更正：原先写的“进程内被拒、broker 后端可写”不成立。实测两种后端都拒绝：guarded payload 在两种后端下
-  都执行文件守卫，守卫对继承或导入的对象一律拒绝输出（[STATUS](STATUS.md)：pipe 只由 `--allow-pipe-output`
-  授权，而它只覆盖 guest 自己用 `pipe2` 建的 pipe）。`--pass-fd` 只保证 FD 保持打开；读继承的流由
-  `--allow-stream-input` 放行（T-R3-01 的读端）。
-- 操作：用 `--pass-fd` 交出一个 pipe 的写端，guest 执行 `echo written-<后端> >&N`。
-- 预期：退出码非 0，stderr 含 `Permission denied`。
-- 宿主后置：父进程关闭自己的写端后，从读端读到空。
-- 待定：如果希望 `--pass-fd` 交出的写端可用，需要给守卫加“显式交出的 FD”授权，这属于新的设计。
+- 用例：
+  - `test/isolation/pass_fd.py`：`a passed {append,read-only,directory} FD: write, read and listing as its
+    access mode allows, the same through the payload and directly`、`... chmod refused`、`an inherited FD not
+    passed is not writable through the payload`、`host: the append file holds exactly the two writes ...`。
+    `--isolate` 与进程内两种后端各一遍。
+  - `agent_launch.py`：`writable FDs given with --pass-fd stay writable under both backends; a read-only one
+    does not`。
+- 行为（已定）：
+  - `--pass-fd` 表示保留该 FD 原有能力：只读仍只读，可写仍可写，不隐式升级。
+  - 它是路径策略之外的授权：读、写、列表、锁、共享映射按 FD 的访问方式由内核决定，经 payload 与直接系统调用
+    结果相同。
+  - 改元数据（fchmod、fchown、xattr、utimensat）不属于 FD 能力，两种路径都拒绝。
+  - 降权需要独立选项，或由调用方预先处理。
+  - 实现：loader 在启动时记下对象（dev、ino）和访问标志，子 loader 经 `--passed-fds` 继承；每个进程启动时，
+    对象与标志都相符的 FD 获得本地能力位 `passed`。它和 pipe 授权一样不进交接快照，之后在同一编号打开的别的
+    对象不算。
+- 前置（`pass_fd.py`）：上下文外的三个对象，各以 `--pass-fd` 交出：以 `O_APPEND` 写方式打开的文件、只读打开
+  的文件、目录。另有一个只继承、未交出的可写 FD。
+- 操作：probe 对每个 FD 依次做一字节写、`pread`、`getdents64`（先 `lseek` 回开头，因为各次运行共用同一个
+  打开文件描述）、把模式设回原值的 `fchmod`，经 payload（`h`）与直接调用（`d`）各一次。
+- 预期：
+  - 追加 FD：写 1、读 EBADF。只读 FD：写 EBADF、读出内容。目录：写 EBADF、读 EISDIR、列表非空。每项 `h` 与
+    `d` 相同。
+  - chmod 经 payload 被拒；`--isolate` 下直接调用也被拒（EPERM）。
+  - 未交出的 FD 经 payload 写入得 EACCES。
+- 宿主后置：追加文件恰为两次写入的 `xx`；只读文件内容不变；三个对象的模式不变。
+- 修正过程：一开始只放行了写，目录列表经 payload 被过滤、直接调用却能列出；共享映射与锁也有同样的差异。现在
+  这些操作对交出的 FD 一律按内核结果。
 
 ## R4 `commit --pause`
 
@@ -406,9 +444,6 @@ pid 的进程组。来源：R5（59c7dd9）。
 
 ## 剩余事项
 
-- **T-R3-02**：`--pass-fd` 遇到未打开的 FD 时是否报错，需要先定行为。
-- **T-R3-03 引出的设计问题**：`--pass-fd` 交出的写端在两种后端下都写不了。如果需要可写，守卫要新增“显式
-  交出的 FD”授权。
 - **T-R1-05**：用例只约束结果，修复前的 loader 也能通过（窗口只有一个系统调用）。
-- **`erofs.py` 与 C 侧不一致**（T-R1-09）：宿主侧 `fill` 不核对写入 FD 与加锁 FD 是同一 inode；`expand`
-  改名时会覆盖已有条目（没有用 `RENAME_NOREPLACE`）。
+- **只继承、未用 `--pass-fd` 列出的 FD**：直接使用 loader 时，经 payload 写入被拒，`--isolate` 下直接调用却
+  可以写（过滤器不区分 FD）。这是 [ISOLATION](ISOLATION.md) 记录的残余，启动器默认关闭这些 FD。

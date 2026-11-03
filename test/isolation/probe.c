@@ -13,6 +13,7 @@
  *                                    N: "ready", a line read from stdin, then sent N
  *                                    times, "lazy-rc RC COUNT" per result
  *   probe h   lazypath HOST OP [N]   a forged BROKER_LAZY_PATH: HOST inside a --lower cache
+ *   probe h|d fdcalls N              write, pread, getdents64 and fchmod on FD N
  *   probe h   reopen PATH            O_PATH open, then reopen by /proc/self/fd/N and by a
  *                                    forged magic-link request; each listed from the svc
  *   probe h|d mkdir|unlink|rmdir|chmod|chown|utime|truncate|setxattr PATH
@@ -574,6 +575,21 @@ static void lazy_forged(long nr, const char *image, const char *cache, const cha
     for (int k = 0; k < kinds; k++) printf("lazy-rc %ld %ld\n", rcs[k], counts[k]);
 }
 
+/* Calls on an FD the probe was given (--pass-fd or just inherited): a
+ * one-byte write, a read, a listing and a chmod to its own mode, each
+ * reported. */
+static void fd_ops(int fd)
+{
+    char buf[4096];
+    report("fd-write", sc(__NR_write, fd, (long)"x", 1, 0, 0, 0));
+    report("fd-read", sc(__NR_pread64, fd, (long)buf, 64, 0, 0, 0));
+    via(__NR_lseek, fd, 0, 0 /* SEEK_SET */, 0, 0, 0);   /* (the description is shared across runs) */
+    report("fd-list", sc(__NR_getdents64, fd, (long)buf, sizeof(buf), 0, 0, 0) > 0);
+    struct stat st;   /* (the mode it has: allowed or not, nothing changes) */
+    long rc = via(__NR_fstat, fd, (long)&st, 0, 0, 0, 0);
+    report("fd-chmod", rc < 0 ? rc : sc(__NR_fchmod, fd, st.st_mode & 07777, 0, 0, 0, 0));
+}
+
 static void after_broker_gone(const char *path)
 {
     struct stat st;
@@ -807,6 +823,7 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "reopen")) reopen(p);
     else if (!strcmp(op, "lazy") && argc > 6)
         lazy_forged(BROKER_LAZY_MOUNT, p, q, argv[5], atol(argv[6]), argc > 7 ? atol(argv[7]) : 0);
+    else if (!strcmp(op, "fdcalls") && p) fd_ops(atoi(p));
     else if (!strcmp(op, "lazypath") && argc > 4)
         lazy_forged(BROKER_LAZY_PATH, 0, 0, p, atol(q), argc > 5 ? atol(argv[5]) : 0);
     else if (!strcmp(op, "exec")) {

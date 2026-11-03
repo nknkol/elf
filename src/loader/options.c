@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Command line: options end at "--" or at the first non-option, which is
  * the program to run. Every invalid option is fatal. */
+#include <asm/unistd.h>
 #include "loader.h"
 
 static int is(const char *arg, const char *name)
@@ -61,8 +62,81 @@ static void add_bind(payload_config_t *cfg, const char *spec)
 }
 
 #ifdef GUARDED
+static int pass_fd_given, passed_fds_given;
+
+/* --pass-fd N: the object open at N now (refused when N is not open or a
+ * number the runtime holds); repeats of a number count once. */
+static void pass_fd(payload_config_t *cfg, const char *v)
+{
+	unsigned long n = number(v, 2147483647ul, "--pass-fd value (an open FD number)");
+	if (n >= CONFIG_RESERVED_FD_MIN)
+		z_errx(1, "--pass-fd %s: FDs from %d up are the runtime's own", v, CONFIG_RESERVED_FD_MIN);
+	for (int k = 0; k < cfg->passed_count; k++)
+		if (cfg->passed[k].fd == (int32_t)n)
+			return;
+	struct stat st;
+	long flags = z_syscall(__NR_fcntl, (long)n, 3 /* F_GETFL */, 0, 0, 0, 0);
+	if (flags < 0 || z_syscall(__NR_fstat, (long)n, (long)&st, 0, 0, 0, 0) < 0)
+		z_errx(1, "--pass-fd %s: not an open FD", v);
+	if (cfg->passed_count >= CONFIG_MAX_PASSED_FDS)
+		z_errx(1, "too many --pass-fd (at most %d)", CONFIG_MAX_PASSED_FDS);
+	struct passed_fd *p = &cfg->passed[cfg->passed_count++];
+	p->fd = (int32_t)n;
+	p->flags = (uint32_t)flags & (3u /* O_ACCMODE */ | 02000u /* O_APPEND */);
+	p->dev = st.st_dev;
+	p->ino = st.st_ino;
+}
+
+static const char *u64_field(const char *s, char end, uint64_t *out)
+{
+	uint64_t v = 0;
+	const char *start = s;
+	while (*s >= '0' && *s <= '9') {
+		if (v > (~0ull - (uint64_t)(*s - '0')) / 10)
+			return 0;
+		v = v * 10 + (uint64_t)(*s++ - '0');
+	}
+	if (s == start || *s != end)
+		return 0;
+	*out = v;
+	return s;
+}
+
+/* --passed-fds FD:FLAGS:DEV:INO,...: the initial loader's records. */
+static void passed_fds(payload_config_t *cfg, const char *s)
+{
+	for (;;) {
+		uint64_t f[4];
+		const char *p = s;
+		for (int k = 0; k < 4 && p; k++) {
+			char end = k < 3 ? ':' : (z_strchr(p, ',') ? ',' : 0);
+			p = u64_field(p, end, &f[k]);
+			if (p && k < 3)
+				p++;
+		}
+		if (!p || f[0] >= CONFIG_RESERVED_FD_MIN || cfg->passed_count >= CONFIG_MAX_PASSED_FDS)
+			z_errx(1, "invalid passed fds");
+		cfg->passed[cfg->passed_count++] = (struct passed_fd){(int32_t)f[0], (uint32_t)f[1], f[2], f[3]};
+		if (!*p)
+			return;
+		s = p + 1;
+	}
+}
+
 static int guarded_option(const char *arg, payload_config_t *cfg, int argc, char **argv, int *i)
 {
+	if (is(arg, "--pass-fd")) {
+		pass_fd_given = 1;
+		pass_fd(cfg, value(argc, argv, i));
+		return 1;
+	}
+	if (is(arg, CONFIG_CHILD_PASSED_FDS)) {
+		if (passed_fds_given)
+			z_errx(1, "duplicate passed fds");
+		passed_fds_given = 1;
+		passed_fds(cfg, value(argc, argv, i));
+		return 1;
+	}
 	if (is(arg, "--observe-mount-access") || is(arg, "--guard-path-mutations") ||
 	    is(arg, "--guard-file-mutations") || is(arg, "--guard-file-access")) {
 		if (cfg->mount_access_observe[0])
@@ -124,6 +198,12 @@ static void check_guarded(const payload_config_t *cfg, const struct loader_optio
 		z_errx(1, "stream input requires file access guard");
 	if (cfg->fd_state >= 0 && !opt->child)
 		z_errx(1, "fd state requires child loader");
+	if (pass_fd_given && opt->child)
+		z_errx(1, "--pass-fd is for the initial loader (child loaders get passed fds)");
+	if (passed_fds_given && !opt->child)
+		z_errx(1, "passed fds require child loader");
+	if (cfg->passed_count && cfg->guard < GUARD_FILES)
+		z_errx(1, "--pass-fd requires file mutation guard");
 	if (opt->exec_interp && (!opt->child || cfg->guard != GUARD_READS))
 		z_errx(1, "exec interpreter requires file access child loader");
 }

@@ -120,7 +120,32 @@ def prepare_state(compiled):
 BACKENDS = {'isolate': 'isolate-broker', 'in-process': 'experimental-file-access-guard'}
 
 
-def command_line(compiled, root, loader, workdir, command, env, backend='isolate'):
+# FDs from this number up are the runtime's own (src/payload/include/config.h
+# CONFIG_RESERVED_FD_MIN): the loader FD, the control socket, the broker
+# channels, the mount table and the owner database.
+RESERVED_FD_MIN = 898
+
+
+def checked_pass_fds(values):
+    """--pass-fd values, checked before anything starts: each is an explicit
+    grant, so a negative number, one not open, or one the runtime holds is
+    refused rather than ignored; repeats count once."""
+    out = []
+    for fd in values:
+        if fd < 0:
+            raise ValueError(f'--pass-fd {fd}: not an FD number')
+        if fd >= RESERVED_FD_MIN:
+            raise ValueError(f'--pass-fd {fd}: FDs from {RESERVED_FD_MIN} up are the runtime\'s own')
+        try:
+            os.fstat(fd)
+        except OSError:
+            raise ValueError(f'--pass-fd {fd}: not an open FD') from None
+        if fd not in out:
+            out.append(fd)
+    return out
+
+
+def command_line(compiled, root, loader, workdir, command, env, backend='isolate', pass_fds=()):
     if len(compiled['mounts']) > MAX_BINDS:
         raise ProfileError(f'Backend supports at most {MAX_BINDS} mounts; profile has '
                            f'{len(compiled["mounts"])}')
@@ -143,6 +168,8 @@ def command_line(compiled, root, loader, workdir, command, env, backend='isolate
         vector += 'r' if mount['access'] == 'ro' else 'w'
     argv += ['--guard-file-access', vector, '--allow-stdio-output', '--allow-pipe-output',
              '--allow-local-output', '--allow-stream-input', '--revalidate-file-fds']
+    for fd in pass_fds:   # (writable to the guest as opened; the loader records each object)
+        argv += ['--pass-fd', str(fd)]
     for entry in env:
         argv += ['-e', entry]
     return argv + ['--', f'./{HELPER}', workdir, command[0], *command]
@@ -159,7 +186,8 @@ def main():
     parser.add_argument('--cwd', help='Guest working directory (default: /workspace target)')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE')
     parser.add_argument('--pass-fd', type=int, action='append', default=[], metavar='N',
-                        help='Keep inherited FD N open for the guest (stdio 0-2 always are)')
+                        help='Hand inherited FD N to the guest, writable if opened for writing '
+                             '(stdio 0-2 are always kept); N must be open and below 898')
     parser.add_argument('--backend', choices=sorted(BACKENDS), default='isolate',
                         help='isolate (default): seccomp filter + broker; in-process: the guard only')
     parser.add_argument('--print', action='store_true', help='Print the launch as JSON instead of running it')
@@ -171,6 +199,10 @@ def main():
     split = argv.index('--')
     args = parser.parse_args(argv[:split])
     command = argv[split + 1:]
+    try:
+        pass_fds = checked_pass_fds(args.pass_fd)
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         profile = json.loads(args.profile.read_text())
         compiled = plan.compile_profile(profile, brew_prefix=args.brew_prefix,
@@ -184,19 +216,19 @@ def main():
         helper = verified_backend(loader)
         if args.print:
             root = Path(compiled['state']) / 'root'
-            argv = command_line(compiled, root, loader, workdir, command, env, args.backend)
+            argv = command_line(compiled, root, loader, workdir, command, env, args.backend, pass_fds)
             print(json.dumps(dict(compiled, enforcement=BACKENDS[args.backend],
                                   argv=argv), indent=2))
             return
         root = prepare_state(compiled)
-        argv = command_line(compiled, root, loader, workdir, command, env, args.backend)
+        argv = command_line(compiled, root, loader, workdir, command, env, args.backend, pass_fds)
         shutil.copy2(helper, root / HELPER)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     # The loader enters the root itself; the helper path is relative to it.
     os.chdir(root)
     sys.stdout.flush()
-    close_inherited({0, 1, 2, *args.pass_fd})
+    close_inherited({0, 1, 2, *pass_fds})
     os.execv(argv[0], argv)
 
 

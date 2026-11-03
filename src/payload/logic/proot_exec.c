@@ -25,7 +25,7 @@
 /* Script levels the kernel follows (exec_binprm allows five rewrites
  * before ELOOP): the script plus four script interpreters. */
 #define SCRIPT_DEPTH 5
-#define CHAIN_EXTRA (76 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2 + CONFIG_MAX_LOWERS * 4)
+#define CHAIN_EXTRA (78 + SCRIPT_DEPTH * 2 + CONFIG_MAX_BINDS * 2 + CONFIG_MAX_LOWERS * 4)
 #define CHAIN_ARGS (EXEC_ARGS + CHAIN_EXTRA)
 #define S_IFMT 0170000
 #define S_IFREG 0100000
@@ -54,6 +54,7 @@ typedef struct {
     char net_addr[16];
 #ifdef GUARDED
     char fd_state[24];
+    char passed_fds[CONFIG_MAX_PASSED_FDS * 64];
 #endif
     /* PT_INTERP as stored in the target, then its resolution in guest terms
      * (file access guard, isolation mode). */
@@ -75,6 +76,19 @@ static void fd_name(char *out, const char *prefix, int fd)
     while (count) *out++ = digits[--count];
     *out = 0;
 }
+
+#ifdef GUARDED
+static char *append_u64(char *out, uint64_t value, char end)
+{
+    char digits[21];
+    int count = 0;
+    do { digits[count++] = (char)('0' + value % 10); value /= 10; } while (value);
+    while (count) *out++ = digits[--count];
+    if (end) *out++ = end;
+    *out = 0;
+    return out;
+}
+#endif
 
 /* execve's permission check (execute for the real ids), from the file's
  * metadata: no round trip to the broker for an access(X_OK). */
@@ -612,6 +626,18 @@ long proot_execve_context(long number, long a[6], const struct proot_path_contex
     if (cfg->allow_local_output)s->argv[pos++] = "--allow-local-output";
     if (cfg->allow_stdio_output)s->argv[pos++] = "--allow-stdio-output";
     if (cfg->allow_stream_input)s->argv[pos++] = "--allow-stream-input";
+    if (cfg->passed_count) {
+        char *out = s->passed_fds;
+        for (int k = 0; k < cfg->passed_count; k++) {
+            const struct passed_fd *f = &cfg->passed[k];
+            out = append_u64(out, (uint32_t)f->fd, ':');
+            out = append_u64(out, f->flags, ':');
+            out = append_u64(out, f->dev, ':');
+            out = append_u64(out, f->ino, k + 1 < cfg->passed_count ? ',' : 0);
+        }
+        s->argv[pos++] = CONFIG_CHILD_PASSED_FDS;
+        s->argv[pos++] = s->passed_fds;
+    }
     transport = fd_runtime_export();
     if (transport < 0) { ret = transport; goto done; }
     unsigned value = (unsigned)transport;

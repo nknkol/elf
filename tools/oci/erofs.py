@@ -571,6 +571,36 @@ def _make_marker(fd):
     raise OSError(errno.EAGAIN, 'the cache marker keeps changing')
 
 
+_RENAMEAT2 = {'aarch64': 276, 'arm64': 276, 'x86_64': 316}.get(os.uname().machine)
+
+
+def _place(fd, name):
+    """TMP's final rename to name, never over a name that appeared
+    meanwhile: whoever made it wins, TMP goes (lazy_layer.c place_child).
+    Storage or a kernel without RENAME_NOREPLACE replaces."""
+    err = errno.ENOSYS
+    if _RENAMEAT2 is not None:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        rc = libc.syscall(_RENAMEAT2, fd, os.fsencode(TMP), fd, os.fsencode(name), 1)   # RENAME_NOREPLACE
+        err = 0 if rc == 0 else ctypes.get_errno()
+    if err in (errno.EINVAL, errno.ENOSYS):
+        os.rename(TMP, name, src_dir_fd=fd, dst_dir_fd=fd)
+    elif err == errno.EEXIST:
+        _remove_tmp(fd)
+    elif err:
+        raise OSError(err, os.strerror(err), name)
+
+
+def _remove_tmp(fd):
+    for remove in (lambda: os.unlink(TMP, dir_fd=fd), lambda: os.rmdir(TMP, dir_fd=fd)):
+        try:
+            remove()
+            return
+        except OSError:
+            pass
+
+
 def _chmod_made(fd, name, kind, mode):
     """chmod of a name just made, never through a link put there since."""
     f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC |
@@ -597,15 +627,12 @@ def expand(image, cache, rel=''):
             fcntl.flock(fd, fcntl.LOCK_EX)
             if _exists(MARKER, fd):
                 return
-            for remove in (lambda: os.unlink(TMP, dir_fd=fd), lambda: os.rmdir(TMP, dir_fd=fd)):
-                try:
-                    remove()
-                    break
-                except OSError:
-                    pass
+            _remove_tmp(fd)   # a leftover of an interrupted expansion
             for name, nid in img.entries(ino):
-                if name in (b'.', b'..') or b'/' in name or b'\0' in name:
+                if name in (b'.', b'..'):
                     continue
+                if b'/' in name or b'\0' in name:
+                    raise ImageError(f'{rel}: an entry name with "/" or NUL')
                 child = os.fsdecode(name)
                 if child.startswith(OWN_PREFIX) or _exists(child, fd):
                     continue
@@ -613,9 +640,15 @@ def expand(image, cache, rel=''):
                 kind, perm = stat.S_IFMT(c.mode), c.mode & 0o7777
                 if kind == stat.S_IFDIR:
                     os.mkdir(TMP, 0o700, dir_fd=fd)
-                    _chmod_made(fd, TMP, stat.S_IFDIR, perm | 0o700)
+                    try:   # (a failure leaves the mode it was made with, as lazy_layer.c)
+                        _chmod_made(fd, TMP, stat.S_IFDIR, perm | 0o700)
+                    except OSError:
+                        pass
                 elif kind == stat.S_IFLNK:
-                    os.symlink(img.read(c), TMP, dir_fd=fd)
+                    target = img.read(c)
+                    if not target or len(target) >= 4096 or b'\0' in target:
+                        raise ImageError(f'{rel}/{child}: an invalid symlink target')
+                    os.symlink(target, TMP, dir_fd=fd)
                 elif kind == stat.S_IFIFO:
                     # No content to complete, so made at its own name (some
                     # storage, HarmonyOS app storage, refuses to rename one).
@@ -643,9 +676,12 @@ def expand(image, cache, rel=''):
                         os.utime(f, ns=_times(c, bool(c.size)))
                         if c.size and not placeholder(os.fstat(f)):
                             raise OSError('the cache file system does not keep the placeholder mark')
-                    finally:
+                    except BaseException:
                         os.close(f)
-                    os.rename(TMP, child, src_dir_fd=fd, dst_dir_fd=fd)
+                        _remove_tmp(fd)
+                        raise
+                    os.close(f)
+                    _place(fd, child)
                     continue
                 else:
                     continue
@@ -653,7 +689,7 @@ def expand(image, cache, rel=''):
                     os.utime(TMP, ns=_times(c), dir_fd=fd, follow_symlinks=False)
                 except OSError:
                     pass
-                os.rename(TMP, child, src_dir_fd=fd, dst_dir_fd=fd)
+                _place(fd, child)
             _make_marker(fd)
             if parts:
                 os.utime(fd, ns=_times(ino))
@@ -684,17 +720,30 @@ def fill(image, cache, rel):
                 mode = stat.S_IMODE(st.st_mode)
                 if not mode & 0o200:
                     os.fchmod(fd, mode | 0o200)
-                out = os.open(parts[-1], os.O_WRONLY | os.O_NOFOLLOW, dir_fd=dfd)
                 try:
-                    for pos in range(0, ino.size, 1 << 20):
-                        data = img.read(ino, pos, min(1 << 20, ino.size - pos))
-                        os.pwrite(out, data, pos)
+                    out = os.open(parts[-1], os.O_WRONLY | os.O_NOFOLLOW, dir_fd=dfd)
+                    try:
+                        # The very file checked and locked (not one renamed in since).
+                        ost = os.fstat(out)
+                        if (ost.st_dev, ost.st_ino) != (st.st_dev, st.st_ino):
+                            raise OSError(errno.EAGAIN, f'{rel} changed while being filled')
+                        for pos in range(0, ino.size, 1 << 20):
+                            data = memoryview(img.read(ino, pos, min(1 << 20, ino.size - pos)))
+                            done = 0
+                            while done < len(data):   # (a short write goes on)
+                                k = os.pwrite(out, data[done:], pos + done)
+                                if k <= 0:
+                                    raise OSError(errno.EIO, f'{rel}: no progress writing')
+                                done += k
+                    finally:
+                        os.close(out)
                 finally:
-                    os.close(out)
-                try:
-                    os.fchmod(fd, ino.mode & 0o7777)
-                except PermissionError:
-                    os.fchmod(fd, ino.mode & 0o7777 & ~0o6000)
+                    # A write clears setuid bits; the mode as the placeholder
+                    # had it, whatever happened (lazy_layer.c fill_at).
+                    try:
+                        os.fchmod(fd, ino.mode & 0o7777)
+                    except PermissionError:
+                        os.fchmod(fd, ino.mode & 0o7777 & ~0o6000)
                 os.utime(fd, ns=_times(ino))
         finally:
             os.close(fd)

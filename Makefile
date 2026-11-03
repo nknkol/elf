@@ -80,6 +80,8 @@ check-isolation: build
 	$(PYTHON) test/isolation/device.py
 	$(PYTHON) test/isolation/traverse.py
 	$(PYTHON) test/isolation/lazy_nested.py
+	$(PYTHON) test/isolation/pass_fd.py
+	$(PYTHON) test/isolation/lazy_parity.py
 check-guarded: build
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py

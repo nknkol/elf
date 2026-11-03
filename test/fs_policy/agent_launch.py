@@ -135,20 +135,54 @@ with tempfile.TemporaryDirectory(prefix='agent-launch-', dir=build) as tmp:
     b.close()
     print('PASS: FDs the caller left open do not reach the guest; stdio and --pass-fd do')
 
-    # The write end of a pipe given with --pass-fd stays open but is not
-    # writable under either backend: the guard refuses output to inherited
-    # objects (--allow-pipe-output covers pipes the guest makes with pipe2).
+    # Writable FDs given with --pass-fd stay writable under both backends:
+    # a pipe write end (written by a builtin and, through stdout, by an
+    # executed program) and a file outside every mount opened for append.
+    # The same file opened read-only and passed is not writable.
     for backend in ('isolate', 'in-process'):
         out_r, out_w = os.pipe()
+        log = outside / f'passed-{backend}.log'
+        log.write_text('start\n')
+        appender = os.open(log, os.O_WRONLY | os.O_APPEND)
+        reader = os.open(log, os.O_RDONLY)
+        script = (f'echo builtin-{backend} >&{out_w}; printf "exec-{backend}\\n" | cat >&{out_w}; '
+                  f'echo appended >&{appender}; '
+                  f'echo refused 2>/dev/null >&{reader} && echo read-only-written || echo read-only-refused')
         p = subprocess.run(['python3', str(launch), *common, '--backend', backend, '--pass-fd', str(out_w),
-                            '--', '/bin/sh', '-c', f'echo written-{backend} >&{out_w}'],
-                           capture_output=True, text=True, timeout=60, pass_fds=[out_w])
-        os.close(out_w)
+                            '--pass-fd', str(appender), '--pass-fd', str(reader), '--pass-fd', str(out_w),
+                            '--', '/bin/sh', '-c', script],
+                           capture_output=True, text=True, timeout=60, pass_fds=[out_w, appender, reader])
+        for fd in (out_w, appender, reader):
+            os.close(fd)
         with os.fdopen(out_r, 'rb') as f:
             got = f.read()
-        assert p.returncode != 0 and got == b'' and 'Permission denied' in p.stderr, \
-            (backend, p.returncode, got, p.stderr)
-    print('PASS: a pipe write end given with --pass-fd is not written by the guest under either backend')
+        assert p.returncode == 0 and got == f'builtin-{backend}\nexec-{backend}\n'.encode(), \
+            (backend, p.returncode, got, p.stdout, p.stderr)
+        assert log.read_text() == 'start\nappended\n' and 'read-only-refused' in p.stdout, \
+            (backend, log.read_text(), p.stdout, p.stderr)
+    print('PASS: writable FDs given with --pass-fd stay writable under both backends; a read-only one does not')
+
+    # --pass-fd is checked before anything starts: a negative number, an FD
+    # that is not open, and one the runtime holds are refused; repeats and
+    # stdio are accepted.
+    closed = os.open('/dev/null', os.O_RDONLY)
+    os.close(closed)
+    for value, why in (('-1', 'not an FD number'), (str(closed), 'not an open FD'),
+                       ('898', "runtime's own"), ('901', "runtime's own")):
+        p = run(*common, '--pass-fd', value, '--', '/bin/sh', '-c', 'echo started')
+        assert p.returncode == 2 and why in p.stderr and 'started' not in p.stdout, (value, p.returncode, p.stderr)
+    p = run(*common, '--pass-fd', '1', '--pass-fd', '1', '--pass-fd', '2', '--print', '--',
+            '/bin/sh', '-c', 'true')
+    printed = json.loads(p.stdout)['argv']
+    assert p.returncode == 0 and printed.count('--pass-fd') == 2, (p.returncode, p.stderr, printed)
+    # The loader itself refuses the same (it records the object at start).
+    loader_cmd = [str(build / 'elfloader-guarded'), '--mode', 'container', '--root', str(alpine),
+                  '--guard-file-mutations', 'w']
+    for value, why in ((str(closed), 'not an open FD'), ('899', "runtime's own")):
+        p = subprocess.run([*loader_cmd, '--pass-fd', value, '--', '/bin/true'], capture_output=True,
+                           text=True, timeout=60)
+        assert p.returncode != 0 and why in p.stderr, (value, p.returncode, p.stderr)
+    print('PASS: --pass-fd refuses negative, unopened and runtime-reserved FDs before starting; repeats count once')
 
     many = dict(json.loads(profile.read_text()))
     # 8 mounts used; 57 more exceed the 64-mount backend limit.

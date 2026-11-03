@@ -302,14 +302,25 @@ guest 视图里的设备路径必须翻译成同一宿主路径：compat 模式�
 - 从宿主继承来的数据报 UNIX 套接字（可向任意路径名发送）。
 - 继承来的 FD：直接用 loader 时，调用者留给它的每个 FD 都是显式交给 guest 的能力，过滤器放行 FD 上的数据操作，
   broker 不检查它们；调用者要么关掉，要么就是有意给出。agent 启动器默认把 stdio 以外的继承 FD 设为 close-on-exec，
-  只保留 `--pass-fd N` 列出的（`test/fs_policy/agent_launch.py` 验收）。
+  只保留 `--pass-fd N` 列出的（`test/fs_policy/agent_launch.py` 验收）。`--pass-fd` 也是 loader 选项（guarded 构建）。
+  **显式交出的 FD 是路径策略之外的授权能力**：保留该 FD 原有的能力，只读仍只读，可写仍可写，不隐式升级。经 payload 的
+  调用与直接系统调用结果一致：读、写、pread/pwrite、ftruncate、sendfile/splice、目录列表、锁、共享映射，都按 FD 的
+  访问方式由内核决定。改元数据（fchmod、fchown、xattr、utimensat）不属于 FD 能力，两种路径都拒绝（`--isolate` 下过滤器
+  本来就拒绝这些直接调用）。以它为基准解析路径（openat、fchdir 之后的相对路径）仍走路径策略。若要降权，需要独立的选项，
+  或由调用方预先处理，例如以只读方式重新打开后再交出。初始 loader 在启动时记下该 FD 指向的对象（dev、ino）和访问标志，
+  子 loader 经 `--passed-fds` 收到同样的记录。每个进程启动时，在记录的编号和 stdio 上找对象与标志都相符的 FD，给它
+  这项授权；之后在同一编号打开的别的对象不算，dup 出来的副本（如交给被执行程序的 stdout）算。启动器在启动前校验：
+  负数、未打开、898 及以上（运行时自己的 FD）都拒绝启动，重复的编号只算一次。验收：`test/isolation/pass_fd.py`
+  （同一组 FD 经 payload 与直接调用的对照，两种后端）、`test/fs_policy/agent_launch.py`。只是继承、没有用 `--pass-fd`
+  列出的 FD 仍按原规则：经 payload 写入被拒；`--isolate` 下直接调用可以写，这是上面"继承来的 FD"一条所说的残余，
+  启动器因此默认关闭它们。
 - broker 代为展开层镜像缓存（`BROKER_LAZY_MOUNT` 与下层缓存）时，检查做在展开实际打开的对象上：缓存根打开后，
   其中只要有别的访问（`r`、`d`、glue、loader 文件）的树就拒绝（可写的缓存根不代表所有后代可写）；之后逐级打开的每个
   目录、要填充的文件，都在用它的 FD 继续之前比较 (dev, ino)，等于受保护树的根（或文件树本身）就拒绝。受保护子树只能
   经它的根进入，检查与使用是同一个 FD，所以检查之后才移进缓存的目录在遍历遇到它时被拒绝。新建条目的 chmod 先以
   `O_NOFOLLOW` 打开并核对类型（不跟随期间换进来的链接），改名用 `RENAME_NOREPLACE`（存储不支持时退回覆盖）；完成标记
   `.wh..elf-lazy` 以 `O_EXCL|O_NOFOLLOW` 独占创建，已存在时必须是普通文件，否则 ELOOP（宿主侧 `erofs.py` 同样）；填充时写入
-  的文件须与加锁检查的是同一 inode。验收（`test/isolation/lazy_nested.py`）：静态嵌套布局；以及一个含受保护子树的
+  的文件须与加锁检查的是同一 inode。宿主侧 `erofs.py` 在这些点上（不跟随链接、对象身份、不覆盖改名、完成标记、短写、失败清理、非法条目）与 C 一致，同一组输入两侧结果相同（`test/isolation/lazy_parity.py`）。验收（`test/isolation/lazy_nested.py`）：静态嵌套布局；以及一个含受保护子树的
   可写目录在 guest 就绪后被反复移进移出缓存，同时伪造 400 次展开与填充请求——没有一次成功、受保护子树不变
   （59c7dd9 的 loader 在同一用例下有 28–50 次成功并改写了子树）。另有用例在反复展开含 300 个条目的目录时，把完成标记换成指向
   树外路径的链接：树外路径从未被创建（4d74389 的 loader 会经链接在树外建出文件）。

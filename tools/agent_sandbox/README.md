@@ -22,12 +22,20 @@
   under the broker backend; the program goes on.
 - Inherited FDs: every FD the caller left open other than stdio is closed
   on exec (an open FD needs no path, so no policy would see its use);
-  `--pass-fd N` keeps one, as an explicit grant. The in-process guard still
-  applies its own rules to a kept FD (reading an inherited stream is
-  allowed, writing is not); under the broker backend the guest can use it
-  directly.
+  `--pass-fd N` keeps one. A passed FD is a grant outside the path policy:
+  it keeps exactly its own capability (read-only stays read-only, writable
+  stays writable, nothing is upgraded), the same through the payload as by
+  a direct call, under both backends: reads, writes, listings, locks and
+  shared mappings as its access mode allows; metadata changes (chmod,
+  chown, xattr, times) are not FD capabilities and are refused either way.
+  To hand over less, reopen it with less access before passing it. The
+  loader records each passed object (dev, ino, access flags) at start, so
+  whatever a guest later opens at that number is no grant; a dup of it
+  (stdout of a program the guest runs, say) is. N is checked first: a
+  negative number, an FD that is not open, or one from 898 up (the
+  runtime's own) refuses the launch; repeats count once.
 - Limits: 64 mounts (private ones included), 512 environment entries,
-  255-byte paths and entries, no ":" in paths; payload ABI 27.
+  255-byte paths and entries, no ":" in paths; payload ABI 28.
 - Neither backend is a complete hostile-agent guarantee: kernel bugs,
   resource exhaustion, same-uid processes, network and the other residual
   risks in docs/ISOLATION.md remain.

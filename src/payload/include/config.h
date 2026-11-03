@@ -76,6 +76,21 @@
  * the root, topmost first (--lower DIR, repeated); the root is the upper.
  * --lower-image IMAGE makes the preceding lower the cache of a layer image. */
 #define CONFIG_MAX_LOWERS 8
+/* FDs the runtime holds: the loader FD (898), the isolation control
+ * socket (899 up), the broker channels (900 up), the mount table (901) and
+ * the owner database (902). --pass-fd refuses these numbers. */
+#define CONFIG_RESERVED_FD_MIN 898
+/* --pass-fd N (guarded build): an inherited FD the caller hands to the
+ * guest, writable when it was opened for writing. Known by its object
+ * (dev, ino) and its access flags, taken by the initial loader, so a later
+ * FD at that number is no grant; child loaders get --passed-fds. */
+#define CONFIG_MAX_PASSED_FDS 16
+#define CONFIG_CHILD_PASSED_FDS "--passed-fds"
+struct passed_fd {
+    int32_t fd;
+    uint32_t flags;  /* O_ACCMODE | O_APPEND as opened */
+    uint64_t dev, ino;
+};
 
 struct bind_entry {
     char src[CONFIG_MAX_PATH];
@@ -166,6 +181,9 @@ typedef struct payload_config {
      * order; 0: sockets as they are) and its peers file. */
     uint32_t net_addr;
     char net_peers[CONFIG_MAX_PATH];
+    /* --pass-fd (guarded build). */
+    int32_t passed_count;
+    struct passed_fd passed[CONFIG_MAX_PASSED_FDS];
     uint64_t guest_auxv_bytes;
     uint64_t guest_auxv[CONFIG_AUXV_PAIRS * 2];
 } payload_config_t;

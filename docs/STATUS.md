@@ -1,6 +1,6 @@
 # 当前进度与验收快照
 
-## 当前版本（2026-11-01，分支 `feat/fexecve`，payload ABI 27）
+## 当前版本（2026-11-01，分支 `feat/fexecve`，payload ABI 28）
 
 本节是唯一的当前状态说明；下面“历史增量”按时间记录每次改动，其中的 ABI 号、容量与“尚未接入”等描述
 只代表当时。架构总览见 [ARCHITECTURE.md](ARCHITECTURE.md)。
@@ -15,9 +15,10 @@
 | agent 启动器 `tools/agent_sandbox/launch.py` | 默认 `--backend isolate`（broker）；`--backend in-process` 为进程内 guard。两种后端视图一致 |
 | Docker/OCI `tools/oci/` | R1–R6 与 compose 网络、副本已实现（[OCI.md](OCI.md)）；宿主侧 Python，容器运行期间监视进程与 `-p` 转发器常驻 |
 
-**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-02）：`make check` 282、`make check-guarded` 173、
-`make check-isolation` 255（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑）、
-`make check-oci` 216（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18，
+**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-03）：`make check` 282、`make check-guarded` 175、
+`make check-isolation` 300（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑；含
+`pass_fd.py`、`lazy_parity.py`）、`make check-oci` 232（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18
+（2026-11-02），
 `test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过。
 本轮审查修复（R1–R5 及后续竞争与异常修复）的用例映射与待补项见 [REVIEW_FIX_TESTS.md](REVIEW_FIX_TESTS.md)。
 
@@ -29,7 +30,7 @@
 - 自己 setsid 换了进程组的进程不随容器停止（主进程与 exec 都是）。
 - util-linux 的 `mount -o loop` 挂载成功但更新 utab 得到 EPERM、退出码 1（BusyBox 正常）。
 - `docker` 命令依赖宿主 python3（harmonybrew）；loader 本身不依赖。
-- 直接使用 loader 时，调用者留下的继承 FD 是显式交给 guest 的能力（agent 启动器默认关闭，`--pass-fd` 保留）。
+- 直接使用 loader 时，调用者留下的继承 FD 是显式交给 guest 的能力（agent 启动器默认关闭，`--pass-fd` 保留；交出的 FD 保留原有能力，不升级，经 payload 与直接调用一致，参数在启动前校验）。
 
 **维护风险**
 

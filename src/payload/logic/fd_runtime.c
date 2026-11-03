@@ -286,6 +286,46 @@ static int admit_stdio_output(struct fd_runtime *s)
     }
     return 0;
 }
+/* --pass-fd: an FD on the very object the initial loader recorded (dev,
+ * ino) with the same access flags is the caller's grant: the FD's own
+ * capability (what its access mode allows), outside the path policy, as a
+ * direct call on it has. Looked for at the recorded numbers and at stdio;
+ * anything else at those numbers (a later open) is not. */
+static int admit_passed_fds(struct fd_runtime *s)
+{
+    if(!g_payload_config.passed_count || g_payload_config.guard < GUARD_FILES)return 0;
+    struct fd_table *table=fd_registry_table(&s->registry,s->owner);
+    int candidates[CONFIG_MAX_PASSED_FDS + 3], count=0;
+    for(int fd=0;fd<=2;fd++)candidates[count++]=fd;
+    for(int k=0;k<g_payload_config.passed_count && k<CONFIG_MAX_PASSED_FDS;k++) {
+        int fd=g_payload_config.passed[k].fd, seen=0;
+        for(int j=0;j<count;j++)seen|=candidates[j]==fd;
+        if(!seen)candidates[count++]=fd;
+    }
+    for(int j=0;j<count;j++) {
+        int fd=candidates[j];
+        struct stat st;
+        if(raw_syscall(__NR_fstat,fd,(long)&st,0,0,0,0)<0)continue;
+        long flags=raw_syscall(__NR_fcntl,fd,F_GETFL,0,0,0,0);
+        long descriptor=raw_syscall(__NR_fcntl,fd,F_GETFD,0,0,0,0);
+        if(flags<0 || descriptor<0 || (flags&O_PATH))continue;
+        int match=0;
+        for(int k=0;k<g_payload_config.passed_count && k<CONFIG_MAX_PASSED_FDS && !match;k++) {
+            const struct passed_fd *p=&g_payload_config.passed[k];
+            match=p->dev==(uint64_t)st.st_dev && p->ino==(uint64_t)st.st_ino &&
+                  p->flags==((uint32_t)flags&(O_ACCMODE|O_APPEND));
+        }
+        if(!match)continue;
+        const struct fd_record *r=fd_table_get(table,fd);
+        if(!(fd>=1 && fd<=2 && r && r->description && r->description==s->stdio_output[fd-1])) {
+            int rc=fd_table_open(table,fd,(struct fd_origin){0,FD_ACCESS_UNKNOWN},!!(descriptor&FD_CLOEXEC));
+            if(rc)return rc;
+        }
+        int rc=fd_table_grant_passed(table,fd);
+        if(rc)return rc;
+    }
+    return 0;
+}
 static int start(struct fd_runtime *s)
 {
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
@@ -335,6 +375,7 @@ static int start(struct fd_runtime *s)
         if(!proot_revalidate_cwd(&cwd))s->cwd=cwd;
     }
     int admission=admit_stdio_output(s);
+    if(!admission)admission=admit_passed_fds(s);
     if(admission) {
         s->init_error=admission;
         __atomic_store_n(&s->initialized,3,__ATOMIC_RELEASE);
@@ -442,6 +483,11 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
     if(r && r->local_writer)return 0;
     if((n==__NR_write || n==__NR_writev) && r && r->description &&
        (r->description==s->stdio_output[0] || r->description==s->stdio_output[1]))return 0;
+    /* --pass-fd: writes through the caller's FD, as its access mode allows
+     * (metadata changes are not FD capabilities: the guest filter refuses
+     * them as direct calls too). */
+    if(r && r->passed && n!=__NR_fchmod && n!=__NR_fchown &&
+       n!=__NR_fsetxattr && n!=__NR_fremovexattr && n!=__NR_utimensat && n!=__NR_fchownat)return 0;
     if(g_payload_config.allow_pipe_output && r && r->pipe_writer &&
        (n==__NR_write || n==__NR_writev || n==__NR_sendfile || n==__NR_splice ||
         n==__NR_tee || n==__NR_vmsplice || n==__NR_copy_file_range))return 0;
@@ -456,7 +502,7 @@ static int check_fd_mutation(struct fd_table *t, struct fd_runtime *s, long n, l
 static int check_fd_read(struct fd_table *t, int fd)
 {
     const struct fd_record *r=fd_table_get(t,fd);
-    if(r && r->stream_reader)return 0;
+    if(r && (r->stream_reader || r->passed))return 0;
     if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
         return mount_decision(r->origin.mount_id,true,FS_OBSERVE);
     struct stat st;
@@ -519,6 +565,7 @@ static int check_fcntl(struct fd_table *t, long a[6])
         return -EOPNOTSUPP;
     }
     const struct fd_record *r=fd_table_get(t,(int)a[0]);
+    if(r && r->passed)return 0; /* (locks and hints on the caller's FD) */
     return mount_decision(r?r->origin.mount_id:0,
                           r && r->origin.access!=FD_ACCESS_UNKNOWN,operation);
 }
@@ -610,7 +657,7 @@ static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, lo
         if(!(a[3]&MAP_ANONYMOUS) && type!=MAP_PRIVATE) {
             const struct fd_record *r=fd_table_get(t,(int)a[4]);
             /* A local memfd has no mount backing; the kernel refuses sockets. */
-            rc=r && r->local_writer ? 0 : mount_decision(r?r->origin.mount_id:0,
+            rc=r && (r->local_writer || r->passed) ? 0 : mount_decision(r?r->origin.mount_id:0,
                              r && r->origin.access!=FD_ACCESS_UNKNOWN,FS_MUTATE);
             if(rc)return rc;
             /* The legacy executable-file fallback produces an anonymous copy,
@@ -879,6 +926,7 @@ long fd_runtime_dispatch(long n,long a[6])
     }
     if(n==__NR_getdents64 && g_payload_config.guard == GUARD_READS) {
         const struct fd_record *r=fd_table_get(t,(int)a[0]);
+        if(r && r->passed) { unlock(s);return dispatch_syscall(n,a); } /* the caller's directory */
         struct proot_open_origin anchor={0,false};
         if(r && r->origin.access!=FD_ACCESS_UNKNOWN)
             anchor=(struct proot_open_origin){r->origin.mount_id,true};
