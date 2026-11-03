@@ -17,8 +17,7 @@
 
 **验收基线**（HarmonyOS 真机 HAD-W32，2026-11-03）：`make check` 282、`make check-guarded` 175、
 `make check-isolation` 300（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑；含
-`pass_fd.py`、`lazy_parity.py`）、`make check-oci` 232（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18
-（2026-11-02），
+`pass_fd.py`、`lazy_parity.py`）、`make check-oci` 232（含宿主与 payload 合并视图的对照用例）、alpine/ubuntu 各 18/18，
 `test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过。
 本轮审查修复（R1–R5 及后续竞争与异常修复）的用例映射与待补项见 [REVIEW_FIX_TESTS.md](REVIEW_FIX_TESTS.md)。
 
