@@ -70,9 +70,21 @@ static inline bool net_peer_in(const char *text, unsigned long n, uint32_t ip)
 bool net_enabled(void);
 
 /* bind, connect, sendto or sendmsg of fd to the address name/length:
- * 0 with out and out_length to use instead (or the same address), or
- * -errno. out holds 128 bytes. */
+ * 0 with out and out_length to use instead (or the same address), 1 the
+ * same for the bind of a v6-only socket to :: or ::1, or -errno. out holds
+ * 128 bytes. */
 long net_address(long number, long fd, const void *name, unsigned length, void *out, unsigned *out_length);
+
+/* The bind net_address returned 1 for failed with rc (EADDRINUSE): the
+ * container's IPv6 is its IPv4 address, where the port is taken, normally
+ * by the container's own IPv4 socket on the same port (servers listen on
+ * both, `*` and `::` v6-only: redis, nginx). That socket already gets what
+ * would come over IPv6, so this one is put aside: v6-only on the host's
+ * ::1, a port of the kernel's choice, where the container's own traffic
+ * never goes. 0, or rc when even that fails. getsockname shows that
+ * address, not ::. The other order (v6-only first, then IPv4 on the same
+ * port) is still EADDRINUSE for the IPv4 bind. */
+long net_v6only_aside(long fd, long rc);
 
 /* An address the kernel gave the guest (getsockname, getpeername, accept,
  * recvfrom, recvmsg): ports of pool addresses shown as the guest's. */

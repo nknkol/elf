@@ -117,14 +117,27 @@ clone_entry:
     restore_gprs
     add sp, sp, #(CLONE_CTX + 32)
     svc #0
-    /* Now SP is the parent's original SP or the child's requested new SP. */
+    /* Now SP is the parent's original SP or the child's requested new SP.
+     * The child leaves CLONE_CHILD_KEEP bytes below its SP untouched: as
+     * after a kernel clone, what the program put there before the call is
+     * still there (Go's runtime.clone reads m, g, fn and a magic word from
+     * just below the new stack). */
+    cbnz x0, 1f
+    sub sp, sp, #CLONE_CHILD_KEEP
+1:
     save_clone_context
     mov x1, x0                 /* kernel result */
     mov x0, x9                 /* transaction */
     bl clone_notify_finish
     str x0, [sp, #72]           /* restore original x9 */
+    ldr x2, [sp, #0]            /* kernel result: 0 in the child */
+    cbz x2, child_return
     str x1, [sp, #248]          /* stub continuation */
     return_to_clone_stub (CLONE_CTX - 16)
+child_return:
+    add x1, x1, #(STUB_CLONE_CHILD_RESUME_OFFSET - STUB_CLONE_RESUME_OFFSET)
+    str x1, [sp, #248]
+    return_to_clone_stub CLONE_CTX
 prepare_failed:
     str x0, [sp, #0]
     return_to_clone_stub (CLONE_CTX + 16)

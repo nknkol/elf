@@ -13,8 +13,11 @@ binding another container's address is EADDRNOTAVAIL; 127.0.0.1 is the
 container itself; 127.127.0.1 is the host's 127.0.0.1; the host reaches a
 container's port 80 at 61080, while the guest itself cannot bind or
 connect to 61080 of a pool address (EACCES, ECONNREFUSED: the host ports
-of ports below 1024 are reserved, so the mapping has no collisions). Both builds, plain and with --isolate (the
-broker refuses the non-peer connect and the foreign bind)."""
+of ports below 1024 are reserved, so the mapping has no collisions); a
+server listening on 0.0.0.0 and then, v6-only, on [::] of the same port
+(redis, nginx) gets both binds, and an IPv6 client of the container
+reaches it through the IPv4 socket. Both builds, plain and with --isolate
+(the broker refuses the non-peer connect and the foreign bind)."""
 import json
 import os
 import socket
@@ -83,6 +86,22 @@ except OSError as e:
     out['reserved_bind'] = errno.errorcode[e.errno]
 s.close()
 out['reserved_connect'] = ask(a, 61080)
+# A server on both families, as redis (`* -::*`) and nginx (`listen 80;
+# listen [::]:80;`): IPv4 first, then a v6-only socket on the same port.
+v4 = socket.socket(); v4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+v4.bind(('0.0.0.0', 82)); v4.listen(); v4.settimeout(5)
+v6 = socket.socket(socket.AF_INET6); v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+v6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+try:
+    v6.bind(('::', 82)); v6.listen(); out['v6only_after_v4'] = 'bound'
+except OSError as e:
+    out['v6only_after_v4'] = errno.errorcode[e.errno]
+try:
+    cl = socket.socket(socket.AF_INET6); cl.settimeout(5); cl.connect(('::1', 82))
+    conn, _ = v4.accept(); conn.close(); cl.close(); out['v6_client'] = 'ipv4 server'
+except OSError as e:
+    out['v6_client'] = errno.errorcode.get(e.errno, str(e))
+v4.close(); v6.close()
 print('RESULT ' + json.dumps(out))
 '''
 
@@ -144,6 +163,7 @@ with tempfile.TemporaryDirectory(prefix='net-', dir=lib.mode_capable()) as tmp:
                 assert out['own_name'] == [b, 81] and out['self_peer'] == b, (what, out)
                 assert out['host'][0] == 'host', (what, out['host'])
                 assert out['reserved_bind'] == 'EACCES' and out['reserved_connect'] == 'ECONNREFUSED', (what, out)
+                assert out['v6only_after_v4'] == 'bound' and out['v6_client'] == 'ipv4 server', (what, out)
                 # The host reaches the container's port 80 at 61080 of its address.
                 with socket.create_connection((a, 61080), timeout=5) as s:
                     reply = s.makefile().readline().strip()
@@ -154,6 +174,6 @@ with tempfile.TemporaryDirectory(prefix='net-', dir=lib.mode_capable()) as tmp:
                 for srv in servers:
                     srv.kill()
                     srv.wait()
-            print('PASS: container networks (own address, port 80 twice, peers, refusal, localhost, host alias, reserved ports):',
+            print('PASS: container networks (own address, port 80 twice, peers, refusal, localhost, host alias, reserved ports, v6-only after IPv4):',
                   loader.name, *isolate)
     hs.close()

@@ -8,7 +8,7 @@ SRC := $(addprefix logic/, config.c dispatch.c integrity.c platform.c libc_shim.
 	container_state.c union_view.c lazy_layer.c net_view.c \
 	clone_notify.c proot_bridge.c proot_mounts.c proot_procfs.c proot_exec.c proot_auxv.c) \
 	$(addprefix $(ARCH_DIR)/, entry.S raw_syscall.S syscall_disp.c mini_libc.c \
-	reentry_guard.c stub.c clone_entry.S)
+	reentry_guard.c payload_stack.c stub.c clone_entry.S)
 ifeq ($(GUARDED),1)
 SRC += $(addprefix logic/, vm_write_guard.c fs_policy.c fd_runtime.c fd_snapshot.c \
 	fd_handoff.c fd_receive.c fd_table.c fd_clone.c fd_registry.c fd_guard.c \
@@ -21,7 +21,11 @@ OBJ := $(patsubst %.S,%.o,$(SRC:.c=.o)) \
 CPPFLAGS += -I. -Iinclude -I$(ARCH_DIR) -I$(PROOT_SRC)/src -D_GNU_SOURCE
 # Optimized: this code runs on every intercepted syscall. No strict aliasing:
 # guest buffers and kernel records are reinterpreted in several places.
-CFLAGS := -Wall -O2 -g -fno-strict-aliasing -fPIC -nostdlib -fno-stack-protector -fno-builtin
+# x28 is never used: a signal can arrive while a thread is in the payload,
+# and the guest's handler runs with the registers of that moment; Go's
+# handler takes its g from x28 (arm64), as all its code does.
+CFLAGS := -Wall -O2 -g -fno-strict-aliasing -fPIC -nostdlib -fno-stack-protector -fno-builtin \
+	-ffixed-x28
 
 all: $(TARGET)
 
@@ -38,6 +42,9 @@ proot-build/%.o: $(PROOT_SRC)/src/path/%.c | proot-build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 %.o: %.S
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+# Called by entry.S before it saves the guest's SIMD registers.
+$(ARCH_DIR)/reentry_guard.o $(ARCH_DIR)/payload_stack.o: CFLAGS += -mgeneral-regs-only
 
 $(ARCH_DIR)/entry.o: $(ARCH_DIR)/syscall_nums.h $(ARCH_DIR)/slow_syscalls.inc \
 	$(ARCH_DIR)/fd_runtime_syscalls.inc $(ARCH_DIR)/fd_unsupported_syscalls.inc

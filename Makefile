@@ -50,6 +50,8 @@ check: build
 	$(PYTHON) test/proot/test_union.py
 	$(PYTHON) test/proot/test_loop.py
 	$(PYTHON) test/proot/test_net.py
+	$(PYTHON) test/proot/test_caps.py
+	$(PYTHON) test/proot/test_go_abi.py
 	$(PYTHON) test/proot/test_auxv.py
 	$(PYTHON) test/proot/test_jit.py
 	$(PYTHON) test/syscalls/check_dispatch.py

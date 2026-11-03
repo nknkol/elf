@@ -64,6 +64,14 @@ reentry_leave:
 .global reentry_leave_owned
 reentry_leave_owned:
     ret
+/* No payload stack: the dispatcher runs on the current one. */
+.global payload_stack_claim
+payload_stack_claim:
+    mov x0, #0
+    ret
+.global payload_stack_release
+payload_stack_release:
+    ret
 /* The clone gate (clone_entry.S) is not exercised here. */
 .global clone_entry
 clone_entry:

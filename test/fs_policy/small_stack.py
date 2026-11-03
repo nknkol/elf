@@ -8,7 +8,12 @@ per link and the legacy getdents64 reserved 132 KiB, overflowing such
 stacks. musl's posix_spawn gives its child about 5 KiB (1024 + PATH_MAX,
 part of it for musl's own frame); the guarded build's exec once took 10.8
 KiB of it and overwrote the parent's frame (make lost its stdout). The
-deepest use must stay within 4 KiB, with and without --isolate."""
+guest stack holds only the stub's frame, the saved general registers and,
+in a clone child, the clone path's context; the rest runs on a payload
+stack (a Go goroutine has a few hundred bytes below SP at a call, and the
+next goroutine's stack after them). The deepest use, the vfork child's
+clone return included, must stay within 1280 bytes (1024 measured), with
+and without --isolate."""
 import hashlib
 import json
 import subprocess
@@ -39,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='small-stack-', dir=build) as tmp:
             (work / f'd{count}' / name).symlink_to(previous)
             previous = f'/work/d{count}/{name}'
         chains.append(previous)
-    BUDGET = 4096
+    BUDGET = 1280
     for suffix in ('', '-guarded'):
         loader = lib.loader(suffix)
         for isolate in ([], ['--isolate']):

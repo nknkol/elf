@@ -22,6 +22,29 @@ static uint32_t groups[32];
 static int group_count;
 static int loaded;
 
+/* Capabilities, as Linux gives them to these ids (capabilities(7)), out of
+ * Docker's default set: a root process has them in its permitted and
+ * effective sets, set*id moves them as the kernel would (PR_SET_KEEPCAPS
+ * included), capget/capset and the prctl capability options work on them,
+ * and they decide the privileged set*id, chown and chmod. An exec starts
+ * over from the ids (no file capabilities, no ambient set kept); the
+ * bounding set too. /proc/<pid>/status still shows the real (empty) sets. */
+enum { CAP_CHOWN_ = 0, CAP_FOWNER_ = 3, CAP_SETGID_ = 6, CAP_SETUID_ = 7, CAP_SETPCAP_ = 8, CAP_LAST_ = 40 };
+#define DOCKER_CAPS 0xa80425fbull
+/* Those cleared or raised with the fs uid (capabilities(7)). */
+#define FS_CAPS 0x000000010800021full
+static uint64_t cap_eff, cap_prm, cap_inh, cap_amb, cap_bnd;
+static int keepcaps;
+
+static void caps_from_ids(void)
+{
+    cap_bnd = DOCKER_CAPS;
+    cap_prm = ids[0][REAL] == 0 || ids[0][EFFECTIVE] == 0 ? cap_bnd : 0;
+    cap_eff = ids[0][EFFECTIVE] == 0 ? cap_prm : 0;
+    cap_inh = cap_amb = 0;
+    keepcaps = 0;
+}
+
 static uint32_t *set_of(int group)
 {
     if (!__atomic_load_n(&loaded, __ATOMIC_ACQUIRE)) {
@@ -30,12 +53,30 @@ static uint32_t *set_of(int group)
         group_count = g_payload_config.fake_group_count;
         if (group_count < 0 || group_count > 32) { group_count = 1; groups[0] = 0; }
         for (int i = 0; i < group_count; i++) groups[i] = g_payload_config.fake_groups[i];
+        caps_from_ids();
         __atomic_store_n(&loaded, 1, __ATOMIC_RELEASE);
     }
     return ids[group];
 }
 
-static int privileged(void) { return set_of(0)[EFFECTIVE] == 0; }
+static int capable(int cap) { set_of(0); return (cap_eff >> cap) & 1; }
+/* What changes the set (group 0: uid, 1: gid) needs. */
+static int privileged_for(int group) { return capable(group ? CAP_SETGID_ : CAP_SETUID_); }
+
+/* After a change of the uids from old (r, e, s, fs): the capability sets
+ * as the kernel moves them. */
+static void caps_after_uids(const uint32_t old[4])
+{
+    const uint32_t *now = ids[0];
+    if ((!old[REAL] || !old[EFFECTIVE] || !old[SAVED]) && now[REAL] && now[EFFECTIVE] && now[SAVED]) {
+        if (!keepcaps) cap_prm = 0;
+        cap_eff = cap_amb = 0;
+    }
+    if (!old[EFFECTIVE] && now[EFFECTIVE]) cap_eff = 0;
+    if (old[EFFECTIVE] && !now[EFFECTIVE]) cap_eff = cap_prm;
+    if (!old[FS] && now[FS]) cap_eff &= ~FS_CAPS;
+    if (old[FS] && !now[FS]) cap_eff |= cap_prm & FS_CAPS;
+}
 
 static int member(const uint32_t *set, uint32_t id)
 {
@@ -45,7 +86,7 @@ static int member(const uint32_t *set, uint32_t id)
 static long set_one(int group, uint32_t id)
 {
     uint32_t *set = set_of(group);
-    if (privileged()) {
+    if (privileged_for(group)) {
         set[REAL] = set[EFFECTIVE] = set[SAVED] = set[FS] = id;
     } else if (id == set[REAL] || id == set[SAVED]) {
         set[EFFECTIVE] = set[FS] = id;
@@ -58,7 +99,7 @@ static long set_one(int group, uint32_t id)
 static long set_re(int group, uint32_t real, uint32_t effective)
 {
     uint32_t *set = set_of(group);
-    if (!privileged() &&
+    if (!privileged_for(group) &&
         ((real != KEEP && real != set[REAL] && real != set[EFFECTIVE]) ||
          (effective != KEEP && !member(set, effective))))
         return -EPERM;
@@ -74,7 +115,7 @@ static long set_re(int group, uint32_t real, uint32_t effective)
 static long set_res(int group, uint32_t real, uint32_t effective, uint32_t saved)
 {
     uint32_t *set = set_of(group);
-    if (!privileged() &&
+    if (!privileged_for(group) &&
         ((real != KEEP && !member(set, real)) ||
          (effective != KEEP && !member(set, effective)) ||
          (saved != KEEP && !member(set, saved))))
@@ -101,13 +142,133 @@ static long set_fs(int group, uint32_t id)
     uint32_t *set = set_of(group);
     uint32_t old = set[FS];
     /* Never fails: the previous value is returned either way. */
-    if (privileged() || member(set, id) || id == set[FS]) set[FS] = id;
+    if (privileged_for(group) || member(set, id) || id == set[FS]) set[FS] = id;
     return old;
+}
+
+/* capget/capset: struct __user_cap_header_struct {u32 version; int pid}
+ * and one (version 1) or two {effective, permitted, inheritable} words. */
+#define CAP_V1 0x19980330u
+#define CAP_V2 0x20071026u
+#define CAP_V3 0x20080522u
+static int cap_words(const uint32_t *header)
+{
+    return header[0] == CAP_V1 ? 1 : header[0] == CAP_V2 || header[0] == CAP_V3 ? 2 : 0;
+}
+
+static int cap_self(int pid)
+{
+    return pid == 0 || pid == raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0) ||
+           pid == raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
+}
+
+static long cap_get(long a[6])
+{
+    uint32_t *header = (uint32_t *)a[0];
+    if (!header) return -EFAULT;
+    int words = cap_words(header);
+    if (!words) {
+        header[0] = CAP_V3;
+        return a[1] ? -EINVAL : 0;
+    }
+    if (!a[1]) return 0;
+    if (!cap_self((int)header[1])) return raw_syscall(__NR_capget, a[0], a[1], 0, 0, 0, 0);
+    set_of(0);
+    uint32_t *data = (uint32_t *)a[1];
+    for (int i = 0; i < words; i++) {
+        data[i * 3 + 0] = (uint32_t)(cap_eff >> (32 * i));
+        data[i * 3 + 1] = (uint32_t)(cap_prm >> (32 * i));
+        data[i * 3 + 2] = (uint32_t)(cap_inh >> (32 * i));
+    }
+    return 0;
+}
+
+static long cap_set(long a[6])
+{
+    uint32_t *header = (uint32_t *)a[0];
+    if (!header) return -EFAULT;
+    int words = cap_words(header);
+    if (!words) { header[0] = CAP_V3; return -EINVAL; }
+    if (!cap_self((int)header[1])) return -EPERM;
+    if (!a[1]) return -EFAULT;
+    set_of(0);
+    const uint32_t *data = (const uint32_t *)a[1];
+    uint64_t eff = 0, prm = 0, inh = 0;
+    for (int i = 0; i < words; i++) {
+        eff |= (uint64_t)data[i * 3 + 0] << (32 * i);
+        prm |= (uint64_t)data[i * 3 + 1] << (32 * i);
+        inh |= (uint64_t)data[i * 3 + 2] << (32 * i);
+    }
+    if (words == 1) { /* Version 1 leaves the upper words as they are. */
+        eff |= cap_eff & ~0xffffffffull;
+        prm |= cap_prm & ~0xffffffffull;
+        inh |= cap_inh & ~0xffffffffull;
+    }
+    uint64_t inh_room = cap_inh | (capable(CAP_SETPCAP_) ? cap_bnd : cap_prm);
+    if ((prm & ~cap_prm) || (eff & ~prm) || (inh & ~inh_room) || (inh & ~(cap_inh | cap_bnd)))
+        return -EPERM;
+    cap_eff = eff;
+    cap_prm = prm;
+    cap_inh = inh;
+    cap_amb &= prm & inh;
+    return 0;
+}
+
+/* prctl capability options; 0 when the option is not one of them. */
+static int cap_prctl(long a[6], long *result)
+{
+    unsigned long option = (unsigned long)a[0], arg = (unsigned long)a[1];
+    set_of(0);
+    switch (option) {
+    case 7: /* PR_GET_KEEPCAPS */
+        *result = keepcaps;
+        return 1;
+    case 8: /* PR_SET_KEEPCAPS */
+        if (arg > 1) { *result = -EINVAL; return 1; }
+        keepcaps = (int)arg;
+        *result = 0;
+        return 1;
+    case 23: /* PR_CAPBSET_READ */
+        *result = arg > CAP_LAST_ ? -EINVAL : (long)((cap_bnd >> arg) & 1);
+        return 1;
+    case 24: /* PR_CAPBSET_DROP */
+        if (arg > CAP_LAST_) { *result = -EINVAL; return 1; }
+        if (!capable(CAP_SETPCAP_)) { *result = -EPERM; return 1; }
+        cap_bnd &= ~(1ull << arg);
+        *result = 0;
+        return 1;
+    case 47: { /* PR_CAP_AMBIENT */
+        unsigned long cap = (unsigned long)a[2];
+        if (arg == 4) { cap_amb = 0; *result = 0; return 1; } /* CLEAR_ALL */
+        if (arg < 1 || arg > 3 || cap > CAP_LAST_) { *result = -EINVAL; return 1; }
+        uint64_t bit = 1ull << cap;
+        if (arg == 1) *result = (cap_amb & bit) != 0;            /* IS_SET */
+        else if (arg == 3) { cap_amb &= ~bit; *result = 0; }     /* LOWER */
+        else if (!(cap_prm & bit) || !(cap_inh & bit)) *result = -EPERM;
+        else { cap_amb |= bit; *result = 0; }                    /* RAISE */
+        return 1;
+    }
+    }
+    return 0;
 }
 
 int fake_ids_syscall(long number, long a[6], long *result)
 {
     uint32_t x = (uint32_t)a[0], y = (uint32_t)a[1], z = (uint32_t)a[2];
+    switch (number) {
+    case __NR_capget: *result = cap_get(a); return 1;
+    case __NR_capset: *result = cap_set(a); return 1;
+    case __NR_prctl: return cap_prctl(a, result);
+    case __NR_setuid: case __NR_setreuid: case __NR_setresuid: case __NR_setfsuid: {
+        uint32_t old[4];
+        uint32_t *set = set_of(0);
+        for (int i = 0; i < 4; i++) old[i] = set[i];
+        *result = number == __NR_setuid ? set_one(0, x) : number == __NR_setreuid ? set_re(0, x, y) :
+                  number == __NR_setresuid ? set_res(0, x, y, z) : set_fs(0, x);
+        caps_after_uids(old);
+        return 1;
+    }
+    }
     switch (number) {
     case __NR_getuid: *result = set_of(0)[REAL]; break;
     case __NR_geteuid: *result = set_of(0)[EFFECTIVE]; break;
@@ -115,18 +276,13 @@ int fake_ids_syscall(long number, long a[6], long *result)
     case __NR_getegid: *result = set_of(1)[EFFECTIVE]; break;
     case __NR_getresuid: *result = get_res(0, a); break;
     case __NR_getresgid: *result = get_res(1, a); break;
-    case __NR_setuid: *result = set_one(0, x); break;
     case __NR_setgid: *result = set_one(1, x); break;
-    case __NR_setreuid: *result = set_re(0, x, y); break;
     case __NR_setregid: *result = set_re(1, x, y); break;
-    case __NR_setresuid: *result = set_res(0, x, y, z); break;
     case __NR_setresgid: *result = set_res(1, x, y, z); break;
-    case __NR_setfsuid: *result = set_fs(0, x); break;
     case __NR_setfsgid: *result = set_fs(1, x); break;
     case __NR_setgroups: {
         size_t size = (size_t)(int)a[0];
-        set_of(0);
-        if (!privileged()) { *result = -EPERM; break; }
+        if (!privileged_for(1)) { *result = -EPERM; break; }
         if ((long)(int)a[0] < 0 || size > 32) { *result = -EINVAL; break; }
         if (size && !a[1]) { *result = -EFAULT; break; }
         for (size_t i = 0; i < size; i++) groups[i] = ((const uint32_t *)a[1])[i];
@@ -149,7 +305,7 @@ int fake_ids_syscall(long number, long a[6], long *result)
     return 1;
 }
 
-int fake_ids_privileged(void) { return privileged(); }
+int fake_ids_capable(int cap) { return capable(cap); }
 
 uint32_t fake_ids_owner(int group) { return set_of(group)[SAVED]; }
 uint32_t fake_ids_effective(int group) { return set_of(group)[EFFECTIVE]; }

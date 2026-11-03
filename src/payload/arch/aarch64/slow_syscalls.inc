@@ -450,3 +450,9 @@ SLOW_SYSCALL(__NR_file_setattr)
 /* --kernel-release/--kernel-sysname rewrite the result. */
 SLOW_SYSCALL(__NR_uname)
 #endif
+#ifdef __NR_capget
+SLOW_SYSCALL(__NR_capget)
+#endif
+#ifdef __NR_capset
+SLOW_SYSCALL(__NR_capset)
+#endif

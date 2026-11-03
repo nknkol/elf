@@ -15,10 +15,11 @@
 | agent 启动器 `tools/agent_sandbox/launch.py` | 默认 `--backend isolate`（broker）；`--backend in-process` 为进程内 guard。两种后端视图一致 |
 | Docker/OCI `tools/oci/` | R1–R6 与 compose 网络、副本已实现（[OCI.md](OCI.md)）；宿主侧 Python，容器运行期间监视进程与 `-p` 转发器常驻 |
 
-**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-03）：`make check` 282、`make check-guarded` 175、
+**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-03）：`make check` 290（含 `test_go_abi.py`、`test_caps.py`）、`make check-guarded` 175、
 `make check-isolation` 300（`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑；含
 `pass_fd.py`、`lazy_parity.py`）、`make check-oci` 232（含宿主与 payload 合并视图的对照用例；把 `ELF_LOADER`/`ELF_LOADER_GUARDED` 指向加 `--isolate` 再 exec 的包装脚本，让全部容器都进隔离后同样 232 通过）、alpine/ubuntu 各 18/18（常规与 `ELF_LOADER_OPTIONS=--isolate` 下都跑），
-`test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过。
+`test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过；真实镜像（`test/oci/images.py`）redis、golang、busybox
+在常规、`--isolate` 与直接 elfloader 下通过。
 本轮审查修复（R1–R5 及后续竞争与异常修复）的用例映射与待补项见 [REVIEW_FIX_TESTS.md](REVIEW_FIX_TESTS.md)。
 
 **已知限制**
@@ -26,7 +27,9 @@
 - `--isolate` 的剩余风险：内核漏洞、资源耗尽（无 cgroup）、侧信道、同 uid 进程与系统服务、网络（见 ISOLATION.md）。
 - UDP（无连接的 sendto）不经 broker 检查；容器网络在不加 `--isolate` 时只是视图。
 - broker 拒绝数据报 UNIX 套接字：HarmonyOS hilog 在 broker 后端下报错但程序继续。
-- 自己 setsid 换了进程组的进程不随容器停止（主进程与 exec 都是）。
+- 自己 setsid 换了进程组的进程不随容器停止（主进程与 exec 都是）。守护化的服务（`nginx`、`redis --daemonize`）在
+  `docker run --rm` 结束后仍占着容器地址上的端口，之后分到同一地址的容器 bind 得到 EADDRINUSE。
+- nginx 起不了 worker：HarmonyOS 的套接字不支持 FIOASYNC/O_ASYNC（原生同样 ENOTTY/EINVAL），没有模拟。
 - util-linux 的 `mount -o loop` 挂载成功但更新 utab 得到 EPERM、退出码 1（BusyBox 正常）。
 - `docker` 命令依赖宿主 python3（harmonybrew）；loader 本身不依赖。
 - 直接使用 loader 时，调用者留下的继承 FD 是显式交给 guest 的能力（agent 启动器默认关闭，`--pass-fd` 保留；交出的 FD 保留原有能力，不升级，经 payload 与直接调用一致，参数在启动前校验）。
@@ -487,3 +490,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-11-01 审查修复三：复制进上层时 tar 里没有条目的父目录也走 COW 目录创建（whiteout 删除的目录补建为不透明）；单文件 bind 的挂载点可经来源 FD 更新内容，只读的拒绝。新增验收：无目录条目的 tar、可写/只读文件 bind。
 2026-11-01 审查修复四：文件 bind 更新先打开源并比较 dev/ino，同一文件（含路径别名）不截断；DirSink 先打开源再替换目标；GuestSink 只按条目实际区域检查写权限，`--read-only` 下的 rw 文件 bind 可更新。新增验收：自身与别名复制、volume 文件复制到自身、只读根配合可写文件 bind。
 2026-11-01 审查修复五：guestfs 两处复制循环与层展开改用 `unpack.write_all`，短写继续写完，不再丢数据仍返回成功。
+2026-11-03 真实镜像 redis、nginx、golang（[OCI](OCI.md)、[ARCHITECTURE](ARCHITECTURE.md)“一次系统调用的路径”）：(1) Go 静态程序（含 `go version`）一启动就崩：loader 的 clone 路径在子进程新栈上保存上下文，覆盖了 Go runtime.clone 放在新栈下方的 m、g、fn 与魔数；桩把 x16/x17/x30 存在 SP 正下方，子进程 gettid 之后再读时已被改写；payload 的 C 代码使用 x28，线程在 payload 里时到达的信号让 Go 的处理器取到错误的 g（“bad g in signal handler”，或在屏蔽全部信号的处理器里再次 SIGSEGV 而直接 core，因此 faultlogger 也没有记录：静态 loader 不经系统 musl 的 processdump）；慢路径在切到 payload 栈之前已用掉约 1 KiB guest 栈（768 字节寄存器与 SIMD 加 C 帧），超出 goroutine 在系统调用处 SP 下方的几百字节，写穿相邻 goroutine 的栈（go build 报 invalid pointer found on stack）。现在桩帧放在 SP 下方 64 字节之外，clone 子进程保留新栈下方 64 字节并经桩里单独的续点返回，payload 以 `-ffixed-x28` 编译，慢路径在 guest 栈上只存通用寄存器，重入检查与 payload 栈认领（`payload_stack.c`，`-mgeneral-regs-only`）之后切栈、再存 SIMD；payload 栈从 8 个增到 64 个、首次使用时映射。vfork 子进程最深用 guest 栈 1 KiB（原 1.4 KiB），`small_stack.py` 上限 4 KiB→1280 字节。(2) redis 的 entrypoint 用 util-linux setpriv 降权：先 setresuid 再靠 PR_SET_KEEPCAPS 与 capset 保留 CAP_SETGID 后 setresgid；payload 原先只按 euid 是否为 0 判断特权、capget/capset 直通内核，setresgid 得到 EPERM。现在 fake 身份带 Docker 默认能力集，set*id 按 capabilities(7) 移动各集合，模拟 capget/capset 与 prctl 的 KEEPCAPS、CAPBSET、CAP_AMBIENT，chown/chmod 按 CAP_CHOWN/CAP_FOWNER 判断。(3) redis 与 nginx 先绑 IPv4、再以 v6-only 绑 `::` 同一端口，映射到容器地址后 EADDRINUSE；现在这种 v6-only 套接字改绑宿主 `::1` 的随机端口（容器内 IPv6 客户端本来就由 IPv4 套接字接收）。另记：HarmonyOS 的 `/tmp` 不支持文件锁（宿主上 flock/lockf 同样 EACCES），Go 的 go.mod 锁要求工程在应用私有存储等支持锁的位置。新增验收 `test/proot/test_go_abi.py`（clone 新栈下方的数据、阻塞在 payload 里时信号处理器看到的 x28）、`test_caps.py`、`test_net.py` 的 v6-only 用例、`images.py` 的 redis/nginx/golang；三个新用例在修改前的构建上失败（x28 一项在旧构建上 3/3 次被改写）。另：nginx:alpine 现在能 bind（`80` 与 `[::]:80`），但 master 给 worker 通道设 FIOASYNC 得到 ENOTTY 后不再创建 worker；HarmonyOS 宿主上原生运行同样 ENOTTY（O_ASYNC 为 EINVAL），未模拟，已从 images.py 移除并记入已知限制。验收：`make check` 290、check-guarded 175、check-isolation 300、check-oci 232、alpine/ubuntu 各 18/18（常规与 `--isolate`），images.py 的 busybox、redis、golang 三种方式通过。

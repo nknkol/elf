@@ -2,6 +2,8 @@
 #include "stub.h"
 
 _Static_assert(PAYLOAD_CLONE_ENTRY_OFFSET == 16 && STUB_CLONE_RESUME_OFFSET == 100 &&
+               STUB_CLONE_CHILD_RESUME_OFFSET == 112 && CLONE_CHILD_KEEP == 64 &&
+               STUB_RED_ZONE == 64 &&
                STUB_DATA_OFFSET == 160, "update clone stub instruction encoding");
 
 static uint32_t make_branch(uintptr_t src, uintptr_t dest)
@@ -24,7 +26,7 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
 		0x540001c0, /* b.eq sigreturn */
 		0x7103711f, /* cmp w8, #0xdc (__NR_clone) */
 		0x54000180, /* b.eq passthrough */
-		0xd10083ff, /* sub sp, sp, #0x20 */
+		0xd10183ff, /* sub sp, sp, #0x60 (frame 0x20 below STUB_RED_ZONE) */
 		0xa90047f0, /* stp x16, x17, [sp] */
 		0xf9000bfe, /* str x30, [sp, #0x10] */
 		0x10000410, /* adr x16, #0xa0 (data) */
@@ -33,7 +35,7 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
 		0xd503249f, /* bti j (return target for BTI: ret is a jump) */
 		0xf9400bfe, /* ldr x30, [sp, #0x10] */
 		0xa94047f0, /* ldp x16, x17, [sp] */
-		0x910083ff, /* add sp, sp, #0x20 */
+		0x910183ff, /* add sp, sp, #0x60 */
 		0x14000000, /* b <return_addr> (patched below) */
 		0xd4000001, /* svc #0 (sigreturn path) */
 		0x14000000, /* b <return_addr> (patched below) */
@@ -78,6 +80,12 @@ uintptr_t stub_emit(void *slot, uintptr_t payload_addr, uintptr_t return_addr)
     code[25] = 0xd503249f; /* bti j */
     code[26] = 0xa8c147f0; /* ldp x16, x17, [sp], #16 */
     code[27] = make_branch((uintptr_t)slot + 27 * 4, return_addr);
+    /* The child's continuation (clone_entry.S): SP is CLONE_CHILD_KEEP
+     * below its new stack, where x16/x17 are; back to the new SP itself. */
+    code[28] = 0xd503249f; /* bti j */
+    code[29] = 0xa8c147f0; /* ldp x16, x17, [sp], #16 */
+    code[30] = 0x9100c3ff; /* add sp, sp, #(CLONE_CHILD_KEEP - 16) */
+    code[31] = make_branch((uintptr_t)slot + 31 * 4, return_addr);
 
 	uint32_t branch = make_branch((uintptr_t)slot + 15 * 4, return_addr);
 	if (branch)

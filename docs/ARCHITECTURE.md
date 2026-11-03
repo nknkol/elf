@@ -43,8 +43,9 @@ loader 与 payload 地址固定，seccomp 兜底与 guest 过滤器才能按地�
 ## 一次系统调用的路径
 
 ```
-guest svc → 桩（stub.c 模板，按 w8 判断 rt_sigreturn/clone）
-  → entry.S（保存寄存器，w8 规范化，快路径透传）
+guest svc → 桩（stub.c 模板，按 w8 判断 rt_sigreturn/clone；帧在 SP 下方 64 字节之外）
+  → entry.S（w8 规范化，快路径透传；慢路径在 guest 栈上只存通用寄存器，
+            重入检查与认领 payload 栈后切过去，SIMD 与之后的 C 帧都在 payload 栈上）
   → syscall_disp.c: syscall_dispatcher
        1. integrity_check   自身完整性：保护区封印、兜底下的 W^X 与 SIGSYS
        2. guarded 构建: fd_runtime_dispatch（FD 来源记录与访问策略）
@@ -52,6 +53,13 @@ guest svc → 桩（stub.c 模板，按 w8 判断 rt_sigreturn/clone）
                             fake_ids、可执行内存补钩、平台不支持的调用、透传
        4. 结果加工          stat 属主、uname、socket 名
 ```
+
+guest 程序对 SP 附近与寄存器的前提照 Linux 保留（Go 运行时全部依赖它们，`test/proot/test_go_abi.py`）：
+- 桩不写 SP 下方 64 字节（`STUB_RED_ZONE`）；clone 子进程的新栈下方同样保留 64 字节（`CLONE_CHILD_KEEP`）：Go 的
+  runtime.clone 把 m、g、fn 与魔数放在那里，子进程先 gettid 再读。
+- guest 栈只放桩帧与通用寄存器（vfork 子进程最深 1 KiB，`small_stack.py` 上限 1280 字节）：goroutine 在系统调用处
+  SP 下方只有几百字节，再往下是别的 goroutine 的栈。payload 栈 64 个、每个 64 KiB，按线程认领、首次用时映射。
+- payload 编译时 `-ffixed-x28`：线程在 payload 里时到达的信号，guest 处理器看到的 x28 仍是 guest 的（Go 的 g）。
 
 ## 目录与模块
 

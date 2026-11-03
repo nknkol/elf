@@ -1040,11 +1040,12 @@ static bool contains_mount(Bridge *b, const char *guest)
     return false;
 }
 
-/* PRoot fake_id0: a fake root may give files away; the kernel's EPERM for
- * the real user is reported as success (ownership itself is unchanged). */
+/* PRoot fake_id0: a fake root (CAP_CHOWN) may give files away; the kernel's
+ * EPERM for the real user is reported as success (ownership itself is
+ * unchanged). */
 static long fake_chown(long ret)
 {
-    return ret == -EPERM && fake_ids_privileged() ? 0 : ret;
+    return ret == -EPERM && fake_ids_capable(0 /* CAP_CHOWN */) ? 0 : ret;
 }
 
 /* --link-copy (opt-in, like PRoot's -l): some storage refuses every hard
@@ -1300,7 +1301,8 @@ static long socket_address(Bridge *b, long number, long a[6])
             return raw_syscall(number, a[0], (long)&b->message, a[2], 0, 0, 0);
         }
         if (sending) return raw_syscall(number, a[0], a[1], a[2], a[3], (long)moved, moved_length);
-        return raw_syscall(number, a[0], (long)moved, moved_length, 0, 0, 0);
+        long done = raw_syscall(number, a[0], (long)moved, moved_length, 0, 0, 0);
+        return done == -EADDRINUSE && rc == 1 ? net_v6only_aside(a[0], done) : done;
     }
     size_t prefix = offsetof(struct sockaddr_un, sun_path);
     if (!name || length <= prefix || length > sizeof(b->address))

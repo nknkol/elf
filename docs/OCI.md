@@ -261,7 +261,10 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
   hostname，逐项对比 guest 内看到的结果；不支持的参数报错且退出码 125。
 - **loader 参数**：`--cwd`、`--user`、`--hostname` 的回归测试（`test/proot/`），常规与 `--isolate` 下通过。
 - **真实镜像**（常规与 `--isolate` 各一遍）：`alpine` 跑 apk add；`debian:bookworm-slim` 跑 apt-get install；
-  `python:3.13-slim` 建 venv 并 pip install；`node:lts-alpine` 跑 npm install；`busybox` 静态程序。
+  `python:3.13-slim` 建 venv 并 pip install；`node:lts-alpine` 跑 npm install；`busybox` 静态程序；
+  `redis:7-alpine` 经自己的 entrypoint（setpriv 降到 redis 用户）启动并读写；`golang:1.23-alpine` 编译、运行、vet
+  一个程序。`nginx:alpine` 能同时监听 `80` 与 `[::]:80`，但起不了 worker：HarmonyOS 的套接字不支持 FIOASYNC
+  （ENOTTY，O_ASYNC 为 EINVAL，宿主上原生运行也一样），nginx 给 worker 通道设 FIOASYNC 失败后放弃创建 worker。
   记录耗时，与同一 rootfs 直接用 elfloader 运行相比不应变慢。
 
 ## R2 管理
@@ -432,6 +435,9 @@ pivot_root、chroot、新挂载 API 同样被拦。payload 现在对 mount、umo
 - **属主**：不加 `--owners` 时所有文件在 guest 中显示为 root（fake_id0），postgres、sshd StrictModes 等会失败或要配置；
   加 `--owners` 见 R5。
 - **特权操作**：iptables、sysctl、modprobe、创建设备节点、真实挂载不能用；需要 `--privileged` 的镜像不行。
+- **能力集**：fake 身份带 Docker 默认能力集（`0xa80425fb`），set*id、PR_SET_KEEPCAPS、capget/capset、bounding 与
+  ambient 的 prctl 按 Linux 规则模拟（`fake_ids.c`），setpriv、su-exec、gosu 这类降权方式可用；`--cap-add`/`--cap-drop`
+  未实现；exec 后按身份重新计算（不保留 ambient 与缩小后的 bounding）；`/proc/<pid>/status` 仍显示真实（空的）能力集。
 - **进程模型**：没有 pid 命名空间，入口程序不是 pid 1；镜像自带的 tini/dumb-init 能 wait 自己的子进程，但收养不了孙进程。
   `exec` 进入的进程看得到宿主的其他进程。
 - **网络**：每个容器一个回环地址，按网络决定互通，`-p` 由转发进程发布（见“网络与副本”）；数据报 UNIX 套接字在
@@ -741,7 +747,11 @@ bind）。所以每个容器分到一个自己的回环地址，相当于有了�
   61000+p（在临时端口范围 32768–60999 之上，不会撞上自动分配的源端口）；getsockname、getpeername、accept、recvfrom、
   recvmsg 返回的地址再换回 p。61001–62023 因此留给映射：guest 在池地址上直接绑这些端口返回 EACCES，连接返回
   ECONNREFUSED，否则 80 与真正的 61080 会落到同一个宿主端口，反向转换也分不清；`-p` 也不接受这段容器端口。
-- **IPv6**：`::` 与 `::1` 当作容器地址，用 IPv4 映射地址（先关 IPV6_V6ONLY）；真正的 IPv6 地址原样。
+- **IPv6**：`::` 与 `::1` 当作容器地址，用 IPv4 映射地址（先关 IPV6_V6ONLY）；真正的 IPv6 地址原样。同时监听两个协议族的
+  服务（redis 的 `* -::*`、nginx 的 `listen 80; listen [::]:80;`）先绑 IPv4、再以 v6-only 绑 `::` 的同一端口：映射后
+  端口已被容器自己的 IPv4 套接字占用，而它本来就收到容器里 IPv6 客户端的连接，所以 v6-only 套接字改绑到宿主 `::1`
+  的随机端口，bind 成功但不会有连接到达（`net_v6only_aside`；getsockname 显示那个地址）。反过来先 v6-only 再 IPv4
+  时，IPv4 的 bind 仍是 EADDRINUSE。
 - **隔离模式**：broker 执行 bind/connect，自己读 peers 文件：绑别的容器的地址 EADDRNOTAVAIL，连不在 peers 里的池地址
   ECONNREFUSED。不加 `--isolate` 时只是视图（guest 直接发系统调用能绕过），与 R4、R5 的约束性质相同。
 

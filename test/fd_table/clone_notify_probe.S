@@ -266,7 +266,12 @@ test_resume:
     bti j
     ldp x16, x17, [sp], #16
     b resume
-    .space 48
+test_child_resume:
+    bti j
+    ldp x16, x17, [sp], #16
+    add sp, sp, #(CLONE_CHILD_KEEP - 16)
+    b resume
+    .space 32
 test_data:
     .xword test_payload
     .xword resume

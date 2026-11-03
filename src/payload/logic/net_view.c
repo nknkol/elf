@@ -127,10 +127,18 @@ long net_address(long number, long fd, const void *name, unsigned length, void *
     }
     uint32_t own = g_payload_config.net_addr;
     bool bind = number == __NR_bind;
+    long v6only = 0;
     if (bind) {
         if (ip == 0 || ip == 0x7f000001u) ip = own;
         else if (net_pool_address(ip) && ip != own) return -EADDRNOTAVAIL;
         if (ip == own && v6) {
+            /* A v6-only socket on :: or ::1 (not an IPv4-mapped name):
+             * the caller may need net_v6only_aside. */
+            int on = 0;
+            unsigned on_length = sizeof(on);
+            if (a6.addr[10] != 0xff &&
+                host_syscall(__NR_getsockopt, fd, IPPROTO_IPV6_, IPV6_V6ONLY_, (long)&on, (long)&on_length, 0) == 0 && on)
+                v6only = 1;
             int off = 0;
             host_syscall(__NR_setsockopt, fd, IPPROTO_IPV6_, IPV6_V6ONLY_, (long)&off, sizeof(off), 0);
         }
@@ -154,7 +162,19 @@ long net_address(long number, long fd, const void *name, unsigned length, void *
         a4.port = be16(port);
         memcpy(out, &a4, 8);
     }
-    return 0;
+    return v6only;
+}
+
+long net_v6only_aside(long fd, long rc)
+{
+    int on = 1;
+    host_syscall(__NR_setsockopt, fd, IPPROTO_IPV6_, IPV6_V6ONLY_, (long)&on, sizeof(on), 0);
+    struct in6 a;
+    memset(&a, 0, sizeof(a));
+    a.family = AF_INET6_;
+    a.addr[15] = 1;
+    long bound = host_syscall(__NR_bind, fd, (long)&a, sizeof(a), 0, 0, 0);
+    return bound < 0 ? rc : 0;
 }
 
 void net_reverse(void *name, unsigned length)

@@ -802,7 +802,7 @@ long owners_chown(const struct stat *st, long uid, long gid)
     uint32_t new_gid = gid == -1 || (uint32_t)gid == 0xffffffffu ? cur_gid : (uint32_t)gid;
     /* Linux: only the owner may change the group (to one of its own); only
      * a privileged caller may give a file away. */
-    if (!fake_ids_privileged() &&
+    if (!fake_ids_capable(0 /* CAP_CHOWN */) &&
         (new_uid != cur_uid || (new_gid != cur_gid && (fake_ids_fs(0) != cur_uid || !in_groups(new_gid)))))
         return -EPERM;
     if (!new_uid && !new_gid)
@@ -812,7 +812,7 @@ long owners_chown(const struct stat *st, long uid, long gid)
 
 long owners_may_chmod(const struct stat *st)
 {
-    if (fake_ids_privileged())
+    if (fake_ids_capable(3 /* CAP_FOWNER */))
         return 0;
     uint32_t uid, gid, mode;
     owners_lookup(st, &uid, &gid, &mode);

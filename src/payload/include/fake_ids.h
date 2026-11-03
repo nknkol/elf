@@ -3,10 +3,11 @@
 
 #include <stdint.h>
 
-/* Handles get*id/set*id/setgroups; returns 1 with *result set, else 0. */
+/* Handles get*id/set*id/setgroups, capget/capset and the prctl capability
+ * options; returns 1 with *result set, else 0. */
 int fake_ids_syscall(long number, long a[6], long *result);
-/* Fake effective uid 0: the kernel's EPERM on chown is reported as success. */
-int fake_ids_privileged(void);
+/* Whether the effective set holds capability cap (CAP_CHOWN 0, CAP_FOWNER 3). */
+int fake_ids_capable(int cap);
 /* Owner reported for the caller's own files (saved uid/gid, as PRoot). */
 uint32_t fake_ids_owner(int group);
 /* Supplementary groups into out; returns their count. */
