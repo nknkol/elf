@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -149,6 +150,24 @@ def tree(root):
                 out[rel] = ('dir',)
             else:
                 out[rel] = ('file', p.read_bytes())
+    return out
+
+
+def meta_tree(root):
+    """{rel: (mode, size, mtime_ns, content or None)} under root, by lstat;
+    content None for what this user cannot read."""
+    out = {}
+    for top, dirs, files in os.walk(root):
+        for name in dirs + files:
+            p = Path(top, name)
+            st = os.lstat(p)
+            data = None
+            if stat.S_ISREG(st.st_mode):
+                try:
+                    data = p.read_bytes()
+                except PermissionError:
+                    pass
+            out[str(p.relative_to(root))] = (st.st_mode, st.st_size, st.st_mtime_ns, data)
     return out
 
 
@@ -543,9 +562,11 @@ def pause_orphan_tests(home, work):
         layer_files = last_layer_files(home, image, ('a', 'b')) if p.returncode == 0 else {}
         p2 = docker(home, 'run', '--rm', image, 'cat /a /b')
         running = proc_stopped(state['Pid'])
-        before = docker(home, 'exec', name, 'cat', '/a').stdout
+        # (/a is truncated before each write: a read may land in between.)
+        count = "for _ in 1 2 3 4 5 6 7 8 9 10; do v=$(cat /a); [ -n \"$v\" ] && break; done; echo $v"
+        before = docker(home, 'exec', name, 'sh', '-c', count).stdout
         time.sleep(0.5)
-        after = docker(home, 'exec', name, 'cat', '/a').stdout
+        after = docker(home, 'exec', name, 'sh', '-c', count).stdout
         check(p.returncode == 0 and layer_files.get('a', '') + layer_files.get('b', '') == p2.stdout and
               running is False and before != after,
               'commit --pause: the layer and the image rootfs agree; the container runs on' + tag,
@@ -581,6 +602,88 @@ def pause_orphan_tests(home, work):
               'a container whose monitor died leaves no job of its process group' + tag,
               [left, p.stdout, group_members(pgid)])
         docker(home, 'rm', '-f', name)
+        # The recorded pid now heads an unrelated process group (its start
+        # time differs): refreshing marks the container exited and leaves
+        # that group alone.
+        name = 'reused' + ('-iso' if mode else '')
+        docker(home, 'run', '-d', *mode, '--name', name, img, 'sleep 300')
+        cid = docker(home, 'inspect', '-f', '{{.Id}}', name).stdout.strip()
+        for _ in range(100):
+            state = json.loads((home / 'containers' / cid / 'run.json').read_text())['State']
+            if state.get('Pid') and state.get('MonitorPid'):
+                break
+            time.sleep(0.05)
+        os.kill(state['MonitorPid'], signal.SIGKILL)
+        try:
+            os.killpg(state['Pid'], signal.SIGKILL)
+        except OSError:
+            pass
+        for _ in range(100):
+            if proc_start(state['Pid']) is None and proc_start(state['MonitorPid']) is None:
+                break
+            time.sleep(0.1)
+        decoy = subprocess.Popen(['sh', '-c', 'sleep 300 & exec sleep 301'], start_new_session=True)
+        for _ in range(100):
+            if len(group_members(decoy.pid)) >= 2:
+                break
+            time.sleep(0.05)
+        decoys = sorted(group_members(decoy.pid))
+        sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+        import store as store_mod
+        st = store_mod.Store(home)
+        with st.lock():
+            record = st.load_container(cid)
+            record['State'].update(Pid=decoy.pid, PidStart=(proc_start(decoy.pid) or 0) + 1,
+                                   MonitorPid=2 ** 22 + 1)
+            st.save_container(record)
+        p = docker(home, 'ps', '-a', '--format', '{{.Names}} {{.State}}')
+        time.sleep(0.3)
+        left = sorted(group_members(decoy.pid))
+        os.killpg(decoy.pid, signal.SIGKILL)
+        decoy.wait()
+        check(f'{name} exited' in p.stdout and len(decoys) == 2 and left == decoys,
+              'a recorded pid now heading another process group: exited, that group is left alone' + tag,
+              [p.stdout, decoys, left])
+        docker(home, 'rm', '-f', name)
+    stopped_threads_tests()
+
+
+def stopped_threads_tests():
+    """runtime.stopped of a group whose one process runs several busy
+    threads: False while they run, True once it is stopped (HongMeng shows
+    every thread 'S', each waiting in its stop wchan), False again after
+    SIGCONT."""
+    sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+    import runtime as runtime_mod
+    busy = subprocess.Popen([sys.executable, '-c', 'import threading\n'
+                             'def spin():\n    while True: pass\n'
+                             'for _ in range(3): threading.Thread(target=spin).start()\n'
+                             'spin()\n'], start_new_session=True)
+
+    def settle(want):
+        for _ in range(100):
+            if runtime_mod.stopped(busy.pid) is want:
+                return want
+            time.sleep(0.05)
+        return runtime_mod.stopped(busy.pid)
+    try:
+        for _ in range(100):
+            if len(os.listdir(f'/proc/{busy.pid}/task')) >= 4:
+                break
+            time.sleep(0.05)
+        threads = len(os.listdir(f'/proc/{busy.pid}/task'))
+        running = runtime_mod.stopped(busy.pid)
+        os.killpg(busy.pid, signal.SIGSTOP)
+        stopped = settle(True)
+        os.killpg(busy.pid, signal.SIGCONT)
+        time.sleep(0.2)
+        again = runtime_mod.stopped(busy.pid)
+    finally:
+        busy.kill()
+        busy.wait()
+    check(threads >= 4 and (running, stopped, again) == (False, True, False),
+          'a stop of a process with busy threads is seen only once every thread stopped',
+          [threads, running, stopped, again])
 
 
 def pause_owner_tests(home, name, tag):
@@ -614,6 +717,35 @@ def pause_owner_tests(home, name, tag):
           running(groups) and paused_state() == (False, None),
           'commit --pause: a second pause is refused and does not continue the first owner\'s' + tag,
           [groups, p.stderr, held, paused_state()])
+    # No exec starts while paused; after the resume one does.
+    execs = st.container_dir(cid) / 'execs.json'
+    before = execs.read_text() if execs.exists() else None
+    resume = runtime_mod.pause(st, cid)
+    p = docker(home, 'exec', name, 'true')
+    added = (execs.read_text() if execs.exists() else None) != before
+    resume()
+    p2 = docker(home, 'exec', name, 'true')
+    check(p.returncode != 0 and 'is paused' in p.stderr and not added and p2.returncode == 0,
+          'commit --pause: an exec while paused is refused and registers nothing' + tag,
+          [p.returncode, p.stderr, added, p2.returncode, p2.stderr])
+    # --pause=false: the files are read while every group runs.
+    seen = []
+    real_commit = build_mod.commit_paused
+
+    def watching(*a):
+        seen.append([proc_stopped(g) for g in groups])
+        return real_commit(*a)
+    build_mod.commit_paused = watching
+    try:
+        build_mod.cmd_commit(st, ['--pause=false', name, 'test/unpaused:1'])
+        error = None
+    except store_mod.StoreError as e:
+        error = str(e)
+    finally:
+        build_mod.commit_paused = real_commit
+    check(error is None and seen == [[False] * len(groups)] and paused_state() == (False, None),
+          'commit --pause=false: nothing stops while the container is read' + tag, [error, seen])
+    docker(home, 'rmi', '-f', 'test/unpaused:1')
     # A group that cannot be stopped, then a stop that never completes: the
     # commit reads nothing, every group continues, the state clears.
     read = []
@@ -626,11 +758,14 @@ def pause_owner_tests(home, name, tag):
             raise PermissionError(1, 'injected')
         return real_killpg(pgid, sig)
 
+    injected = []
+
     def failing_read(suffix):
         # Reading a member's own /proc file fails (not as "gone").
         def read(path):
             parts = str(path).split('/')
             if len(parts) > 2 and parts[2] in members and str(path).endswith(suffix):
+                injected.append(path)
                 raise PermissionError(13, 'injected')
             return real_read(path)
         return read
@@ -656,6 +791,8 @@ def pause_owner_tests(home, name, tag):
                          lambda: setattr(runtime_mod, 'stopped', lambda pgid: raise_(RuntimeError('injected')))),
                         ('an interruption while waiting',
                          lambda: setattr(runtime_mod, 'stopped', lambda pgid: raise_(KeyboardInterrupt())))):
+        read.clear()
+        injected.clear()
         build_mod.commit_paused = lambda *a: read.append(a) or 'x'
         patch()
         try:
@@ -669,6 +806,10 @@ def pause_owner_tests(home, name, tag):
             build_mod.commit_paused, os.killpg, runtime_mod.stopped = real_commit, real_killpg, real_stopped
             runtime_mod.read_proc, runtime_mod.list_proc = real_read, real_list
         time.sleep(0.2)
+        if what.endswith('wchan cannot be read') and not injected and error is None:
+            # Linux shows stopped tasks as T: no wchan is read.
+            print(f'SKIP: commit --pause: {what}: no wchan read here (stopped tasks show T){tag}')
+            continue
         check(error and 'cannot pause' in error and not read and running(groups) and
               paused_state() == (False, None),
               f'commit --pause: {what}: nothing is read, every group continues' + tag,
@@ -784,10 +925,101 @@ def cow_tests(home, work):
     check(p.returncode == 125, '--cow with --read-only is refused', p.stderr)
 
 
+def erofs_host_tests(work):
+    """Expansion on the host (tools/oci/erofs.py, as docker cp, guestfs and
+    --cow reads use it): the completion marker is never made through a link,
+    nor a made directory's mode set through one."""
+    sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+    import errno
+    import erofs
+    image = work / 'host-expand.erofs'
+    w = erofs.Writer(image)
+    try:
+        w.put(['d'], erofs.Node(stat.S_IFDIR | 0o755, mtime=1700000000))
+        for i in range(100):
+            w.put(['d', f's{i:03}'], erofs.Node(stat.S_IFDIR | 0o755, mtime=1700000000))
+        w.finish(1700000000)
+    finally:
+        w.close()
+    cache, secret = work / 'host-cache', work / 'host-secret'
+    cache.mkdir()
+    secret.mkdir()
+    erofs.expand(image, cache, '')
+    d = cache / 'd'
+    marker, tmpname = d / erofs.MARKER, d / erofs.TMP
+    target = secret / 'created-by-marker'
+    # A link already at the marker: taken as there (as lazy_layer.c does),
+    # nothing made through it, its target never made.
+    d.mkdir(exist_ok=True)
+    os.symlink(target, marker)
+    try:
+        erofs.expand(image, cache, 'd')
+        error = None
+    except OSError as e:
+        error = e.errno
+    check(error in (None, errno.ELOOP) and not os.path.lexists(target) and sorted(os.listdir(d)) == [erofs.MARKER],
+          'host expansion: a link at the completion marker makes nothing through it', [error, os.listdir(d)])
+    os.unlink(marker)
+
+    def undo():
+        for n in os.listdir(d):
+            q = d / n
+            try:
+                os.rmdir(q) if q.is_dir() and not q.is_symlink() else os.unlink(q)
+            except OSError:
+                pass
+    # Links put at the marker and at the temporary name while expansions run.
+    sentinel = secret / 'sentinel'
+    sentinel.write_bytes(b'host sentinel\n')
+    os.chmod(sentinel, 0o600)
+    before = os.lstat(sentinel)
+    halt = threading.Event()
+    swaps = [0]
+
+    def planter():
+        while not halt.is_set():
+            for name, to in ((tmpname, sentinel), (marker, target)):
+                try:
+                    if name == tmpname:
+                        os.rmdir(name)
+                    os.symlink(to, name)
+                    swaps[0] += 1
+                except OSError:
+                    pass
+            time.sleep(0.0002)
+            try:
+                if os.path.islink(marker):
+                    os.unlink(marker)
+            except OSError:
+                pass
+    results = {}
+    t = threading.Thread(target=planter)
+    t.start()
+    try:
+        for _ in range(200):
+            try:
+                erofs.expand(image, cache, 'd')
+                key = 0
+            except OSError as e:
+                key = errno.errorcode.get(e.errno, str(e))
+            results[key] = results.get(key, 0) + 1
+            undo()
+    finally:
+        halt.set()
+        t.join()
+    after = os.lstat(sentinel)
+    check(not os.path.lexists(target) and sorted(os.listdir(secret)) == ['sentinel'] and
+          (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns) and
+          sentinel.read_bytes() == b'host sentinel\n',
+          'host expansion: links put at the marker and the temporary name change nothing outside',
+          [results, swaps[0], os.listdir(secret)])
+
+
 def erofs_tests(home, work):
     """R6 layer images: docker image erofs; --cow runs on them (docs/OCI.md)."""
     sys.path.insert(0, str(lib.REPO / 'tools/oci'))
     import erofs
+    erofs_host_tests(work)
     ctx = work / 'erofs-ctx'
     ctx.mkdir()
     lines = ['FROM test/alpine:1', 'USER root', 'WORKDIR /']
@@ -1572,6 +1804,7 @@ def context_link_tests(home, work):
     (outside / 'sentinel').write_text(secret + '\n')
     (outside / 'dir').mkdir()
     (outside / 'dir' / 'f').write_text(secret + '\n')
+    outside_before = meta_tree(outside)
     ctx = work / 'link-ctx'
     ctx.mkdir()
     os.symlink(str(outside), ctx / 'abs')
@@ -1596,8 +1829,9 @@ def context_link_tests(home, work):
             docker(home, 'rmi', '-f', tag)
         if secret in out:
             leaked.append((line, out[-300:]))
-    check(not leaked, 'build: context links never read outside the context (COPY, ADD, directory, '
-          'RUN --mount bind; absolute and relative links)', leaked)
+    check(not leaked and meta_tree(outside) == outside_before,
+          'build: context links never read outside the context (COPY, ADD, directory, '
+          'RUN --mount bind; absolute and relative links); outside unchanged', leaked)
     # A link that stays inside still works, and a final link is copied as a link.
     os.symlink('inside', ctx / 'alias')
     (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nCOPY alias /alias\nCOPY inside /inside\n')
@@ -1638,11 +1872,14 @@ def context_ignore_tests(home, work):
     (ctx / 'app').write_text('app\n')
     (ctx / '.dockerignore').write_text('deps\n!deps/keep\n*.tmp\n')
     (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nCOPY . /ctx/\n')
+    ctx_before = meta_tree(ctx)
     try:
         p = docker(home, 'build', '-t', 'test/ignored:1', str(ctx), timeout=300)
         p2 = docker(home, 'run', '--rm', 'test/ignored:1', 'cd /ctx && find . | sort | tr "\\n" " "')
+        ctx_same = meta_tree(ctx) == ctx_before
     finally:
         os.chmod(ctx / 'deps' / 'big', 0o755)
+    check(ctx_same, 'build: the context is left as it was (names, modes, sizes, times, contents)')
     check(p.returncode == 0 and p2.stdout.split() == ['.', './.dockerignore', './Dockerfile', './app', './deps',
                                                       './deps/keep'],
           'build: ignored files are never read (unreadable ones too); exceptions still apply',
@@ -1659,6 +1896,107 @@ def context_ignore_tests(home, work):
     check(p.returncode == 0 and 'ctx/f' in names and not any(n.startswith('ctx/store') for n in names),
           'build: a store inside the context is not copied into it', [p.stderr[-500:], sorted(names)[:20]])
     shutil.rmtree(store, ignore_errors=True)
+    context_edge_tests(home, work)
+
+
+def context_edge_tests(home, work):
+    """Edges of the context copy: a .dockerignore that is a link or not a
+    regular file, the cache key under exceptions, ** exceptions, and a
+    context changed after the copy."""
+    # .dockerignore a link (to a readable file outside), a directory, a FIFO:
+    # the build stops, without following the link or waiting on the FIFO.
+    target = work / 'outside-ignore'
+    target.write_text('app\n')
+    for kind in ('link', 'directory', 'fifo'):
+        ctx = work / f'ignore-{kind}-ctx'
+        ctx.mkdir()
+        (ctx / 'app').write_text('app\n')
+        (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nCOPY app /app\n')
+        try:
+            if kind == 'link':
+                os.symlink(target, ctx / '.dockerignore')
+            elif kind == 'directory':
+                (ctx / '.dockerignore').mkdir()
+            else:
+                os.mkfifo(ctx / '.dockerignore')
+        except OSError as e:
+            print(f'SKIP: .dockerignore as a {kind}: {e}')
+            continue
+        try:
+            p = docker(home, 'build', '-t', 'test/badignore:1', str(ctx), timeout=120)
+            out, rc = p.stderr, p.returncode
+        except subprocess.TimeoutExpired:
+            out, rc = 'timed out', None
+        check(rc not in (0, None) and 'cannot read .dockerignore' in out,
+              f'build: a .dockerignore that is a {kind} stops the build', [rc, out[-400:]])
+        docker(home, 'rmi', '-f', 'test/badignore:1')
+    # The cache key follows the exceptions: a file an exception brings back
+    # changes it, one left out does not.
+    ctx = work / 'key-ctx'
+    (ctx / 'deps' / 'big').mkdir(parents=True)
+    (ctx / 'deps' / 'keep').write_text('v1\n')
+    (ctx / 'deps' / 'big' / 'x').write_text('x1\n')
+    (ctx / '.dockerignore').write_text('deps\n!deps/keep\n')
+    (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nCOPY . /ctx/\nRUN cat /ctx/deps/keep > /seen\n')
+
+    def build_id():
+        p = docker(home, 'build', '-q', '-t', 'test/keyed:1', str(ctx), timeout=300)
+        return p.stdout.strip() if p.returncode == 0 else p.stderr[-300:]
+    first = build_id()
+    (ctx / 'deps' / 'big' / 'x').write_text('x2, left out\n')
+    left_out = build_id()
+    (ctx / 'deps' / 'keep').write_text('v2\n')
+    brought_back = build_id()
+    seen = docker(home, 'run', '--rm', 'test/keyed:1', 'cat /seen').stdout
+    check(first.startswith('sha256:') and left_out == first and brought_back.startswith('sha256:') and
+          brought_back != first and seen == 'v2\n',
+          'build: the cache key changes with a file an exception brings back, not with one left out',
+          [first, left_out, brought_back, seen])
+    docker(home, 'rmi', '-f', 'test/keyed:1')
+    # ** in an exception: .go files at every depth come back, nothing else
+    # (an unreadable file among the rest is never opened).
+    ctx = work / 'starstar-ctx'
+    (ctx / 'd1' / 'd2').mkdir(parents=True)
+    for d in ('', 'd1/', 'd1/d2/'):
+        (ctx / f'{d}m.go').write_text('go\n')
+        (ctx / f'{d}m.txt').write_text('txt\n')
+    os.chmod(ctx / 'd1' / 'd2' / 'm.txt', 0)
+    (ctx / '.dockerignore').write_text('*\n!**/*.go\n')
+    dockerfile = work / 'Dockerfile.starstar'
+    dockerfile.write_text('FROM test/alpine:1\nCOPY . /ctx/\n')
+    p = docker(home, 'build', '-f', str(dockerfile), '-t', 'test/starstar:1', str(ctx), timeout=300)
+    p2 = docker(home, 'run', '--rm', 'test/starstar:1', 'cd /ctx && find . | sort | tr "\\n" " "')
+    check(p.returncode == 0 and p2.stdout.split() == ['.', './d1', './d1/d2', './d1/d2/m.go', './d1/m.go',
+                                                      './m.go'],
+          'build: a ** exception brings back files at every depth, nothing else',
+          [p.stderr[-400:], p2.stdout, p2.stderr])
+    os.chmod(ctx / 'd1' / 'd2' / 'm.txt', 0o644)
+    docker(home, 'rmi', '-f', 'test/starstar:1')
+    # The context changes after it was copied: a file becomes a link to a
+    # sentinel outside while a RUN step runs; the later COPY has the copy's
+    # content.
+    ctx = work / 'changed-ctx'
+    ctx.mkdir()
+    (ctx / 'data').write_text('as copied\n')
+    sentinel = 'CHANGED-SENTINEL-' + hashlib.sha256(str(ctx).encode()).hexdigest()[:12]
+    (work / 'changed-outside').write_text(sentinel + '\n')
+    (ctx / 'Dockerfile').write_text('FROM test/alpine:1\nRUN sleep 3\nCOPY data /data\n')
+    b = subprocess.Popen([sys.executable, '-B', str(DOCKER), 'build', '--no-cache',
+                          '-t', 'test/changed:1', str(ctx)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, env={**os.environ, 'ELF_OCI_HOME': str(home)})
+    log = ''
+    for line in b.stdout:
+        log += line
+        if 'RUN sleep' in line:
+            (ctx / 'data').unlink()
+            os.symlink(work / 'changed-outside', ctx / 'data')
+            break
+    log += b.stdout.read()
+    b.wait(timeout=300)
+    p2 = docker(home, 'run', '--rm', 'test/changed:1', 'cat /data')
+    check(b.returncode == 0 and p2.stdout == 'as copied\n' and sentinel not in log + p2.stdout + p2.stderr,
+          'build: a change of the context after it was copied reaches nothing', [log[-500:], p2.stdout])
+    docker(home, 'rmi', '-f', 'test/changed:1')
 
 
 def build_tests(home, work):

@@ -441,9 +441,11 @@ class Builder:
             return None
         except OSError as e:
             raise BuildError(f'cannot read .dockerignore: {e}') from None
+        # (Checked before fdopen, which itself refuses a directory.)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise BuildError('cannot read .dockerignore: not a regular file')
         with os.fdopen(fd, 'rb') as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                raise BuildError('cannot read .dockerignore: not a regular file')
             return f.read().decode('utf-8', 'replace')
 
     def context_entries(self, dirfd, parts, skip):

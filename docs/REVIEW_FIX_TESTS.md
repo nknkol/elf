@@ -24,11 +24,11 @@
 
 | 需求 | 已有用例 | 待补用例 |
 |---|---|---|
-| R1 层镜像展开不越过受保护子树 | T-R1-01 至 T-R1-04 | T-R1-05 至 T-R1-09 |
-| R2 构建上下文不读上下文外的文件 | T-R2-01 至 T-R2-04 | T-R2-05 至 T-R2-08 |
-| R3 启动器不把继承的 FD 交给 guest | T-R3-01 | T-R3-02、T-R3-03 |
-| R4 `commit --pause` 真正暂停、唯一所有者、失败即恢复 | T-R4-01 至 T-R4-12 | T-R4-13 至 T-R4-16 |
-| R5 监视进程失效后主进程组不残留 | T-R5-01 | T-R5-02 |
+| R1 层镜像展开不越过受保护子树 | T-R1-01 至 T-R1-09 | — |
+| R2 构建上下文不读上下文外的文件 | T-R2-01 至 T-R2-08 | — |
+| R3 启动器不把继承的 FD 交给 guest | T-R3-01、T-R3-03 | T-R3-02（行为待定） |
+| R4 `commit --pause` 真正暂停、唯一所有者、失败即恢复 | T-R4-01 至 T-R4-16 | — |
+| R5 监视进程失效后主进程组不残留 | T-R5-01、T-R5-02 | — |
 
 ## R1 层镜像展开（broker）
 
@@ -83,50 +83,82 @@
 - 修复前：4d74389 的 loader 经这个链接在 `secret/` 下建出了文件。另外，标记创建在 EEXIST 之后发现链接已被
   删掉时会重试；该情形曾返回过一次 ENOENT，加入重试后连续 3 轮通过。
 
-### T-R1-05 新建条目的 chmod 不跟随换进来的链接（待补）
+### T-R1-05 新建条目的 chmod 不跟随换进来的链接（已有，修复前未复现）
 
-- 对应修复：`lazy_layer.c` 的 `chmod_made`（4d74389）；宿主侧 `erofs.py` 的 `_chmod_made`（e5ff903）。
-- 前置：镜像含模式为 0755 的目录条目和一个 FIFO 条目；树外哨兵文件模式为 0600。
-- 操作：guest 反复展开该目录，宿主线程不断把临时名 `.wh..elf-lazy-tmp`（目录条目在这里创建）和 FIFO 的名字
-  换成指向哨兵的符号链接。
-- 预期：请求的返回值不作要求（`chmod_made` 失败时调用方忽略，条目保留创建时的模式）。
-- 宿主后置：哨兵的模式、内容、mtime 不变。
+- 用例：`a link put at a made directory before its chmod never changes what it points to`。
+- 对应修复：`lazy_layer.c` 的 `chmod_made`（4d74389）；宿主侧 `_chmod_made` 见 T-R1-09。
+- 前置：镜像目录 `d` 含 200 个模式为 0755 的子目录；树外哨兵文件模式为 0600。
+- 操作：guest 就绪后连发 400 次展开 `/d`。宿主线程不停尝试删掉临时名 `.wh..elf-lazy-tmp` 处刚建的目录，
+  换成指向哨兵的符号链接；每次展开完成后删掉标记和全部子条目，让下一次重新展开。
+- 预期：计数合计 400，返回值不作要求（`chmod_made` 失败时调用方忽略，条目保留创建时的模式）。
+- 宿主后置：哨兵的模式、大小、mtime、内容不变；哨兵所在目录只有哨兵。
+- 修复前：59c7dd9 的 loader 同样通过。设备上每轮约有 300–600 次换成了链接，但 mkdir 与 chmod 之间的窗口
+  只有一个系统调用，没能落进去。因此这条用例只约束结果，不能证明修复有效。FIFO 条目（在自己的名字上建，再
+  chmod）没有单独做竞争：HarmonyOS 的应用存储拒绝之后再改 FIFO 的模式。
 
-### T-R1-06 改名不覆盖期间出现的同名条目（待补）
+### T-R1-06 改名不覆盖期间出现的同名条目（已有）
 
+- 用例：`a name made meanwhile is never replaced by the expansion (and no temporary name is left)`。
 - 对应修复：`place_child`（`RENAME_NOREPLACE`）。
-- 前置：可写缓存中待展开的目录。
-- 操作：展开期间，宿主在子条目的最终名字上抢先建出自己的文件。
-- 预期：请求返回 0。
-- 宿主后置：该名字仍是宿主建的那个 inode（inode 号和内容不变），临时名已清理。
-- 备注：存储不支持 `RENAME_NOREPLACE` 时会退回覆盖，用例需先探测存储是否支持，不支持则记为不适用。
+- 前置：先用一对文件探测存储是否支持 `RENAME_NOREPLACE`，不支持则输出 SKIP（那里会退回覆盖）。镜像目录
+  `d` 含 200 个文件。
+- 操作：guest 就绪后连发 400 次展开 `/d`。宿主线程每轮先清空 `d`，再从最后一个名字往前，用 `O_EXCL` 抢先
+  建出自己的文件（内容 `host`），记下 inode；等到标记出现后逐个核对。
+- 预期：计数合计 400。
+- 宿主后置：宿主建的每个文件 inode 和内容都不变；最后没有残留的临时名。设备上一次运行宿主共建了约 2000 个
+  文件。
 
-### T-R1-07 填充写入的必须是检查并加锁的那个文件（待补）
+### T-R1-07 填充写入的必须是检查并加锁的那个文件（已有）
 
+- 用例：`a fill never writes a file renamed over the placeholder after its check`。
 - 对应修复：`fill_at` 比对写入 FD 与加锁 FD 的 (dev, ino)。
-- 前置：缓存中有一个占位文件；可写区另有一个普通文件 `victim`。
-- 操作：反复伪造填充请求，宿主线程在两次打开之间把占位文件的名字换成 `victim`（改名覆盖）。
-- 预期：请求返回 0 或 EAGAIN。
-- 宿主后置：`victim` 的内容与大小不变。
+- 前置：镜像文件 `f` 为 64 KiB；宿主保存一份占位文件（带占位 atime 标记）用于每轮放回。
+- 操作：guest 就绪后连发 400 次填充 `/f`。宿主线程循环：放回占位文件；约 0.3 ms 后把内容为 `victim` 的新文件
+  改名覆盖到 `f`；再约 0.3 ms 后把它移到缓存外的 `victims6/` 保存。
+- 预期：计数合计 400，返回值只有 0、-ENOENT（名字正处在移走与放回之间）、-EAGAIN（核对不符）。
+- 宿主后置：`victims6/` 中每个文件（设备上约 100 个）内容都仍为 `victim`。
+- 修复前：59c7dd9 的 loader 把镜像内容写进了其中一个 victim。
 
-### T-R1-08 下层缓存路径同样受保护（待补）
+### T-R1-08 下层缓存路径同样受保护（已有）
 
-- 对应修复：`lazy_request`（下层缓存，`self=1`）与 `BROKER_LAZY_MOUNT` 共用 `lazy_check_object`。现有用例
-  只覆盖后者。
-- 前置：`--lower` 指定一个层镜像缓存，缓存内某个子目录另以只读或拒绝挂载登记。
-- 操作：伪造下层缓存的展开或填充请求，目标在该子目录内；再做一个竞争变体（同 T-R1-03）。
-- 预期：EACCES，从未成功。
-- 宿主后置：子目录快照不变。
+- 用例：`{vector}: lower cache: expand protected / expand the cache root / fill protected/a inside a protected
+  subtree is refused`、`{vector}: lower cache: protected unchanged`、`lower cache: with nothing protected
+  inside it still expands`、`{vector}: lower cache: a protected subtree moved in after the check is refused
+  where met`、`{vector}: lower cache: protected unchanged while moved in and out`；向量为 `dr`、`dd`。
+- 对应修复：`lazy_request`（下层缓存，`self=1`）与 `BROKER_LAZY_MOUNT` 共用 `lazy_check_object`。
+- 前置：`--root UPPER --lower CACHE --lower-image IMAGE`。probe 新增 `lazypath HOST OP [N]`，直接发
+  `BROKER_LAZY_PATH`。
+- 操作：
+  - 静态：缓存的 `protected` 另以挂载登记，对 `CACHE/protected`、`CACHE` 本身展开，对 `CACHE/protected/a`
+    填充。
+  - 对照：另一个下层缓存，内部没有受保护子树，展开 `protected`。
+  - 竞争：同 T-R1-03，`holder` 在缓存外与下层缓存之间来回移动，各连发 400 次。
+- 预期：
+  - 静态：三个请求都返回 EACCES。
+  - 对照：返回 0，`protected/a` 被建出。
+  - 竞争：没有 0，出现过 EACCES。
+- 宿主后置：`protected` 的快照不变。
+- 修复前：59c7dd9 的 loader 在竞争变体下每组有 26–34 次成功（静态与对照用例照常通过）。
 
-### T-R1-09 宿主侧 `erofs.py` 的完成标记与 chmod（待补）
+### T-R1-09 宿主侧 `erofs.py` 的完成标记与 chmod（已有）
 
-- 对应修复：`erofs._make_marker` 与 `_chmod_made`。这条路径由 `docker cp`、guestfs、`--cow` 的宿主读取触发，
-  以宿主身份执行。
-- 前置：已展开父目录的缓存；树外哨兵路径不存在。
-- 操作：(a) 在目标目录预先放一个指向哨兵路径的符号链接标记，删掉完成标记后调用 `erofs.expand`；(b) 竞争
-  变体：宿主线程在展开期间放置这个链接。
-- 预期：(a) 得到 ELOOP 错误；(b) 只有成功或 ELOOP 两种结果。
-- 宿主后置：哨兵路径不存在。
+- 用例：`test/oci/run.py` 的 `host expansion: a link at the completion marker makes nothing through it` 与
+  `host expansion: links put at the marker and the temporary name change nothing outside`（不需要容器）。
+- 对应修复：`erofs._make_marker` 与 `_chmod_made`。这条路径由 `docker cp`、guestfs、`--cow` 的宿主读取
+  触发，以宿主身份执行。
+- 前置：镜像目录 `d` 含 100 个子目录；已展开缓存根；树外 `secret/` 内有模式 0600 的哨兵。
+- 操作：
+  - (a) 在 `d` 的标记位置预先放一个指向 `secret/created-by-marker` 的链接，然后调用 `erofs.expand`。
+  - (b) 宿主线程不停把临时名换成指向哨兵的链接、在标记位置放指向 `secret/created-by-marker` 的链接；同时
+    在本进程内展开 200 次，每次之后清空 `d`。
+- 预期：
+  - (a) 不报错（与 `lazy_layer.c` 相同，已存在的标记，链接也算，表示已完成），`d` 中只有这个链接，没有建出任何
+    条目。原先写的“得到 ELOOP”不对：ELOOP 只在检查之后、创建之前换进链接时出现。
+  - (b) 结果不作要求。
+- 宿主后置：`secret/created-by-marker` 不存在；哨兵的模式、mtime、内容不变。
+- 发现：`erofs.py` 只镜像了标记和 chmod 两项，没有镜像另外两项：`fill` 不核对写入 FD 与加锁 FD 是同一
+  inode，`expand` 用 `os.rename`，不是 `RENAME_NOREPLACE`。宿主侧缓存在存储里，加 `--isolate` 时 guest
+  写不到，所以这不是越界；但与 C 侧不一致，留作后续。
 
 ## R2 构建上下文
 
@@ -136,14 +168,14 @@
 ### T-R2-01 上下文里的链接读不到上下文外（已有）
 
 - 用例：`build: context links never read outside the context (COPY, ADD, directory, RUN --mount bind; absolute
-  and relative links)`。
+  and relative links); outside unchanged`。
 - 前置：`outside-ctx/sentinel` 与 `outside-ctx/dir/f` 含随机哨兵；上下文中 `abs` 是指向 `outside-ctx` 的绝对
   链接，`rel` 是 `../outside-ctx`。
 - 操作：对 `abs` 和 `rel` 各构建 6 个镜像：`COPY link/sentinel`、`ADD link/sentinel`、`COPY link/dir`、
   `COPY link/dir/`、`RUN --mount=type=bind,source=link/sentinel`、`RUN --mount=type=bind,source=link`（读
   `/m/sentinel`）；构建成功的镜像再运行一次，显示复制或读到的内容。
 - 预期：12 个构建的输出和镜像内容都不含哨兵（构建失败也可以接受）。
-- 宿主后置：构建只读，未做后置检查；补一项 `outside-ctx` 前后快照一致（待补）。
+- 宿主后置：`outside-ctx` 前后快照（名字、模式、大小、mtime、内容）一致。
 
 ### T-R2-02 上下文内的链接照常可用（已有）
 
@@ -158,7 +190,8 @@
   `unreadable.tmp` 模式为 0，`deps/keep` 可读。
 - 操作：`COPY . /ctx/` 后列出 `/ctx`。
 - 预期：构建成功；`/ctx` 恰为 `.dockerignore`、`Dockerfile`、`app`、`deps`、`deps/keep`。
-- 宿主后置：测试结束时恢复 `deps/big` 的模式（清理）。补一项上下文内容与模式前后一致（待补）。
+- 宿主后置：`build: the context is left as it was (names, modes, sizes, times, contents)`：构建前后上下文的快照
+  一致（读不了的文件只比元数据）；之后恢复 `deps/big` 的模式（清理）。
 
 ### T-R2-04 存储位于上下文内时不被复制（已有）
 
@@ -167,33 +200,41 @@
 - 操作：`FROM scratch` 加 `COPY . /ctx/`，然后保存镜像并列出所有层。
 - 预期：构建成功；层中有 `ctx/f`，没有任何 `ctx/store` 开头的条目（不递归复制自身）。
 
-### T-R2-05 `.dockerignore` 是链接或不是普通文件（待补）
+### T-R2-05 `.dockerignore` 是链接或不是普通文件（已有）
 
-- 前置：`.dockerignore` 分别为指向上下文外文件的符号链接、目录、FIFO。
-- 操作：构建。
-- 预期：构建失败，报 `cannot read .dockerignore`，不会因 FIFO 卡住。
-- 宿主后置：链接目标的 atime 不变（或用不可读的目标证明它从未被打开）。
+- 用例：`build: a .dockerignore that is a link / directory / fifo stops the build`。
+- 前置：`.dockerignore` 分别为指向上下文外可读文件的符号链接、目录、FIFO（存储不允许建 FIFO 时输出 SKIP）。
+- 操作：构建（超时 120 秒）。
+- 预期：构建失败，报 `cannot read .dockerignore`，不会因 FIFO 卡住。链接目标可读，所以如果跟随了链接，构建
+  会成功；构建失败本身就证明没有跟随。
+- 发现并修复：`.dockerignore` 是目录时，`os.fdopen` 在类型检查之前就抛出 EISDIR，构建以未处理的错误退出
+  （`Error response from daemon: [Errno 21] Is a directory`），而不是报 `cannot read .dockerignore`。
+  `read_ignore` 改为先 `fstat` 再 `fdopen`。
 
-### T-R2-06 缓存键遵守例外规则（待补）
+### T-R2-06 缓存键遵守例外规则（已有）
 
+- 用例：`build: the cache key changes with a file an exception brings back, not with one left out`。
 - 对应修复：`hash_tree` 与 `copy_into` 共用 `skipped`。
-- 前置：同 T-R2-03 的规则，先构建一次。
-- 操作：(a) 修改 `deps/keep` 后重新构建；(b) 修改被排除的 `deps/big/x` 后重新构建。
-- 预期：(a) COPY 步骤的缓存失效；(b) 缓存命中。
+- 前置：`.dockerignore` 为 `deps`、`!deps/keep`；Dockerfile 为 `COPY . /ctx/`，再 `RUN cat /ctx/deps/keep >
+  /seen`。
+- 操作：`build -q` 一次；修改被排除的 `deps/big/x` 后再构建；修改 `deps/keep` 后再构建。
+- 预期：第二次的镜像 ID 与第一次相同（缓存命中）；第三次不同，且运行它得到新的 `deps/keep` 内容。
 
-### T-R2-07 含 `**` 的例外规则（待补）
+### T-R2-07 含 `**` 的例外规则（已有）
 
-- 前置：`.dockerignore` 为 `*`、`!**/*.go`；上下文中有多级目录，各级都有 `.go` 和非 `.go` 文件，其中一个
-  非 `.go` 文件不可读。
-- 操作：`COPY . /ctx/`。
-- 预期：构建成功，各级 `.go` 文件全部复制，其他文件都没有。
+- 用例：`build: a ** exception brings back files at every depth, nothing else`。
+- 前置：`.dockerignore` 为 `*`、`!**/*.go`；上下文根、`d1/`、`d1/d2/` 各有 `m.go` 和 `m.txt`，其中
+  `d1/d2/m.txt` 模式为 0。Dockerfile 放在上下文外（`-f`）。
+- 操作：`COPY . /ctx/`，列出 `/ctx`。
+- 预期：构建成功；`/ctx` 恰为 `d1`、`d1/d2` 和三个 `m.go`（`.dockerignore` 也被 `*` 排除，与 Docker 相同）。
 
-### T-R2-08 快照之后上下文被改动（待补）
+### T-R2-08 快照之后上下文被改动（已有）
 
-- 前置：Dockerfile 中先 `RUN sleep` 若干秒，再 `COPY`。
-- 操作：构建期间，宿主把上下文里的某个文件换成指向上下文外哨兵的链接。
-- 预期：COPY 得到的是快照时的内容。
-- 宿主后置：镜像中没有哨兵。
+- 用例：`build: a change of the context after it was copied reaches nothing`。
+- 前置：Dockerfile 为 `RUN sleep 3`，再 `COPY data /data`；上下文外有随机哨兵文件。
+- 操作：`build --no-cache`。输出出现 `RUN sleep` 这一步时，宿主把 `data` 换成指向哨兵的链接。
+- 预期：构建成功；`/data` 为快照时的内容 `as copied`。
+- 宿主后置：构建输出和镜像内容中都没有哨兵。
 
 ## R3 agent 启动器的继承 FD
 
@@ -220,13 +261,18 @@
 - 操作：`--pass-fd` 分别给未打开的 FD、负数、0–2、重复值。
 - 预期：按定下的行为；无论如何，stdio 始终保留，其他未列出的 FD 始终被关闭。
 
-### T-R3-03 进程内后端下交出的 FD 仍受规则约束（待补）
+### T-R3-03 交出的 pipe 写端在两种后端下都写不了（已有）
 
-- 依据：文档写明，进程内防护下交出的 FD 仍受原有规则约束（可以读继承的流，不能写），broker 后端下 guest
-  可以直接使用。
-- 操作：用 `--pass-fd` 交出一个 pipe 的写端，guest 向它写入。
-- 预期：`in-process` 后端写入被拒，`isolate` 后端写入成功。
-- 宿主后置：两种后端下宿主从 pipe 读端读到的内容与预期一致。
+- 用例：`agent_launch.py` 的 `a pipe write end given with --pass-fd is not written by the guest under either
+  backend`。
+- 依据更正：原先写的“进程内被拒、broker 后端可写”不成立。实测两种后端都拒绝：guarded payload 在两种后端下
+  都执行文件守卫，守卫对继承或导入的对象一律拒绝输出（[STATUS](STATUS.md)：pipe 只由 `--allow-pipe-output`
+  授权，而它只覆盖 guest 自己用 `pipe2` 建的 pipe）。`--pass-fd` 只保证 FD 保持打开；读继承的流由
+  `--allow-stream-input` 放行（T-R3-01 的读端）。
+- 操作：用 `--pass-fd` 交出一个 pipe 的写端，guest 执行 `echo written-<后端> >&N`。
+- 预期：退出码非 0，stderr 含 `Permission denied`。
+- 宿主后置：父进程关闭自己的写端后，从读端读到空。
+- 待定：如果希望 `--pass-fd` 交出的写端可用，需要给守卫加“显式交出的 FD”授权，这属于新的设计。
 
 ## R4 `commit --pause`
 
@@ -293,34 +339,46 @@
 - 操作：`docker ps`。
 - 预期与宿主后置：两个组都在运行，状态已清除。
 
-### T-R4-13 暂停期间拒绝新的 exec（待补）
+### T-R4-13 暂停期间拒绝新的 exec（已有）
 
-- 前置：测试进程持有暂停（同 T-R4-03）。
-- 操作：`docker exec pausing true`。
-- 预期：退出码非 0，报 `is paused`。
-- 宿主后置：`execs.json` 没有新增条目；恢复后 exec 正常。
+- 用例：`commit --pause: an exec while paused is refused and registers nothing`，两种模式。
+- 前置：测试进程调用 `runtime.pause` 持有暂停。
+- 操作：`docker exec pausing true`；恢复后再执行一次。
+- 预期：第一次退出码非 0，报 `is paused`；恢复后的那次退出码 0。
+- 宿主后置：暂停期间 `execs.json` 的内容没有变化。
 
-### T-R4-14 `--pause=false` 不暂停（待补）
+### T-R4-14 `--pause=false` 不暂停（已有）
 
-- 操作：`commit --pause=false`，`commit_paused` 替换为在调用时记录各组的停止状态，再调用原函数。
-- 预期：记录显示各组都未停止；提交成功。
+- 用例：`commit --pause=false: nothing stops while the container is read`，两种模式。
+- 操作：`build.cmd_commit(['--pause=false', ...])`，其中 `commit_paused` 被替换为：先记录各进程组是否停止，
+  再调用原函数。
+- 预期：提交成功；记录恰有一次，且各组都未停止；`Paused` 为 False。
 
-### T-R4-15 多线程进程的停止判断（待补）
+### T-R4-15 多线程进程的停止判断（已有）
 
-- 前置：宿主上启动一个带 3 个忙循环线程的进程，放在独立的进程组。
-- 操作：先调用 `runtime.stopped(pgid)`；发 SIGSTOP 后再调用；发 SIGCONT 后再调用。
-- 预期：依次为 False、True、False。
-- 备注：设备上已手动验证过（停止的单线程和多线程进程 wchan 均为 `thread_precheck_deliver_signal`，睡在
-  `pause()` 的进程不是），尚未写成用例。
+- 用例：`a stop of a process with busy threads is seen only once every thread stopped`（宿主进程，不需要
+  容器）。
+- 前置：宿主上启动一个有 4 个忙循环线程（主线程加 3 个）的 Python 进程，放在独立的会话和进程组。
+- 操作：先调用 `runtime.stopped(pgid)`；发 SIGSTOP 后在 5 秒内反复调用，直到为 True；发 SIGCONT 后
+  0.2 秒再调用。
+- 预期：依次为 False、True、False；线程数不少于 4。
 
-### T-R4-16 Linux 上的停止判断（待补）
+### T-R4-16 Linux 上的停止判断（已有，环境）
 
-- 环境：Android arm64 chroot（Linux 内核，停止的任务显示为 T）。
-- 操作：运行 T-R4-01 至 T-R4-07、T-R4-09 至 T-R4-12。
-- 预期：全部通过（T-R4-08 不适用）。
-
-隐含覆盖：设备上约 290 个其他用户的进程，其 `/proc` 条目连 stat 都不允许。T-R4-01 在设备上能成功暂停，说明
-这些条目被正确跳过，而不是被当作“无法确认”。
+- 环境：Android 14 arm64（内核 5.10）上的 Alpine chroot，以 root 运行 `make check-oci`。停止的任务显示为 T。
+  `build/alpine-test-root` 从 HarmonyOS 设备复制过去。
+- 结果：
+  - T-R4-01 至 T-R4-07、T-R4-09 至 T-R4-15、T-R5-01、T-R5-02 两种模式都通过。
+  - T-R4-08 输出 SKIP：注入从未触发（不读 wchan），暂停照常成功。
+- 在这里暴露并修复的问题：
+  - 测试本身：注入循环共用一个 `commit_paused` 调用记录且不清空，一旦某项正常提交，后面各项全部误报失败。
+    改为每项清空，wchan 注入没有触发时记为不适用。
+  - 测试本身：T-R4-01 用 `exec cat /a` 判断容器在继续运行，但循环 `echo $i > /a` 先截断再写入，读到空的
+    概率不低。改为最多重读 10 次，直到读到非空。
+  - 运行时：`commit --pause=false` 时文件在读取期间变短，`layers.write_layer` 按先前 stat 的大小写 tar，
+    抛出 `unexpected end of data`。改为先把文件复制到临时文件，按实际读到的长度写入。
+- 同一环境中与本轮无关的失败：`--owners` 两项和 `build: chown in RUN and COPY --chown` 在 root 下结果不同
+  （EPERM 的前提不成立）。
 
 ## R5 监视进程失效后的主进程组
 
@@ -335,18 +393,22 @@ pid 的进程组。来源：R5（59c7dd9）。
 - 预期：刷新前组内仍有进程；`docker ps` 显示容器为 `exited`。
 - 宿主后置：0.3 秒后该进程组已没有进程。
 
-### T-R5-02 pid 被复用时不误杀（待补）
+### T-R5-02 pid 被复用时不误杀（已有）
 
-- 前置：容器记录的 `Pid` 改为一个无关的存活进程（在另一个进程组），`PidStart` 与它的实际启动时间不同；
-  `MonitorPid` 为一个不存在的 pid。
+- 用例：`a recorded pid now heading another process group: exited, that group is left alone`，两种模式。
+- 前置：`docker run -d ... sleep 300`，等 `run.json` 记下 `Pid` 和 `MonitorPid`；SIGKILL 杀掉监视进程和
+  主进程组，等两者都消失。宿主另起一个无关的进程组：新会话中的 `sh -c 'sleep 300 & exec sleep 301'`，组内
+  两个进程。在存储锁下把记录改为：`Pid` 为该组组长，`PidStart` 为它的实际启动时间加 1，`MonitorPid` 为
+  一个不存在的 pid。
 - 操作：`docker ps -a`。
 - 预期：容器显示为 `exited`。
-- 宿主后置：该无关进程及其进程组仍然存活。
+- 宿主后置：0.3 秒后该无关进程组的成员与操作前完全相同（两个进程都在）。
 
-## 待补用例的优先级
+## 剩余事项
 
-1. **T-R1-05、T-R1-07、T-R1-08**：broker 的边界修复目前没有用例直接约束（chmod 不跟随链接、填充核对
-   inode、下层缓存路径）。
-2. **T-R4-13、T-R4-15、T-R5-02**：已实现但只靠代码阅读或手动验证的行为。
-3. **T-R2-05 至 T-R2-08、T-R1-06、T-R1-09**：边角输入与宿主侧路径。
-4. **T-R3-02、T-R3-03、T-R4-14、T-R4-16**：参数校验、进程内后端的语义、Linux 平台。
+- **T-R3-02**：`--pass-fd` 遇到未打开的 FD 时是否报错，需要先定行为。
+- **T-R3-03 引出的设计问题**：`--pass-fd` 交出的写端在两种后端下都写不了。如果需要可写，守卫要新增“显式
+  交出的 FD”授权。
+- **T-R1-05**：用例只约束结果，修复前的 loader 也能通过（窗口只有一个系统调用）。
+- **`erofs.py` 与 C 侧不一致**（T-R1-09）：宿主侧 `fill` 不核对写入 FD 与加锁 FD 是同一 inode；`expand`
+  改名时会覆盖已有条目（没有用 `RENAME_NOREPLACE`）。

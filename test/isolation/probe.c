@@ -12,6 +12,7 @@
  *   probe h   lazy IMAGE CACHE REL OP [N]  a forged BROKER_LAZY_MOUNT (OP 0 expand, 1 fill);
  *                                    N: "ready", a line read from stdin, then sent N
  *                                    times, "lazy-rc RC COUNT" per result
+ *   probe h   lazypath HOST OP [N]   a forged BROKER_LAZY_PATH: HOST inside a --lower cache
  *   probe h   reopen PATH            O_PATH open, then reopen by /proc/self/fd/N and by a
  *                                    forged magic-link request; each listed from the svc
  *   probe h|d mkdir|unlink|rmdir|chmod|chown|utime|truncate|setxattr PATH
@@ -524,7 +525,9 @@ static void reopen(const char *path)
     list_fd("reopen-forged", rc >= 1000 ? rc - 1000 : rc);
 }
 
-static void lazy_forged(const char *image, const char *cache, const char *rel, long op, long times)
+/* nr BROKER_LAZY_MOUNT: rel inside cache, of image; BROKER_LAZY_PATH:
+ * rel is a host path inside a --lower-image cache (image, cache unused). */
+static void lazy_forged(long nr, const char *image, const char *cache, const char *rel, long op, long times)
 {
     payload_config_t *cfg = payload_config();
     if (!cfg || !cfg->isolate) { report("isolated", 0); return; }
@@ -540,11 +543,11 @@ static void lazy_forged(const char *image, const char *cache, const char *rel, l
     via(__NR_sendmsg, cfg->isolate_fd, (long)&m, 0, 0, 0, 0);
     close(pair[1]);
     struct broker_request *r = calloc(1, BROKER_MESSAGE_MAX);
-    r->nr = BROKER_LAZY_MOUNT;
+    r->nr = nr;
     r->args[1] = op;
     char *data = (char *)(r + 1);
     size_t used = 0;
-    const char *parts[4] = {rel, 0, image, cache};
+    const char *parts[4] = {rel, 0, nr == BROKER_LAZY_MOUNT ? image : 0, nr == BROKER_LAZY_MOUNT ? cache : 0};
     for (int i = 0; i < 4; i++) {
         if (!parts[i]) continue;
         strcpy(data + used, parts[i]);
@@ -802,7 +805,10 @@ int main(int argc, char **argv)
     else if (!strcmp(op, "rawlist")) rawlist(p, 0);
     else if (!strcmp(op, "rawlistwait")) rawlist(p, 1);
     else if (!strcmp(op, "reopen")) reopen(p);
-    else if (!strcmp(op, "lazy") && argc > 6) lazy_forged(p, q, argv[5], atol(argv[6]), argc > 7 ? atol(argv[7]) : 0);
+    else if (!strcmp(op, "lazy") && argc > 6)
+        lazy_forged(BROKER_LAZY_MOUNT, p, q, argv[5], atol(argv[6]), argc > 7 ? atol(argv[7]) : 0);
+    else if (!strcmp(op, "lazypath") && argc > 4)
+        lazy_forged(BROKER_LAZY_PATH, 0, 0, p, atol(q), argc > 5 ? atol(argv[5]) : 0);
     else if (!strcmp(op, "exec")) {
         char *args[] = {(char *)p, 0}, *env[] = {0};
         long rc = direct ? via(281, AT_FDCWD, (long)p, (long)args, (long)env, 0, 0)

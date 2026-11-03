@@ -8,7 +8,9 @@ import gzip
 import hashlib
 import os
 import stat
+import shutil
 import tarfile
+import tempfile
 from pathlib import Path
 
 IGNORED = {'/.elf-exec', '/.elf-exec.tmp'}
@@ -128,8 +130,14 @@ def write_layer(root, changed, deleted, out_path, modes=None, owners=None, opaqu
                 if p in modes:
                     info.mode = modes[p]
                 if info.isreg():
-                    with open(host, 'rb') as f:
-                        tar.addfile(info, f)
+                    # Copied out first, the size taken from what was read: a
+                    # file that changes meanwhile (commit --pause=false) is
+                    # one read of it, not a size that no longer holds.
+                    with open(host, 'rb') as f, tempfile.SpooledTemporaryFile(1 << 22) as copy:
+                        shutil.copyfileobj(f, copy, 1 << 20)
+                        info.size = copy.tell()
+                        copy.seek(0)
+                        tar.addfile(info, copy)
                 elif info.isdir() or info.issym():
                     tar.addfile(info)
     return 'sha256:' + h.hexdigest()

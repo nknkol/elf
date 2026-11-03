@@ -135,6 +135,21 @@ with tempfile.TemporaryDirectory(prefix='agent-launch-', dir=build) as tmp:
     b.close()
     print('PASS: FDs the caller left open do not reach the guest; stdio and --pass-fd do')
 
+    # The write end of a pipe given with --pass-fd stays open but is not
+    # writable under either backend: the guard refuses output to inherited
+    # objects (--allow-pipe-output covers pipes the guest makes with pipe2).
+    for backend in ('isolate', 'in-process'):
+        out_r, out_w = os.pipe()
+        p = subprocess.run(['python3', str(launch), *common, '--backend', backend, '--pass-fd', str(out_w),
+                            '--', '/bin/sh', '-c', f'echo written-{backend} >&{out_w}'],
+                           capture_output=True, text=True, timeout=60, pass_fds=[out_w])
+        os.close(out_w)
+        with os.fdopen(out_r, 'rb') as f:
+            got = f.read()
+        assert p.returncode != 0 and got == b'' and 'Permission denied' in p.stderr, \
+            (backend, p.returncode, got, p.stderr)
+    print('PASS: a pipe write end given with --pass-fd is not written by the guest under either backend')
+
     many = dict(json.loads(profile.read_text()))
     # 8 mounts used; 57 more exceed the 64-mount backend limit.
     for index in range(57):
