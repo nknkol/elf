@@ -137,6 +137,61 @@ def container_groups(st, record):
     return groups
 
 
+def container_processes(cid, table=None):
+    """Every process of the container, wherever it went. Each holds the
+    container's mount table as FD 901 (the loader's --mount-table, which the
+    guest can neither close nor replace), also after setsid and after its
+    parent exited: a daemon (nginx, redis --daemonize) leaves every process
+    group the container knows and is reparented to init, where only a PID
+    namespace would still hold it. Matched by the table's last two parts:
+    remove renames the container directory (tmp/rm-<id>) on its way out and
+    a new start unlinks the previous run's table. table: the full path of
+    another table (a build's RUN step) instead of a container's."""
+    tail = os.path.realpath(table) if table else f'{cid}/mounts.table'
+    found = []
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        try:
+            target = os.readlink(f'/proc/{entry}/fd/901')
+        except OSError:
+            continue
+        if target.endswith(' (deleted)'):
+            target = target[:-len(' (deleted)')]
+        if target.endswith(tail):
+            found.append(int(entry))
+    return found
+
+
+def strays(cid, groups):
+    """The container's processes outside its known process groups."""
+    found = []
+    for pid in container_processes(cid):
+        try:
+            if os.getpgid(pid) not in groups:
+                found.append(pid)
+        except ProcessLookupError:
+            pass
+    return found
+
+
+def kill_container_processes(cid, timeout=5.0, table=None):
+    """SIGKILL to every process of the container (container_processes) until
+    none is left: one that forks meanwhile shows its child in the next round.
+    Returns those still there at the timeout."""
+    deadline = time.time() + timeout
+    while True:
+        pids = container_processes(cid, table)
+        if not pids or time.time() >= deadline:
+            return pids
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.01)
+
+
 class PauseError(StoreError):
     pass
 
@@ -166,6 +221,7 @@ def pause(st, cid, timeout=5.0):
         if state.get('Paused') and pause_owner_alive(state.get('PauseOwner')):
             raise PauseError(f'Container {cid[:12]} is already paused')
         groups = container_groups(st, record)
+        loose = strays(cid, groups)
         state.update(Paused=True, PauseOwner=me)
         st.save_container(record)
 
@@ -175,6 +231,11 @@ def pause(st, cid, timeout=5.0):
         for pgid in groups:
             try:
                 os.killpg(pgid, signal.SIGCONT)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for pid in loose:
+            try:
+                os.kill(pid, signal.SIGCONT)
             except (ProcessLookupError, PermissionError):
                 pass
         with st.lock():
@@ -187,7 +248,7 @@ def pause(st, cid, timeout=5.0):
     # From here until resume is handed back, any failure (an error of any
     # kind, an interruption) continues the groups and clears the state.
     try:
-        failure = acquire_stop(groups, timeout)
+        failure = acquire_stop(groups, timeout, loose)
     except BaseException as e:
         resume()
         if isinstance(e, Exception):
@@ -199,8 +260,9 @@ def pause(st, cid, timeout=5.0):
     return resume
 
 
-def acquire_stop(groups, timeout):
-    """SIGSTOP to every group, then waits until every thread is seen
+def acquire_stop(groups, timeout, pids=()):
+    """SIGSTOP to every group and to each of pids (processes of the
+    container outside them), then waits until every thread is seen
     stopped: None, or why the pause cannot be had."""
     for pgid in groups:
         try:
@@ -209,10 +271,17 @@ def acquire_stop(groups, timeout):
             pass      # (gone since: nothing left to write)
         except OSError as e:
             return f'cannot stop process group {pgid}: {e}'
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            pass
+        except OSError as e:
+            return f'cannot stop process {pid}: {e}'
     deadline = time.time() + timeout
     while True:
         try:
-            if all(stopped(pgid) for pgid in groups):
+            if all(stopped(pgid) for pgid in groups) and all(process_stopped(pid) for pid in pids):
                 return None
         except StopUnknown as e:
             return f'cannot tell whether its processes stopped ({e})'
@@ -227,9 +296,15 @@ def resume_orphaned_pause(st, record):
     state = record['State']
     if not state.get('Paused') or pause_owner_alive(state.get('PauseOwner')):
         return
-    for pgid in container_groups(st, record):
+    groups = container_groups(st, record)
+    for pgid in groups:
         try:
             os.killpg(pgid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for pid in strays(record['Id'], groups):
+        try:
+            os.kill(pid, signal.SIGCONT)
         except (ProcessLookupError, PermissionError):
             pass
     state.update(Paused=False, PauseOwner=None)
@@ -331,6 +406,18 @@ def stopped(pgid):
     return True
 
 
+def process_stopped(pid):
+    """Whether every thread of process pid is stopped (or it is gone);
+    StopUnknown when that cannot be told."""
+    try:
+        tasks = list_proc(f'/proc/{pid}/task')
+    except OSError as e:
+        if _gone(e):
+            return True
+        raise StopUnknown(f'/proc/{pid}/task: {e}') from None
+    return all(task_stopped(f'/proc/{pid}/task/{t}') for t in tasks)
+
+
 def end_execs(st, cid):
     with st.lock():
         end_execs_locked(st, cid)
@@ -356,6 +443,9 @@ def end_execs_locked(st, cid):
             except (ProcessLookupError, PermissionError):
                 pass
     path.unlink(missing_ok=True)
+    # And whatever left those groups (daemons, setsid): the main process is
+    # gone, so is everything of the container, as with a PID namespace.
+    kill_container_processes(cid)
 
 
 def rootfs_of(st, record):

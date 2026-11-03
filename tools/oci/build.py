@@ -854,6 +854,11 @@ class Builder:
             proc = subprocess.run(argv, cwd=str(s.rootfs), stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL if self.quiet else None,
                                   env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
+            # The step ends with its command, as Docker's RUN container:
+            # whatever it left running (in the background, daemonized) goes
+            # before the upper layer is read.
+            import runtime
+            runtime.kill_container_processes(None, table=cdir / 'mounts.table')
             (s.rootfs / runspec.HELPER).unlink(missing_ok=True)
             result = None
             if not proc.returncode:

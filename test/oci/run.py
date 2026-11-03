@@ -1509,10 +1509,83 @@ def alpine_image(home, work):
     assert p.returncode == 0, p.stderr
 
 
+def sleepers(seconds):
+    """Processes running `sleep <seconds>` (a guest's loader keeps the
+    command after `--` in its command line)."""
+    want = f'sleep\0{seconds}\0'.encode()
+    found = []
+    for entry in os.listdir('/proc'):
+        if entry.isdigit():
+            try:
+                if want in Path(f'/proc/{entry}/cmdline').read_bytes():
+                    found.append(int(entry))
+            except OSError:
+                pass
+    return found
+
+
+def daemon_tests(home, work, mode, tag, base):
+    """A daemon leaves every process group of the container (fork, setsid,
+    the parent exits: it is reparented to init); in Docker the PID namespace
+    still ends it with the container. Expected: one made by the main process
+    of `run --rm`, and ones made by the main process, an exec and an exec -d
+    of `run -d`, are all running, are stopped by the container's pause
+    (commit/cp read nothing a daemon still writes), and are gone after the
+    container ends (stop); one a build's RUN step leaves is gone when the
+    build ends. Each detaches its stdio, as daemons do."""
+    sys.path.insert(0, str(lib.REPO / 'tools/oci'))
+    import runtime as runtime_mod
+    import store as store_mod
+    img = 'test/alpine:1'
+    quiet = '</dev/null >/dev/null 2>&1'
+    p = docker(home, 'run', '--rm', *mode, img, f'(setsid sleep {base} {quiet} &); sleep 0.5; echo up')
+    time.sleep(0.5)
+    left = sleepers(base)
+    for pid in left:
+        os.kill(pid, signal.SIGKILL)
+    check(p.stdout == 'up\n' and not left, 'run --rm: a daemon (setsid, parent gone) ends with the container' + tag,
+          [p.stdout, p.stderr, left])
+    name = 'daemons' + ('-iso' if mode else '')
+    docker(home, 'run', '-d', *mode, '--name', name, img, f'(setsid sleep {base + 1} {quiet} &); exec sleep 300')
+    docker(home, 'exec', name, 'sh', '-c', f'(setsid sleep {base + 2} {quiet} &)')
+    docker(home, 'exec', '-d', name, 'sh', '-c', f'(setsid sleep {base + 3} {quiet} &)')
+    deadline = time.time() + 10
+    while time.time() < deadline and not all(sleepers(base + k) for k in (1, 2, 3)):
+        time.sleep(0.1)
+    daemons = [pid for k in (1, 2, 3) for pid in sleepers(base + k)]
+    st = store_mod.Store(home)
+    resume = runtime_mod.pause(st, st.resolve_container(name)['Id'])
+    paused = [proc_stopped(pid) for pid in daemons]
+    resume()
+    time.sleep(0.2)
+    resumed = [proc_stopped(pid) for pid in daemons]
+    docker(home, 'stop', '-t', '1', name)
+    time.sleep(0.3)
+    left = [pid for k in (1, 2, 3) for pid in sleepers(base + k)]
+    for pid in left:
+        os.kill(pid, signal.SIGKILL)
+    docker(home, 'rm', '-f', name)
+    check(len(daemons) == 3 and paused == [True] * 3 and resumed == [False] * 3 and not left,
+          'run -d: daemons of the main process, an exec and an exec -d pause with the container and end '
+          'with it (stop)' + tag, [daemons, paused, resumed, left])
+    ctx = work / f'daemon-ctx{base}'
+    ctx.mkdir(exist_ok=True)
+    (ctx / 'Dockerfile').write_text(f'FROM {img}\nUSER root\nRUN (setsid sleep {base + 4} {quiet} &); echo ran\n')
+    p = docker(home, 'build', *mode, '-q', '-t', f'test/daemon:{base}', str(ctx))
+    time.sleep(0.3)
+    left = sleepers(base + 4)
+    for pid in left:
+        os.kill(pid, signal.SIGKILL)
+    docker(home, 'rmi', f'test/daemon:{base}')
+    check(p.returncode == 0 and not left, 'build: a daemon a RUN step leaves ends with the step' + tag,
+          [p.returncode, p.stderr[-500:], left])
+
+
 def run_tests(home, work, isolate):
     mode = ['--isolate'] if isolate else []
     tag = ' (--isolate)' if isolate else ''
     img = 'test/alpine:1'
+    daemon_tests(home, work, mode, tag, 3101 if isolate else 3001)
     p = docker(home, 'run', '--rm', *mode, img)
     check(p.returncode == 0 and p.stdout == 'default-cmd\n', 'Entrypoint + Cmd' + tag, p.stdout + p.stderr)
     p = docker(home, 'run', '--rm', *mode, img, 'echo $FROM_IMAGE $(id -un) $(pwd) $HOME')

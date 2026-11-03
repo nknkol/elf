@@ -1763,6 +1763,23 @@ static void broker_run(int control, const payload_config_t *cfg)
 	}
 }
 
+/* The broker lives as long as any guest process does, so it must not hold
+ * the caller's stdio: a daemon that let go of its own (setsid, stdio to
+ * /dev/null) would otherwise keep `docker exec`'s or a shell's pipe open
+ * through it. stderr stays when logging is on (z_printf). */
+extern int z_printf_enabled;
+static void release_stdio(void)
+{
+	long null = sys(__NR_openat, AT_FDCWD, (long)"/dev/null", 2 /* O_RDWR */ | O_CLOEXEC_, 0, 0, 0);
+	if (null < 0)
+		return;
+	for (int fd = 0; fd <= (z_printf_enabled ? 1 : 2); fd++)
+		if (fd != null)
+			sys(__NR_dup3, null, fd, 0, 0, 0, 0);
+	if (null > 2)
+		sys(__NR_close, null, 0, 0, 0, 0, 0);
+}
+
 /* Forks the broker (detached: the guest never sees it as a child) and keeps
  * the guest end of the control socket, inherited by every guest process. */
 void broker_start(payload_config_t *cfg)
@@ -1776,6 +1793,7 @@ void broker_start(payload_config_t *cfg)
 	if (pid == 0) {
 		if (sys(__NR_clone, SIGCHLD, 0, 0, 0, 0, 0) == 0) {
 			sys(__NR_close, pair[0], 0, 0, 0, 0, 0);
+			release_stdio();
 			broker_run(pair[1], cfg);
 		}
 		z_exit(0);

@@ -274,7 +274,13 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
   启动并登记到 `containers/<id>/execs.json`（组长 pid 与启动时间）；组长退出后只要组里还有进程（例如 shell 留下的后台任务）
   登记就保留（pid 在同号进程组存在期间不会被再分配，组长 pid 换了启动时间即说明组已空）。主进程退出、stop、rm 以及发现
   容器已不在时把登记的进程组全部 SIGKILL，并在容器下次运行前拒绝新的 exec，所以启动与停止竞争时也不会留下进程（与 PID
-  命名空间的 init 退出相同）。自己 setsid 换了进程组的进程不在此列，主进程的进程组也是如此。监视进程意外消失、入口进程
+  命名空间的 init 退出相同）。自己 setsid 换了进程组、父进程又已退出（过继给 init）的守护进程不在任何登记的组里，
+  它们由 FD 901 找到：每个容器进程都持有 loader 以 `--mount-table` 打开的 `containers/<id>/mounts.table`（guest 关不掉、
+  也换不掉，setsid、过继与 exec 之后仍在），容器结束时扫描 `/proc/*/fd/901` 把指向该表的进程全部 SIGKILL，直到一个不剩
+  （`runtime.container_processes`；rm 途中目录改名为 `tmp/rm-<id>`、新一次启动删掉旧表，都按 `<id>/mounts.table` 结尾
+  匹配）。pause 同样对这些进程逐个 SIGSTOP，build 的 RUN 步骤在命令结束后也这样结束它留下的进程。`--isolate` 下 broker
+  启动时把继承的 stdin/stdout（未开日志时还有 stderr）换成 /dev/null：broker 与最后一个 guest 进程同生命周期，否则一个已经
+  放开自己 stdio 的守护进程会经 broker 让 `docker exec` 的管道一直不结束。监视进程意外消失、入口进程
   也已退出时，刷新状态（ps、inspect、rm 等）在清零 PID 之前先结束入口进程原来的进程组里剩下的进程（按组长启动时间
   判断，不误杀复用了该号的进程组）。
 - **`commit --pause`**（默认）：读取容器文件（差异、层、新镜像 rootfs）期间对主进程组与登记的 exec 组发 SIGSTOP，
