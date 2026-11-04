@@ -58,7 +58,9 @@ guest 程序对 SP 附近与寄存器的前提照 Linux 保留（Go 运行时全
 - 桩不写 SP 下方 64 字节（`STUB_RED_ZONE`）；clone 子进程的新栈下方同样保留 64 字节（`CLONE_CHILD_KEEP`）：Go 的
   runtime.clone 把 m、g、fn 与魔数放在那里，子进程先 gettid 再读。
 - guest 栈只放桩帧与通用寄存器（vfork 子进程最深 1 KiB，`small_stack.py` 上限 1280 字节）：goroutine 在系统调用处
-  SP 下方只有几百字节，再往下是别的 goroutine 的栈。payload 栈 64 个、每个 64 KiB，按线程认领、首次用时映射。
+  SP 下方只有几百字节，再往下是别的 goroutine 的栈。payload 栈每个 64 KiB，按线程认领、首次用时映射。
+- 每个停在调用里的线程占一个重入槽、一个 payload 栈，`--isolate` 下还有一个 broker 通道（线程退出前一直保留）。
+  三者都是 1024 个，扫描只到曾同时用到的最多个数（`test/proot/test_many_blocked.py`：300 个线程同时阻塞）。
 - payload 编译时 `-ffixed-x28`：线程在 payload 里时到达的信号，guest 处理器看到的 x28 仍是 guest 的（Go 的 g）。
 
 ## 目录与模块

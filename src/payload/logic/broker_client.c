@@ -24,7 +24,10 @@ extern long raw_syscall(long number, long a1, long a2, long a3, long a4, long a5
 #endif
 #define O_CLOEXEC_ 02000000
 #define CHANNEL_FD_BASE 900
-#define CHANNELS 64
+/* One channel per thread that has called the broker, kept until the thread
+ * exits: as many as threads at once (a Go program has one per blocked
+ * goroutine). Scans stop at channels_used, the most ever taken. */
+#define CHANNELS 1024
 #define BUFFER_SIZE (2 * (BROKER_MESSAGE_MAX + 4096) + 2 * 4096)
 #define REPORT_OFFSET (2 * (BROKER_MESSAGE_MAX + 4096)) /* strict symlink report */
 
@@ -38,7 +41,10 @@ struct channel {
     uint32_t seq;
 };
 static struct channel channels[CHANNELS];
+static int channels_used;
 static int channels_lock;
+
+static int used_channels(void) { return __atomic_load_n(&channels_used, __ATOMIC_ACQUIRE); }
 
 static void lock(void)
 {
@@ -133,7 +139,7 @@ static void release_slot(struct channel *c)
 static struct channel *reclaim(long pid)
 {
     struct channel *found = 0;
-    for (int i = 0; i < CHANNELS; i++) {
+    for (int i = 0; i < used_channels(); i++) {
         struct channel *c = &channels[i];
         if (c->fd <= 0) /* being opened */
             continue;
@@ -156,7 +162,7 @@ static struct channel *channel(void)
     long pid = raw_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
     struct channel *free_slot = 0;
     lock();
-    for (int i = 0; i < CHANNELS; i++) {
+    for (int i = 0; i < used_channels(); i++) {
         struct channel *c = &channels[i];
         if (c->tid == tid && c->pid == pid) {
             unlock();
@@ -164,6 +170,11 @@ static struct channel *channel(void)
         }
         if (!c->tid && !free_slot)
             free_slot = c;
+    }
+    int used = used_channels();
+    if (!free_slot && used < CHANNELS) {
+        free_slot = &channels[used];
+        __atomic_store_n(&channels_used, used + 1, __ATOMIC_RELEASE);
     }
     if (!free_slot)
         free_slot = reclaim(pid);
@@ -462,7 +473,7 @@ static int reserved(long fd)
         return 0;
     if (fd == g_payload_config.isolate_fd || fd == g_payload_config.loader_fd)
         return 1;
-    for (int i = 0; i < CHANNELS; i++)
+    for (int i = 0; i < used_channels(); i++)
         if (__atomic_load_n(&channels[i].fd, __ATOMIC_RELAXED) == fd && fd > 0)
             return 1;
     return 0;
@@ -493,7 +504,7 @@ static long close_range_between(unsigned first, unsigned last, unsigned flags)
     held[count++] = g_payload_config.isolate ? g_payload_config.loader_fd : -1;
     held[count++] = g_payload_config.mount_table_fd;
     held[count++] = g_payload_config.owner_db_fd;
-    for (int i = 0; i < CHANNELS; i++) {
+    for (int i = 0; i < used_channels(); i++) {
         int fd = __atomic_load_n(&channels[i].fd, __ATOMIC_RELAXED);
         if (fd > 0)
             held[count++] = fd;
@@ -618,7 +629,7 @@ void broker_clone_finish(unsigned long flags, long result)
     if (!result && !(flags & 0x100 /* CLONE_VM */)) {
         /* A private copy: the FDs are copies of the parent's channels, and
          * a lock another thread held is copied held. Buffers stay. */
-        for (int i = 0; i < CHANNELS; i++) {
+        for (int i = 0; i < used_channels(); i++) {
             if (channels[i].fd > 0)
                 raw_syscall(__NR_close, channels[i].fd, 0, 0, 0, 0, 0);
             release_slot(&channels[i]);
@@ -628,7 +639,7 @@ void broker_clone_finish(unsigned long flags, long result)
         /* The child has exec'd or exited: its slot is free, its FD was in
          * its own table. */
         lock();
-        for (int i = 0; i < CHANNELS; i++)
+        for (int i = 0; i < used_channels(); i++)
             if (channels[i].pid == result)
                 release_slot(&channels[i]);
         unlock();

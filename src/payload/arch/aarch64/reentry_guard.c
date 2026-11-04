@@ -6,14 +6,13 @@
 #include <linux/mman.h>
 #include "reentry_guard.h"
 
-/* Per process in the FD experiment, where a thread pool shares it. */
-#ifdef GUARDED
-#define GUARD_SLOTS 64
-#else
-#define GUARD_SLOTS 32
-#endif
+/* One slot per thread inside a call. Threads can be many at once, each
+ * blocked in a call (a Go program: one thread per blocked goroutine); a
+ * full table refused the next call with EAGAIN. Scans stop at `used`, the
+ * most slots ever held at once, so a few threads cost what they did. */
+#define GUARD_SLOTS 1024
 struct reentry_slot { long tid; };
-struct guard_table { struct reentry_slot slots[GUARD_SLOTS]; };
+struct guard_table { int used; struct reentry_slot slots[GUARD_SLOTS]; };
 static struct guard_table *g_table;
 /* Private payload storage, shared only by the supported vfork pair. Unlike a
  * public pool slot, this slot cannot be reused by a fork sibling before the
@@ -82,12 +81,20 @@ struct reentry_slot *reentry_try_enter(void)
         return (struct reentry_slot *)table;
     struct reentry_slot *slots = table->slots;
     /* Check all owners before trying a free slot: a nested signal must not
-     * allocate another slot merely because an earlier slot is free. */
-    for (int i = 0; i < GUARD_SLOTS; i++)
+     * allocate another slot merely because an earlier slot is free. A slot
+     * is held only after `used` covers it (set before the claim below). */
+    int used = __atomic_load_n(&table->used, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < used; i++)
         if (__atomic_load_n(&slots[i].tid, __ATOMIC_ACQUIRE) == tid)
             return NULL;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < GUARD_SLOTS; i++) {
+            if (__atomic_load_n(&slots[i].tid, __ATOMIC_RELAXED))
+                continue;
+            int seen = __atomic_load_n(&table->used, __ATOMIC_RELAXED);
+            while (seen <= i && !__atomic_compare_exchange_n(&table->used, &seen, i + 1, 0,
+                                                             __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                ;
             long empty = 0;
             if (__atomic_compare_exchange_n(&slots[i].tid, &empty, tid, 0,
                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -130,7 +137,8 @@ struct reentry_slot *reentry_exec_release(void)
     /* A vfork child shares this VM: its lease must not outlive its exec. */
     struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);
     long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
-    for (int i = 0; table && tid > 0 && i < GUARD_SLOTS; i++) {
+    int used = table ? __atomic_load_n(&table->used, __ATOMIC_ACQUIRE) : 0;
+    for (int i = 0; tid > 0 && i < used; i++) {
         long owner = tid;
         if (__atomic_compare_exchange_n(&table->slots[i].tid, &owner, 0, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -173,7 +181,7 @@ void reentry_private_fork(long tid)
      * here; a later reuse of such a TID must not look like recursion. */
     struct guard_table *table = __atomic_load_n(&g_table, __ATOMIC_ACQUIRE);
     if (table)
-        for (int i = 0; i < GUARD_SLOTS; i++)
+        for (int i = 0; i < __atomic_load_n(&table->used, __ATOMIC_ACQUIRE); i++)
             __atomic_store_n(&table->slots[i].tid, 0, __ATOMIC_RELEASE);
 #endif
 }

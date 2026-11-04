@@ -2,9 +2,9 @@
 #ifndef PAYLOAD_STACK_H
 #define PAYLOAD_STACK_H
 /* Stacks for the intercepted calls (arch/aarch64/payload_stack.c), mapped
- * when first claimed. More threads in calls at once than stacks: those run
- * on their own stack. */
-#define PAYLOAD_STACKS 64
+ * when first claimed: as many as threads in calls at once (one per
+ * reentry slot). More than that: those run on their own stack. */
+#define PAYLOAD_STACKS 1024
 #define PAYLOAD_STACK_SIZE (64 * 1024)
 /* The top of a stack now owned by this thread, or 0 (none free, or this
  * thread is on one already). */
