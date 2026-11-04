@@ -157,6 +157,10 @@ typedef struct payload_config {
     char hostname[65];
     /* Guarded build only (zero otherwise). */
     int32_t fd_state; /* Internal sealed exec handoff, -1 if absent. */
+    /* --fd-capacity: FD records the runtime holds, when below the FD
+     * numbers it holds (0: as many). For tests of the capacity boundary;
+     * passed down the exec chain. */
+    int32_t fd_capacity;
     /* Root then bind order, d/r/w; empty=legacy, guard selects partial enforcement. */
     char mount_access_observe[CONFIG_MAX_BINDS + 2];
     int32_t revalidate_file_fds; /* Re-derive regular-file origins, never trust snapshot tags. */

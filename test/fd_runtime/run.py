@@ -104,6 +104,7 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
         subprocess.run(['clang', '-O1', '-nostdlib', '-static', '-ffreestanding',
                         '-fno-builtin', '-fno-stack-protector',
                         '-DFD_TRACK=1',
+                        '-DFD_TEST_CAPACITY=128',  # --fd-capacity below
                         '-DEXPECT_ACCEPT_NONBLOCK=' + str(accept_nonblock),
                         '-DEXPECT_PEEK_RIGHTS=' + str(peek_rights),
                         '-I' + str(repo / 'src/payload/include'),
@@ -176,6 +177,8 @@ with tempfile.TemporaryDirectory(prefix='fd-runtime-', dir=build) as temp, \
             command = [str(private_loader), '--mode', 'container', '--root', str(work),
                        '-v', f'{external}:/bound', '--', './exec']
         try:
+            # The runtime holds 128 FD numbers here: capacity cases fill it.
+            command = [command[0], '--fd-capacity', '128', *command[1:]]
             p = subprocess.run(command +
                                ([str(inherited)] if inherited is not None else []),
                                pass_fds=(inherited,) if inherited is not None else (),

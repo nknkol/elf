@@ -138,8 +138,18 @@ int main(int argc,char **argv) {
     assert(reentry_try_enter()==NULL);
     reentry_leave(child);
     child=reentry_try_enter();assert((intptr_t)child>0);
-    reentry_vfork_end(); /* Simulate terminal child: no normal leave. */
+    reentry_vfork_end(999); /* Simulate terminal child: no normal leave. */
     assert((intptr_t)reentry_try_enter()==-EAGAIN);
+    /* Two vfork children at once (two threads of the parent vforked): each
+     * its own lease; ending one leaves the other's. */
+    reentry_vfork_begin(991);reentry_vfork_begin(992);
+    simulated_tid=991;struct reentry_slot *first=reentry_try_enter();assert((intptr_t)first>0);
+    simulated_tid=992;struct reentry_slot *second=reentry_try_enter();assert((intptr_t)second>0 && second!=first);
+    assert(reentry_try_enter()==NULL);
+    reentry_vfork_end(991);
+    simulated_tid=992;assert(reentry_try_enter()==NULL);
+    reentry_leave(second);reentry_vfork_end(992);
+    simulated_tid=999;assert((intptr_t)reentry_try_enter()==-EAGAIN);
     for(int i=0;i<SLOTS;i++) {
         simulated_tid=100000+i;assert(reentry_try_enter()==NULL);
     }

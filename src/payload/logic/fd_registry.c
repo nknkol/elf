@@ -44,7 +44,7 @@ static int reserve(struct fd_registry *r, struct fd_task_slot *parent,
         if (table==r->table_count) return -ENOSPC;
     }
     struct fd_table_slot *b=&r->tables[table];
-    if (!b->owners) fd_table_init(&b->table,b->table.slots,b->table.capacity);
+    if (!b->owners) fd_table_reset(&b->table);
     struct fd_clone prepared={0};
     if (parent) {
         int rc=fd_clone_prepare(&prepared,&r->tables[parent->table_slot].table,

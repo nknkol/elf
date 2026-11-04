@@ -13,7 +13,12 @@ payload stack ran the dispatcher on its own (goroutine-sized) stack.
 Expected, both builds, plain and with --isolate: every open succeeds, and
 no thread's stack is used deeper than with a single thread (no call fell
 back to it). N is 300 (the guarded build's FD runtime held 128 FDs per
-process; now FD_RUNTIME_CAPACITY)."""
+process).
+
+Also one process holding 10000 FDs (many_fds_probe.c, fewer if the hard
+RLIMIT_NOFILE is lower): all made, and a write through the highest one
+arrives. The guarded build's runtime held 4096 then refused with ENOSPC;
+its table is now indexed by FD number, as many as RLIMIT_NOFILE allows."""
 import subprocess
 import sys
 import tempfile
@@ -25,6 +30,8 @@ with tempfile.TemporaryDirectory(prefix='many-blocked-', dir=lib.mode_capable())
     root = Path(tmp)
     subprocess.run(['clang', '-O1', '-static', '-pthread', str(Path(__file__).with_name('many_blocked_probe.c')),
                     '-o', str(root / 'probe')], check=True)
+    subprocess.run(['clang', '-O1', '-static', str(Path(__file__).with_name('many_fds_probe.c')),
+                    '-o', str(root / 'fds')], check=True)
     for suffix, loader in lib.loaders():
         count = 300
         for isolate in ([], ['--isolate']):
@@ -46,3 +53,11 @@ with tempfile.TemporaryDirectory(prefix='many-blocked-', dir=lib.mode_capable())
             assert int(many['deepest']) <= int(alone['deepest']), (what, alone['deepest'], many['deepest'])
             print(f'PASS: {count} threads blocked in the payload at once, every open done, no thread stack used'
                   f' deeper than one alone ({many["deepest"]} bytes):', *what)
+            p = subprocess.run([str(loader), *lib.ISOLATE_EXTRA, *isolate, '--mode', 'container',
+                                '--root', str(root), '--', './fds', '10000'], cwd='/',
+                               capture_output=True, text=True, timeout=300)
+            got = p.stdout.split()
+            assert p.returncode == 0 and len(got) >= 3 and got[2] == 'ok' and \
+                got[1].split('/')[0] == got[1].split('/')[1] and int(got[1].split('/')[0]) >= 4096, \
+                (what, p.returncode, p.stdout, p.stderr[-500:])
+            print(f'PASS: one process holding {got[1]} FDs, a write through the highest arrives:', *what)

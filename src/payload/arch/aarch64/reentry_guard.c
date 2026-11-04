@@ -17,8 +17,8 @@ static struct guard_table *g_table;
 /* Private payload storage, shared only by the supported vfork pair. Unlike a
  * public pool slot, this slot cannot be reused by a fork sibling before the
  * suspended parent completes retirement. */
-static struct reentry_slot vfork_slot;
-static long vfork_tid;
+static struct vfork_lease { long tid; struct reentry_slot slot; } vfork_leases[REENTRY_VFORKS];
+static int vfork_count; /* leases held: no scan while none */
 /* Experimental initial task binds at first entry; private-fork children reset
  * only their own copied slot. Its other threads use the per-process table. */
 static struct reentry_slot private_slot;
@@ -55,11 +55,13 @@ struct reentry_slot *reentry_try_enter(void)
     long tid = raw_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
     if (tid <= 0)
         return (struct reentry_slot *)(intptr_t)(tid < 0 ? tid : -EAGAIN);
-    if (__atomic_load_n(&vfork_tid, __ATOMIC_ACQUIRE) == tid) {
+    for (int i = 0; __atomic_load_n(&vfork_count, __ATOMIC_ACQUIRE) && i < REENTRY_VFORKS; i++) {
+        if (__atomic_load_n(&vfork_leases[i].tid, __ATOMIC_ACQUIRE) != tid)
+            continue;
         long empty = 0;
-        return __atomic_compare_exchange_n(&vfork_slot.tid, &empty, tid, 0,
+        return __atomic_compare_exchange_n(&vfork_leases[i].slot.tid, &empty, tid, 0,
                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
-            ? &vfork_slot : NULL;
+            ? &vfork_leases[i].slot : NULL;
     }
 #ifdef GUARDED
     /* Bind once at entry, before acquiring any lease. Binding later inside
@@ -160,16 +162,29 @@ void reentry_exec_restore(struct reentry_slot *slot)
 
 void reentry_vfork_begin(long tid)
 {
-    __atomic_store_n(&vfork_slot.tid, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&vfork_tid, tid, __ATOMIC_RELEASE);
+    for (int i = 0; i < REENTRY_VFORKS; i++) {
+        long free_owner = 0;
+        if (!__atomic_compare_exchange_n(&vfork_leases[i].tid, &free_owner, tid, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            continue;
+        __atomic_store_n(&vfork_leases[i].slot.tid, 0, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&vfork_count, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
 }
 
-void reentry_vfork_end(void)
+void reentry_vfork_end(long tid)
 {
     /* Caller proves the child cannot execute in this VM again. No TID liveness
      * guess or public slot lookup: even an interrupted acquisition is covered. */
-    __atomic_store_n(&vfork_tid, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&vfork_slot.tid, 0, __ATOMIC_RELEASE);
+    for (int i = 0; tid > 0 && i < REENTRY_VFORKS; i++) {
+        if (__atomic_load_n(&vfork_leases[i].tid, __ATOMIC_ACQUIRE) != tid)
+            continue;
+        __atomic_store_n(&vfork_leases[i].slot.tid, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&vfork_leases[i].tid, 0, __ATOMIC_RELEASE);
+        __atomic_sub_fetch(&vfork_count, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
 }
 
 void reentry_private_fork(long tid)

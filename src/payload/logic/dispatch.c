@@ -10,6 +10,7 @@
 #include "dispatch.h"
 #include "elf_abi.h"
 #include "fake_ids.h"
+#include "async_io.h"
 #include "hook_runtime.h"
 #include "host_syscall.h"
 #include "platform.h"
@@ -118,6 +119,8 @@ long dispatch_syscall(long number, long a[6])
         return routed;
     long faked;
     if (fake_ids_syscall(number, a, &faked))
+        return faked;
+    if (async_io_syscall(number, a, &faked))
         return faked;
     switch (number) {
     case __NR_mmap:

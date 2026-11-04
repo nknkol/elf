@@ -14,7 +14,10 @@ Expected, both builds, plain and with --isolate:
 - vfork: a clone with CLONE_VM|CLONE_VFORK and no new stack (Go's os/exec,
   from a goroutine), parent and child on one stack, uses at most 128 bytes
   more of it than an ordinary intercepted call (the clone path's C calls
-  run on a payload stack, as every other call's)."""
+  run on a payload stack, as every other call's);
+- vforks: while one thread's vfork child still holds its parent (sleeping
+  a second), another thread's vfork completes at once (the guarded build
+  serialized them: a second vfork waited for the first child, or failed)."""
 import subprocess
 import sys
 import tempfile
@@ -45,6 +48,8 @@ with tempfile.TemporaryDirectory(prefix='go-abi-', dir=lib.mode_capable()) as tm
             got = run('vfork').split()
             assert got[0] == 'open' and got[2] == 'vfork' and int(got[1]) > 0 and \
                 0 < int(got[3]) <= int(got[1]) + 128, (what, got)
+            got2 = run('vforks').split()
+            assert got2[:2] == ['vforks', 'ok'] and float(got2[2]) < 0.5, (what, got2)
             print('PASS: Go runtime ABI (data below a clone child\'s stack kept across its first call;'
                   ' x28 kept for a signal handler while blocked in the payload; vfork on the caller\'s stack'
-                  f' {got[3]} bytes, an openat {got[1]}):', *what)
+                  f' {got[3]} bytes, an openat {got[1]}; a second vfork during one in {got2[2]} s):', *what)

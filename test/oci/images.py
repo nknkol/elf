@@ -31,13 +31,16 @@ WORKLOADS = [
      '&& v/bin/python -c "import requests; print(\'requests\', requests.__version__)"', 'requests '),
     ('node:lts-alpine', ['-w', '/app'], 'npm init -y >/dev/null && npm install --silent lodash '
      '&& node -e "console.log(\'lodash\', require(\'lodash\').VERSION)"', 'lodash '),
-    # The image's own entrypoint: redis drops to its user with util-linux
+    # The images' own entrypoints: redis drops to its user with util-linux
     # setpriv (capabilities, PR_SET_KEEPCAPS) and listens on `*` and v6-only
-    # `::`. (nginx:alpine binds, but HarmonyOS refuses FIOASYNC on its
-    # worker channel, ENOTTY natively too, so no worker starts: STATUS.md.)
+    # `::`; nginx adds `listen [::]:80` next to `listen 80` and sets FIOASYNC
+    # on its worker channels (refused by HarmonyOS, emulated: async_io.h).
     ('redis:7-alpine', [], 'docker-entrypoint.sh redis-server --daemonize yes >/dev/null '
      '&& for i in $(seq 50); do redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 0.2; done; '
      'redis-cli set k v >/dev/null; echo redis $(redis-cli get k); redis-cli shutdown nosave', 'redis v'),
+    ('nginx:alpine', [], '/docker-entrypoint.sh nginx >/dev/null 2>&1; '
+     'wget -T 5 -qO- http://127.0.0.1/ | grep -o "Welcome to nginx"; wget -T 5 -qO- "http://[::1]/" | grep -c nginx; '
+     'nginx -s quit', 'Welcome to nginx'),
     # Go: static binaries with their own svc instructions (clone child stack,
     # x28, goroutine stacks of a few KiB).
     ('golang:1.23-alpine', ['-w', '/app'], 'printf "package main\\nimport \\"fmt\\"\\n'

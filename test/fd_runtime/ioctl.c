@@ -33,18 +33,18 @@ void run(long *sp)
     int nonblock=1;CHECK(call(__NR_ioctl,fd,FIONBIO,(long)&nonblock,0)==0);
     CHECK(call(__NR_fcntl,copy,F_GETFL,0,0)&O_NONBLOCK);
     CHECK(query(1,fd)==generation && query(2,fd)==description && query(3,fd)==0);
-    static long filler[FD_RUNTIME_CAPACITY-2];
-    for(int i=0;i<FD_RUNTIME_CAPACITY-2;i++) { filler[i]=call(__NR_dup,fd,0,0,0);CHECK(filler[i]>=0); }
-    CHECK(query(0,0)==FD_RUNTIME_CAPACITY && query(1,inherited)==-ENOENT);
+    static long filler[FD_TEST_CAPACITY-2];
+    for(int i=0;i<FD_TEST_CAPACITY-2;i++) { filler[i]=call(__NR_dup,fd,0,0,0);CHECK(filler[i]>=0); }
+    CHECK(query(0,0)==FD_TEST_CAPACITY && query(1,inherited)==-ENOENT);
     CHECK(call(__NR_ioctl,fd,FIOCLEX,0,0)==0 && query(3,fd)==1);
     CHECK(call(__NR_ioctl,fd,FIONCLEX,0,0)==0 && query(3,fd)==0);
     CHECK(call(__NR_ioctl,inherited,FIOCLEX,0,0)==-ENOSPC);
     CHECK(call(__NR_fcntl,inherited,F_GETFD,0,0)==0 && query(1,inherited)==-ENOENT);
-    CHECK(call(__NR_close,filler[FD_RUNTIME_CAPACITY-3],0,0,0)==0);
-    CHECK(call(__NR_ioctl,inherited,FIOCLEX,0,0)==0 && query(0,0)==FD_RUNTIME_CAPACITY);
+    CHECK(call(__NR_close,filler[FD_TEST_CAPACITY-3],0,0,0)==0);
+    CHECK(call(__NR_ioctl,inherited,FIOCLEX,0,0)==0 && query(0,0)==FD_TEST_CAPACITY);
     CHECK(query(3,inherited)==1 && query(2,inherited)==0 && call(__NR_fcntl,inherited,F_GETFD,0,0)==FD_CLOEXEC);
     CHECK(call(__NR_ioctl,inherited,FIONCLEX,0,0)==0 && query(3,inherited)==0);
-    for(int i=0;i<FD_RUNTIME_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+    for(int i=0;i<FD_TEST_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0 && call(__NR_close,copy,0,0,0)==0);
     CHECK(call(__NR_close,inherited,0,0,0)==0 && query(0,0)==0);
     static const char pass[]="PASS: runtime FD ioctl CLOEXEC tracking, inherited FD capacity and peer rejection\n";

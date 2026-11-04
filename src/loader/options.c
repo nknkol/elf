@@ -177,6 +177,12 @@ static int guarded_option(const char *arg, payload_config_t *cfg, int argc, char
 		cfg->fd_state = (int32_t)number(value(argc, argv, i), 2147483647ul, "fd state");
 		return 1;
 	}
+	if (is(arg, "--fd-capacity")) {
+		cfg->fd_capacity = (int32_t)number(value(argc, argv, i), 1ul << 20, "fd capacity");
+		if (!cfg->fd_capacity)
+			z_errx(1, "fd capacity must be positive");
+		return 1;
+	}
 	return 0;
 }
 

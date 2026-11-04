@@ -40,15 +40,15 @@ void _start(void)
     CHECK(call(__NR_close,handle,0,0,0)==0);
     long again=call(__NR_pidfd_getfd,alias,imported,0,0);CHECK(again>=0 && query(2,again)==0);
     CHECK(call(__NR_close,again,0,0,0)==0);
-    static long filler[FD_RUNTIME_CAPACITY-2];
-    for(int i=0;i<FD_RUNTIME_CAPACITY-2;i++) { filler[i]=call(__NR_dup,imported,0,0,0);CHECK(filler[i]>=0); }
-    CHECK(query(0,0)==FD_RUNTIME_CAPACITY);
+    static long filler[FD_TEST_CAPACITY-2];
+    for(int i=0;i<FD_TEST_CAPACITY-2;i++) { filler[i]=call(__NR_dup,imported,0,0,0);CHECK(filler[i]>=0); }
+    CHECK(query(0,0)==FD_TEST_CAPACITY);
     CHECK(call(__NR_pidfd_open,pid,0,0,0)==-ENOSPC);
-    CHECK(call(__NR_pidfd_getfd,alias,imported,0,0)==-ENOSPC && query(0,0)==FD_RUNTIME_CAPACITY);
-    CHECK(call(__NR_close,filler[FD_RUNTIME_CAPACITY-3],0,0,0)==0);
-    again=call(__NR_pidfd_getfd,alias,imported,0,0);CHECK(again>=0 && query(0,0)==FD_RUNTIME_CAPACITY && query(3,again)==1);
+    CHECK(call(__NR_pidfd_getfd,alias,imported,0,0)==-ENOSPC && query(0,0)==FD_TEST_CAPACITY);
+    CHECK(call(__NR_close,filler[FD_TEST_CAPACITY-3],0,0,0)==0);
+    again=call(__NR_pidfd_getfd,alias,imported,0,0);CHECK(again>=0 && query(0,0)==FD_TEST_CAPACITY && query(3,again)==1);
     CHECK(call(__NR_close,again,0,0,0)==0);
-    for(int i=0;i<FD_RUNTIME_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+    for(int i=0;i<FD_TEST_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
     CHECK(call(__NR_close,imported,0,0,0)==0 && call(__NR_close,alias,0,0,0)==0 && query(0,0)==0);
     static const char pass[]="PASS: runtime FD pidfd creation/import, shared offset, errors and capacity\n";
     call(__NR_write,1,(long)pass,sizeof(pass)-1,0);call(__NR_exit_group,0,0,0,0);for(;;){}

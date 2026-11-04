@@ -35,7 +35,7 @@
   negative number, an FD that is not open, or one from 898 up (the
   runtime's own) refuses the launch; repeats count once.
 - Limits: 64 mounts (private ones included), 512 environment entries,
-  255-byte paths and entries, no ":" in paths; payload ABI 28.
+  255-byte paths and entries, no ":" in paths; payload ABI 29.
 - Neither backend is a complete hostile-agent guarantee: kernel bugs,
   resource exhaustion, same-uid processes, network and the other residual
   risks in docs/ISOLATION.md remain.

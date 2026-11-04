@@ -25,16 +25,29 @@ struct fd_record {
     int passed;                /* --pass-fd object (fd_runtime admits it each start); same lifetime. */
 };
 /* Slots at and beyond `used` were never assigned and are not read: the
- * storage of a large capacity is touched only as far as FDs were held at
- * once, and every lookup scans that far, not the capacity. */
+ * storage of a large capacity is touched only as far as needed.
+ *
+ * Compact tables (fd_table_init) hold up to `capacity` records of any FD
+ * numbers, found by scanning the slots in use. Direct tables
+ * (fd_table_direct) hold FD n in slot n for n < capacity: every lookup is
+ * one index, and storage is touched up to the highest FD held. */
 struct fd_table {
     struct fd_record *slots;
     size_t capacity;
     uint64_t serial;
     size_t used;
+    size_t live;
+    size_t limit;   /* records held at most: capacity unless fd_table_limit */
+    int direct;
 };
 int fd_table_init(struct fd_table *, struct fd_record *, size_t);
-/* Records in use, and the room left (capacity minus those). */
+/* Make an empty table direct (it stays so across fd_table_reset). */
+int fd_table_direct(struct fd_table *);
+/* Hold at most limit records (<= capacity), whatever their FD numbers. */
+int fd_table_limit(struct fd_table *, size_t limit);
+/* Empty again: same storage, capacity, limit and mode; the serial restarts. */
+void fd_table_reset(struct fd_table *);
+/* Records in use, and the room left (the limit minus those). */
 size_t fd_table_live(const struct fd_table *);
 size_t fd_table_free(const struct fd_table *);
 const struct fd_record *fd_table_get(const struct fd_table *, int fd);

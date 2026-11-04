@@ -38,14 +38,14 @@ static void check_accept(void)
         long client=call(__NR_socket,AF_UNIX,SOCK_STREAM|SOCK_NONBLOCK,0,0);
         CHECK(client>=0);
         CHECK(call(__NR_connect,client,(long)&address,length,0)==0);
-        static long filler[FD_RUNTIME_CAPACITY-2];
+        static long filler[FD_TEST_CAPACITY-2];
         if(mode==0) {
-            for(int i=0;i<FD_RUNTIME_CAPACITY-2;i++) { filler[i]=call(__NR_dup,listener,0,0,0);CHECK(filler[i]>=0); }
-            CHECK(query(0,0)==FD_RUNTIME_CAPACITY);
+            for(int i=0;i<FD_TEST_CAPACITY-2;i++) { filler[i]=call(__NR_dup,listener,0,0,0);CHECK(filler[i]>=0); }
+            CHECK(query(0,0)==FD_TEST_CAPACITY);
             CHECK(call(__NR_accept,listener,0,0,0)==-ENOSPC);
             CHECK(call(__NR_accept4,listener,0,0,SOCK_CLOEXEC)==-ENOSPC);
-            CHECK(query(0,0)==FD_RUNTIME_CAPACITY);
-            CHECK(call(__NR_close,filler[FD_RUNTIME_CAPACITY-3],0,0,0)==0);
+            CHECK(query(0,0)==FD_TEST_CAPACITY);
+            CHECK(call(__NR_close,filler[FD_TEST_CAPACITY-3],0,0,0)==0);
         }
         struct sockaddr_un peer={0};unsigned peer_length=sizeof(peer);
         long accepted=call(mode==0?__NR_accept:__NR_accept4,listener,
@@ -56,8 +56,8 @@ static void check_accept(void)
         CHECK(!!(call(__NR_fcntl,accepted,F_GETFL,0,0)&O_NONBLOCK)==!!(EXPECT_ACCEPT_NONBLOCK&(1<<mode)));
         CHECK(query(2,accepted)!=query(2,listener));
         if(mode==0) {
-            CHECK(query(0,0)==FD_RUNTIME_CAPACITY);
-            for(int i=0;i<FD_RUNTIME_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+            CHECK(query(0,0)==FD_TEST_CAPACITY);
+            for(int i=0;i<FD_TEST_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
         }
         char c='A';CHECK(call(__NR_write,client,(long)&c,1,0)==1);
         c=0;CHECK(call(__NR_read,accepted,(long)&c,1,0)==1 && c=='A');
@@ -204,30 +204,30 @@ void _start(void)
     CHECK(call(__NR_socketpair,AF_UNIX,15,0,(long)ends)==-EINVAL);
     CHECK(call(__NR_socket,AF_UNIX,SOCK_STREAM|0x80000000,0,0)==-EINVAL);
     CHECK(query(0,0)==1 && ends[0]==-1 && ends[1]==-1);
-    static long fds[FD_RUNTIME_CAPACITY-1];
-    for(int i=0;i<FD_RUNTIME_CAPACITY-2;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
+    static long fds[FD_TEST_CAPACITY-1];
+    for(int i=0;i<FD_TEST_CAPACITY-2;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
     CHECK(call(__NR_pipe2,(long)ends,0,0,0)==-ENOSPC);
     CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)ends)==-ENOSPC);
-    CHECK(ends[0]==-1 && ends[1]==-1 && query(0,0)==FD_RUNTIME_CAPACITY-1);
-    CHECK(call(__NR_close,fds[FD_RUNTIME_CAPACITY-3],0,0,0)==0 && query(0,0)==FD_RUNTIME_CAPACITY-2);
-    CHECK(call(__NR_pipe2,(long)ends,0,0,0)==0 && query(0,0)==FD_RUNTIME_CAPACITY);
+    CHECK(ends[0]==-1 && ends[1]==-1 && query(0,0)==FD_TEST_CAPACITY-1);
+    CHECK(call(__NR_close,fds[FD_TEST_CAPACITY-3],0,0,0)==0 && query(0,0)==FD_TEST_CAPACITY-2);
+    CHECK(call(__NR_pipe2,(long)ends,0,0,0)==0 && query(0,0)==FD_TEST_CAPACITY);
     CHECK(query(1,ends[0])>0 && query(1,ends[1])>0);
     CHECK(call(__NR_close,ends[0],0,0,0)==0 && call(__NR_close,ends[1],0,0,0)==0);
-    CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)ends)==0 && query(0,0)==FD_RUNTIME_CAPACITY);
+    CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)ends)==0 && query(0,0)==FD_TEST_CAPACITY);
     CHECK(query(1,ends[0])>0 && query(1,ends[1])>0);
     CHECK(call(__NR_close,ends[0],0,0,0)==0 && call(__NR_close,ends[1],0,0,0)==0);
-    fds[FD_RUNTIME_CAPACITY-3]=call(__NR_dup,fd,0,0,0);CHECK(fds[FD_RUNTIME_CAPACITY-3]>=0);
-    for(int i=FD_RUNTIME_CAPACITY-2;i<FD_RUNTIME_CAPACITY-1;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
-    CHECK(query(0,0)==FD_RUNTIME_CAPACITY);
+    fds[FD_TEST_CAPACITY-3]=call(__NR_dup,fd,0,0,0);CHECK(fds[FD_TEST_CAPACITY-3]>=0);
+    for(int i=FD_TEST_CAPACITY-2;i<FD_TEST_CAPACITY-1;i++) { fds[i]=call(__NR_dup,fd,0,0,0);CHECK(fds[i]>=0); }
+    CHECK(query(0,0)==FD_TEST_CAPACITY);
     CHECK(call(__NR_socket,AF_UNIX,SOCK_STREAM,0,0)==-ENOSPC);
     CHECK(call(__NR_socketpair,AF_UNIX,SOCK_STREAM,0,(long)ends)==-ENOSPC);
     CHECK(call(__NR_pipe2,(long)ends,0,0,0)==-ENOSPC);
-    CHECK(call(__NR_dup,fd,0,0,0)==-ENOSPC && query(0,0)==FD_RUNTIME_CAPACITY);
+    CHECK(call(__NR_dup,fd,0,0,0)==-ENOSPC && query(0,0)==FD_TEST_CAPACITY);
     CHECK(call(__NR_memfd_create,(long)"no-room",0,0,0)==-ENOSPC);
-    CHECK(call(__NR_eventfd2,0,0,0,0)==-ENOSPC && query(0,0)==FD_RUNTIME_CAPACITY);
+    CHECK(call(__NR_eventfd2,0,0,0,0)==-ENOSPC && query(0,0)==FD_TEST_CAPACITY);
     CHECK(call(__NR_epoll_create1,0,0,0,0)==-ENOSPC);
     CHECK(call(__NR_timerfd_create,CLOCK_MONOTONIC,0,0,0)==-ENOSPC);
-    for(int i=0;i<FD_RUNTIME_CAPACITY-1;i++)CHECK(call(__NR_close,fds[i],0,0,0)==0);
+    for(int i=0;i<FD_TEST_CAPACITY-1;i++)CHECK(call(__NR_close,fds[i],0,0,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0 && query(0,0)==0);
     check_accept();
     static const char ok[]="PASS: runtime FD open/dup/fcntl/close/memfd/eventfd/epoll/timerfd/pipe2/socket/socketpair/accept/accept4, lifecycle rejection and capacity\n";

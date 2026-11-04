@@ -1,6 +1,6 @@
 # 当前进度与验收快照
 
-## 当前版本（2026-11-01，分支 `feat/fexecve`，payload ABI 28）
+## 当前版本（2026-11-05，分支 `feat/fexecve`，payload ABI 29）
 
 本节是唯一的当前状态说明；下面“历史增量”按时间记录每次改动，其中的 ABI 号、容量与“尚未接入”等描述
 只代表当时。架构总览见 [ARCHITECTURE.md](ARCHITECTURE.md)。
@@ -15,10 +15,10 @@
 | agent 启动器 `tools/agent_sandbox/launch.py` | 默认 `--backend isolate`（broker）；`--backend in-process` 为进程内 guard。两种后端视图一致 |
 | Docker/OCI `tools/oci/` | R1–R6 与 compose 网络、副本已实现（[OCI.md](OCI.md)）；宿主侧 Python，容器运行期间监视进程与 `-p` 转发器常驻 |
 
-**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-03）：`make check` 298（含 `test_go_abi.py`、`test_caps.py`、`test_many_blocked.py`、`test_go.py`）、`make check-guarded` 175、
+**验收基线**（HarmonyOS 真机 HAD-W32，2026-11-03）：`make check` 306（含 `test_go_abi.py`、`test_caps.py`、`test_many_blocked.py`、`test_go.py`、`test_async_io.py`）、`make check-guarded` 175、
 `make check-isolation` 304（含 `broker_stdio.py`；`device.py` 的过滤器/exec/broker 检查在 `--isolate` 与 `--isolate-device` 下都跑；含
 `pass_fd.py`、`lazy_parity.py`）、`make check-oci` 238（含宿主与 payload 合并视图的对照用例、守护进程随容器结束；把 `ELF_LOADER`/`ELF_LOADER_GUARDED` 指向加 `--isolate` 再 exec 的包装脚本，让全部容器都进隔离后同样 232 通过）、alpine/ubuntu 各 18/18（常规与 `ELF_LOADER_OPTIONS=--isolate` 下都跑），
-`test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过；真实镜像（`test/oci/images.py`）redis、golang、busybox
+`test/fs_policy/agent_launch.py`、`agent_brew.py` 在两种后端下通过；真实镜像（`test/oci/images.py`）redis、nginx、golang、busybox
 在常规、`--isolate` 与直接 elfloader 下通过。
 本轮审查修复（R1–R5 及后续竞争与异常修复）的用例映射与待补项见 [REVIEW_FIX_TESTS.md](REVIEW_FIX_TESTS.md)。
 
@@ -27,9 +27,10 @@
 - `--isolate` 的剩余风险：内核漏洞、资源耗尽（无 cgroup）、侧信道、同 uid 进程与系统服务、网络（见 ISOLATION.md）。
 - UDP（无连接的 sendto）不经 broker 检查；容器网络在不加 `--isolate` 时只是视图。
 - broker 拒绝数据报 UNIX 套接字：HarmonyOS hilog 在 broker 后端下报错但程序继续。
-- guarded 构建每个进程最多记录 4096 个 FD（含创建中的，`FD_RUNTIME_CAPACITY`），超过返回 ENOSPC；`docker run` 带只读卷或
-  `--read-only` 时用的就是 guarded 构建。同一进程同时只有一个 vfork 子进程，其他线程的 vfork 等它 exec 或退出。
-- nginx 起不了 worker：HarmonyOS 的套接字不支持 FIOASYNC/O_ASYNC（原生同样 ENOTTY/EINVAL），没有模拟。
+- guarded 构建的 FD 记录按 FD 号直接索引，FD 号上限取硬 RLIMIT_NOFILE 与 2^20 的较小者；同一进程最多 16 个 vfork 子进程
+  同时进行，再多的等待空位。
+- 信号驱动 I/O：HarmonyOS 的套接字与 pty 拒绝 FIOASYNC、O_ASYNC、F_SETOWN（原生同样），payload 接受并记下这些设置、
+  读回时返回它们，但不会发出 SIGIO（nginx 用不到这个信号；依赖 SIGIO 推动 I/O 的程序会等不到）；记录不随 exec 保留。
 - util-linux 的 `mount -o loop` 挂载成功但更新 utab 得到 EPERM、退出码 1（BusyBox 正常）。
 - `docker` 命令依赖宿主 python3（harmonybrew）；loader 本身不依赖。
 - 直接使用 loader 时，调用者留下的继承 FD 是显式交给 guest 的能力（agent 启动器默认关闭，`--pass-fd` 保留；交出的 FD 保留原有能力，不升级，经 payload 与直接调用一致，参数在启动前校验）。
@@ -494,3 +495,4 @@ exec 12→3 次请求，guarded 列目录 367→177 µs（[BENCHMARKS](BENCHMARK
 2026-11-04 守护进程随容器结束（[OCI](OCI.md)“exec”）：容器按进程组结束，而守护化的进程（fork、setsid、父进程退出后过继给 init，如 nginx、`redis --daemonize`）离开了所有登记的组，`docker run --rm`、stop、rm 之后仍在运行，占着容器地址上的端口，之后分到同一地址的容器 bind 得到 EADDRINUSE；pause（commit、cp）也停不住它们，build 的 RUN 留下的进程在读上层时还在。现在每个容器进程由它持有的 FD 901（容器的挂载表，guest 关不掉）识别，容器结束时扫描 `/proc/*/fd/901` 全部 SIGKILL，pause 逐个 SIGSTOP，RUN 步骤结束时同样清理。另：`--isolate` 下 broker 继承了调用者的 stdio，守护进程即使放开了自己的 stdio 也经 broker 让 `docker exec` 的管道不结束（exec 挂住）；broker 启动时改把 stdin/stdout（不开日志时含 stderr）换成 /dev/null。新增验收（`test/oci/run.py`，常规与 `--isolate`）：run --rm 主进程留下的守护进程、run -d 的主进程/exec/exec -d 留下的守护进程随 pause 停止并随 stop 结束、build 的 RUN 留下的守护进程随步骤结束；修改前的 runtime.py 与 build.py 上全部失败。验收：`make check` 290、check-guarded 175、check-isolation 300、check-oci 238（守护进程用例 6 项）、images.py redis 三种方式通过且之后无残留进程。另记：`test/fd_table/check_notify.py` 的孤儿子进程断言偶发失败（修改前的代码上 20 次 1 次，修改后 20 次 0 次），是既有问题。
 2026-11-04 多线程同时停在调用里：每个停在 payload 处理的调用里的线程占一个重入槽（默认构建 32、guarded 64）、一个 payload 栈（64）、`--isolate` 下一个 broker 通道（64，线程退出前一直占着）。80 个线程同时阻塞在 FIFO 的 openat 时，默认构建第 33 个起的调用得到 EAGAIN，主线程打开写端也失败，整个程序挂住；`--isolate` 下第 64 个起 EPERM；没拿到 payload 栈的线程在自己的栈上跑分发器（栈用量 3008→5952 字节，goroutine 的栈会被写穿）。Go 程序每个阻塞的 goroutine 占一个线程，会遇到。现在三者都是 1024 个，扫描只到曾同时用到的最多个数，平常的开销不变，payload 栈与通道仍在首次用时才建。新增验收 `test/proot/test_many_blocked.py`（默认构建 300 个线程、guarded 100 个，两种模式；每个 open 成功，线程栈用量不超过单线程时）；修改前的构建失败。guarded 构建的 FD 记录上限 128（150 个线程时 ENOSPC 后挂住）是 FD 运行时的既有设计上限，记入已知限制，未改。验收：`make check` 294、check-guarded 175、check-isolation 300、check-oci 238、alpine/ubuntu 18/18，images.py 的 redis、golang 三种方式通过。可重入表的单元测试 `guard_test.c` 按 1024 个槽改写；`fd_runtime/run.py` 的原生 vfork 基线（不经 loader）在一次全量运行中返回 128，单独重跑 3/3 通过，为宿主上的偶发失败。
 2026-11-04 Go 程序进入 `make check`，guarded 的 FD 容量与并发 vfork：(1) `test/proot/test_go.py` 运行提交在 `test/proot/goprobe/` 的静态 Go 程序（源码与重建命令同目录）：64 个 goroutine 并发文件调用、200 个 goroutine 同时阻塞在 FIFO 的 open、信号与异步抢占、16 个并发 os/exec、32 个回环 TCP 客户端，两种构建、常规与 `--isolate`。(2) Go 的 os/exec 以 CLONE_VFORK、不带新栈从 goroutine 上 clone，父子进程在 goroutine 栈上走 clone 路径：原先在那里存 800 字节上下文并调用 C（vfork 用 992–1088 字节，普通调用 432），现在 clone 路径与慢路径一样只在 guest 栈上存通用寄存器（272 字节帧），C 调用在 payload 栈上，vfork 也是 432 字节（`test_go_abi.py` 新增用例，修改前 992）。(3) guarded 的 FD 运行时每进程 128 条记录，超出 ENOSPC：Go 程序 200 个阻塞的 open、只读卷容器里连接多的服务都会遇到；现在 4096 条，记录表按“曾同时用到的最多条数”扫描与初始化（`fd_table.used`），少 FD 的进程开销不变，记录与 exec 快照移出运行时结构体，vfork 只复制在用的记录。fd_runtime 的容量用例按 `FD_RUNTIME_CAPACITY` 改写。(4) guarded 同时只允许一个 vfork 子进程，第二个并发的 vfork 返回 ENOSYS（Go 并发 os/exec 16 个中 15 个失败）；现在等前一个子进程 exec 或退出再进行。(5) `test/isolation/broker_stdio.py`：broker 不持有调用者的 stdio（开日志时保留 stderr），修改前的 broker 上失败。验收：`make check` 298、check-guarded 175、check-isolation 304、check-oci 238、alpine/ubuntu 18/18（常规与 `--isolate`），images.py 的 redis、golang 三种方式通过。
+2026-11-05 三项限制：(1) guarded 的 FD 记录表改为按 FD 号直接索引（`fd_table_direct`：FD n 在第 n 槽，查找一次下标；原先每次 read/write 检查都线性扫描记录），存储按需 mmap（MAP_NORESERVE，只占用到最高 FD 号为止），容量为硬 RLIMIT_NOFILE 与 2^20 的较小者，记录条数另有上限（`fd_table_limit`，默认等于容量）；exec 快照按实际大小临时映射（memfd 的大小用 lseek 取：HarmonyOS 上 fstat memfd 为 EACCES）；超出容量的快照条目按“该 FD 未打开”处理（ESTALE）。测试用的 `--fd-capacity N` 只限制记录条数并沿 exec 链传递（payload ABI 29）。一个进程持有 10000 个 FD 在 guarded 下可用（原先第 4094 个起 ENOSPC）。(2) guarded 的 vfork 状态（私有 FD 表、路径与 exec 的预留内存）由单份改为 16 份的池，可重入保护的 vfork 租约同样 16 份、按子进程 TID 结束；一个 vfork 子进程未离开时另一个线程的 vfork 立即进行（原先等待 0.9 s，更早是 ENOSYS）。(3) 信号驱动 I/O 的设置在内核拒绝时由 payload 记下并读回（`async_io.c`，按 FD 号与对象 dev/ino，号被复用即失效），不发 SIGIO；nginx:alpine 的 worker 因此能启动，`images.py` 重新加入 nginx（IPv4 与 `[::1]` 都能取到首页）。新增验收：`test_many_blocked.py` 的 10000 个 FD、`test_go_abi.py` 的并发 vfork、`test_async_io.py`、`guard_test.c` 的两个并发 vfork 租约；前两项在修改前的构建上失败，async_io 的设置在宿主上原生运行时被拒绝（ENOTTY/EINVAL）。验收：`make check` 306、check-guarded 175、check-isolation 304、check-oci 238、alpine/ubuntu 18/18（常规与 `--isolate`），images.py 的 busybox、redis、nginx、golang 三种方式通过。

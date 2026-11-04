@@ -54,6 +54,7 @@ check: build
 	$(PYTHON) test/proot/test_go_abi.py
 	$(PYTHON) test/proot/test_many_blocked.py
 	$(PYTHON) test/proot/test_go.py
+	$(PYTHON) test/proot/test_async_io.py
 	$(PYTHON) test/proot/test_auxv.py
 	$(PYTHON) test/proot/test_jit.py
 	$(PYTHON) test/syscalls/check_dispatch.py

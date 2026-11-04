@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef ELF_GUARDED_H
 #define ELF_GUARDED_H
-/* FDs one guarded process holds at most (ENOSPC beyond, in-flight
- * creations included). */
-#define FD_RUNTIME_CAPACITY 4096
+/* FD numbers one guarded process can hold: below its hard RLIMIT_NOFILE
+ * at start (the most it can raise its own limit to), at most this (Linux's
+ * default nr_open). The records are indexed by FD number and mapped on
+ * demand; beyond, a creation is ENOSPC. */
+#define FD_RUNTIME_CAPACITY (1u << 20)
 /* Private fork/bounded vfork FD experiment with optional path/FD mutation guards
  * and read/visibility guard; NOT a complete filesystem isolation mode. */
 #include <stddef.h>

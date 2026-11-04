@@ -61,9 +61,7 @@ int fd_snapshot_export(const struct fd_table *t, void *buffer, size_t capacity,
 int fd_snapshot_import(struct fd_table *t, const void *buffer, size_t bytes)
 {
     if (!buffer || bytes < FD_SNAPSHOT_HEADER_BYTES) return -EINVAL;
-    if (t->serial) return -EBUSY;
-    for (size_t i = 0; i < t->used; i++)
-        if (t->slots[i].fd >= 0) return -EBUSY;
+    if (t->serial || t->live) return -EBUSY;
     const unsigned char *p = buffer;
     if (get_word(p) != SNAPSHOT_MAGIC || get_word(p + 8) != SNAPSHOT_VERSION)
         return -EINVAL;
@@ -71,7 +69,7 @@ int fd_snapshot_import(struct fd_table *t, const void *buffer, size_t bytes)
     if ((bytes - FD_SNAPSHOT_HEADER_BYTES) % FD_SNAPSHOT_ENTRY_BYTES ||
         count != (bytes - FD_SNAPSHOT_HEADER_BYTES) / FD_SNAPSHOT_ENTRY_BYTES)
         return -EINVAL;
-    if (count > t->capacity) return -ENOSPC;
+    if (count > t->limit) return -ENOSPC;
     p += FD_SNAPSHOT_HEADER_BYTES;
     /* Validate before touching any destination slot. Bounded O(n^2) checking
      * avoids allocating a second table or storing untrusted pointer fields. */
@@ -97,15 +95,25 @@ int fd_snapshot_import(struct fd_table *t, const void *buffer, size_t bytes)
                 return -EINVAL;
         }
     }
+    /* A direct table holds FD n in slot n, for the FD numbers its process
+     * can have open: a record beyond names no open FD here. */
+    size_t top = 0;
+    for (size_t i = 0; t->direct && i < (size_t)count; i++) {
+        uint64_t fd = get_word(p + i * FD_SNAPSHOT_ENTRY_BYTES);
+        if (fd >= t->capacity) return -ESTALE;
+        if (fd + 1 > top) top = (size_t)fd + 1;
+    }
+    for (size_t i = 0; t->direct && i < top; i++) t->slots[i] = (struct fd_record){.fd = -1};
     for (size_t i = 0; i < (size_t)count; i++) {
         const unsigned char *r = p + i * FD_SNAPSHOT_ENTRY_BYTES;
-        t->slots[i] = (struct fd_record){
+        t->slots[t->direct ? (size_t)get_word(r) : i] = (struct fd_record){
             .fd = (int)get_word(r), .cloexec = 0,
             .generation = get_word(r + 16), .description = get_word(r + 24),
             .origin = {get_word(r + 32), (enum fd_access)get_word(r + 40)}
         };
     }
-    t->used = (size_t)count;
+    t->used = t->direct ? top : (size_t)count;
+    t->live = (size_t)count;
     t->serial = serial;
     return 0;
 }

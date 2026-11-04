@@ -28,7 +28,7 @@ int main(void) {
     reentry_vfork_begin(tid);
     struct reentry_slot *child=reentry_try_enter();assert((intptr_t)child>0 && child!=parent);
     assert(reentry_try_enter()==NULL);
-    reentry_vfork_end(); /* Child died while holding its lease. */
+    reentry_vfork_end(102); /* Child died while holding its lease. */
     tid=100;assert(reentry_try_enter()==NULL);
     reentry_leave(parent);
     parent=reentry_try_enter();assert((intptr_t)parent>0);reentry_leave(parent);

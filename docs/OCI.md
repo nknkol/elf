@@ -262,9 +262,9 @@ R6 加共享镜像的写时复制（`run --cow`：镜像 rootfs 作下层，`con
 - **loader 参数**：`--cwd`、`--user`、`--hostname` 的回归测试（`test/proot/`），常规与 `--isolate` 下通过。
 - **真实镜像**（常规与 `--isolate` 各一遍）：`alpine` 跑 apk add；`debian:bookworm-slim` 跑 apt-get install；
   `python:3.13-slim` 建 venv 并 pip install；`node:lts-alpine` 跑 npm install；`busybox` 静态程序；
-  `redis:7-alpine` 经自己的 entrypoint（setpriv 降到 redis 用户）启动并读写；`golang:1.23-alpine` 编译、运行、vet
-  一个程序。`nginx:alpine` 能同时监听 `80` 与 `[::]:80`，但起不了 worker：HarmonyOS 的套接字不支持 FIOASYNC
-  （ENOTTY，O_ASYNC 为 EINVAL，宿主上原生运行也一样），nginx 给 worker 通道设 FIOASYNC 失败后放弃创建 worker。
+  `redis:7-alpine` 经自己的 entrypoint（setpriv 降到 redis 用户）启动并读写；`nginx:alpine` 经自己的 entrypoint
+  （同时监听 `80` 与 `[::]:80`，给 worker 通道设 FIOASYNC：HarmonyOS 拒绝，payload 记下设置，不发 SIGIO）提供首页，
+  IPv4 与 `[::1]` 都能访问；`golang:1.23-alpine` 编译、运行、vet 一个程序。
   记录耗时，与同一 rootfs 直接用 elfloader 运行相比不应变慢。
 
 ## R2 管理

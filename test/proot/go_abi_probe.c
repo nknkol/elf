@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -150,6 +151,50 @@ static void *vfork_thread(void *unused)
                           WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
+/* clone(CLONE_VM|CLONE_VFORK|SIGCHLD); the child sleeps `ms` (the vfork
+ * still holds the parent), then exits. */
+static long raw_vfork_sleep(long ms)
+{
+    struct { long sec, nsec; } pause = {ms / 1000, (ms % 1000) * 1000000};
+    register long x0 __asm__("x0") = 0x4111;
+    register long x1 __asm__("x1") = 0;
+    register long x2 __asm__("x2") = 0, x3 __asm__("x3") = 0, x4 __asm__("x4") = 0;
+    register long x8 __asm__("x8") = SYS_clone;
+    register long x19 __asm__("x19") = (long)&pause;
+    __asm__ volatile("svc #0\n cbnz x0, 1f\n"
+                     "mov x0, x19\n mov x1, #0\n mov x8, #101\n svc #0\n"
+                     "mov x0, #0\n mov x8, #93\n svc #0\n"
+                     "1:\n"
+                     : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8), "r"(x19) : "memory");
+    return x0;
+}
+
+static double now_seconds(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static double second_took;
+static void *slow_vfork(void *unused)
+{
+    (void)unused;
+    long pid = raw_vfork_sleep(1000);
+    int status;
+    return (void *)(long)(pid > 0 && waitpid((pid_t)pid, &status, 0) == pid);
+}
+static void *quick_vfork(void *unused)
+{
+    (void)unused;
+    usleep(100000);
+    double began = now_seconds();
+    long pid = raw_vfork_sleep(0);
+    second_took = now_seconds() - began;
+    int status;
+    return (void *)(long)(pid > 0 && waitpid((pid_t)pid, &status, 0) == pid);
+}
+
 /* Bytes below the call site's SP the call used; -1 on failure. */
 static long depth_of(void *(*fn)(void *))
 {
@@ -169,6 +214,16 @@ int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "exit"))
         return 0;
+    if (argc == 2 && !strcmp(argv[1], "vforks")) {
+        pthread_t a, b;
+        void *ra = 0, *rb = 0;
+        pthread_create(&a, 0, slow_vfork, 0);
+        pthread_create(&b, 0, quick_vfork, 0);
+        pthread_join(a, &ra);
+        pthread_join(b, &rb);
+        printf("vforks %s %.2f\n", ra && rb ? "ok" : "failed", second_took);
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "vfork")) {
         printf("open %ld vfork %ld\n", depth_of(open_thread), depth_of(vfork_thread));
         return 0;

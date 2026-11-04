@@ -21,10 +21,10 @@
 #include "dispatch.h"
 #include "proot_bridge.h"
 #include <string.h>
-/* FDs one process may hold (records); untouched beyond the most held at
- * once (fd_table `used`). The records and the exec snapshot sit outside the
- * runtime, which a vfork child copies: the copy takes only records in use. */
-#define CAPACITY FD_RUNTIME_CAPACITY
+/* The records: a direct table (FD n in slot n), mapped without reserve and
+ * touched up to the highest FD held; outside the runtime, which a vfork
+ * child copies (the copy takes only the slots in use). The exec snapshot is
+ * mapped for the export or restore only. */
 struct fd_runtime {
     struct fd_registry registry;
     struct fd_task_slot tasks[1];
@@ -54,15 +54,43 @@ struct fd_runtime {
     /* The serialized table for exec handoff, kept off the guest stack: a
      * vfork child may run on musl's posix_spawn stack (about 5 KiB). Used
      * under the lock, or before the runtime is published. */
-#define STATE_BYTES (FD_SNAPSHOT_HEADER_BYTES+CAPACITY*FD_SNAPSHOT_ENTRY_BYTES)
-    unsigned char *snapshot;
+    size_t capacity;
 };
-static struct fd_record primary_records[CAPACITY], vfork_records[CAPACITY];
-static unsigned char primary_snapshot[STATE_BYTES], vfork_snapshot[STATE_BYTES];
-static struct fd_runtime primary = {.records = primary_records, .snapshot = primary_snapshot},
-                         vfork_child = {.records = vfork_records, .snapshot = vfork_snapshot};
-static int vfork_active;
-static struct scratch_slot { void *address;size_t size;int used; } scratch[2];
+static struct fd_runtime primary;
+
+extern long raw_syscall(long,long,long,long,long,long,long);
+/* Anonymous memory, no reserve: pages count once touched. */
+static void *map_records(size_t count)
+{
+    long mem=raw_syscall(__NR_mmap,0,(long)(count*sizeof(struct fd_record)),3 /* RW */,
+                         0x22 | 0x4000 /* MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE */,-1,0);
+    return (unsigned long)mem>=(unsigned long)-4095 ? 0 : (void *)mem;
+}
+/* FD numbers held: below FD_RUNTIME_CAPACITY or the hard RLIMIT_NOFILE. */
+static size_t runtime_capacity(void)
+{
+    size_t capacity=FD_RUNTIME_CAPACITY;
+    struct { unsigned long cur, max; } limit;
+    if(!raw_syscall(__NR_prlimit64,0,7 /* RLIMIT_NOFILE */,0,(long)&limit,0,0) && limit.max<capacity)
+        capacity=limit.max ? limit.max : 1;
+    return capacity;
+}
+/* vfork children of this process, each with a private FD arena (it shares
+ * the VM but its FD changes must not reach the suspended parent's records)
+ * and the path/exec scratch the parent reserved for it. Up to
+ * REENTRY_VFORKS at once (Go's os/exec vforks from any goroutine); one more
+ * waits for a slot. */
+struct scratch_slot { void *address;size_t size;int used; };
+struct vfork_state {
+    struct fd_runtime rt;
+    struct scratch_slot scratch[2];
+    struct fd_record *records;
+    size_t records_capacity;
+    struct reentry_slot *lease;   /* the parent's, for its return */
+    int busy;
+};
+static struct vfork_state vforks[REENTRY_VFORKS];
+static int vforks_busy;
 #include "fd_receive.h"
 extern long raw_syscall(long,long,long,long,long,long,long);
 static int start(struct fd_runtime *s);
@@ -129,29 +157,62 @@ static int reused_since(const struct fd_runtime *s,int fd,uint64_t since)
         if(s->closed[e%CLOSE_RING].fd==fd)return 1;
     return 0;
 }
+/* The vfork child this thread is, if any. */
+static struct vfork_state *current_vfork(void)
+{
+    if(!__atomic_load_n(&vforks_busy,__ATOMIC_ACQUIRE))return 0;
+    long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
+    for(int i=0;i<REENTRY_VFORKS;i++)
+        if(__atomic_load_n(&vforks[i].busy,__ATOMIC_ACQUIRE) && vforks[i].rt.owner_tid==tid)
+            return &vforks[i];
+    return 0;
+}
 static struct fd_runtime *current(void)
 {
-    if(!vfork_active)return &primary;
-    long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
-    return vfork_active && tid==vfork_child.owner_tid ? &vfork_child : &primary;
+    struct vfork_state *v=current_vfork();
+    return v ? &v->rt : &primary;
 }
-static void scratch_discard(void)
+static void scratch_discard(struct vfork_state *v)
 {
     for(int i=0;i<2;i++) {
-        if(scratch[i].address)
-            raw_syscall(__NR_munmap,(long)scratch[i].address,scratch[i].size,0,0,0,0);
-        scratch[i]=(struct scratch_slot){0};
+        if(v->scratch[i].address)
+            raw_syscall(__NR_munmap,(long)v->scratch[i].address,v->scratch[i].size,0,0,0,0);
+        v->scratch[i]=(struct scratch_slot){0};
     }
 }
-static int scratch_prepare(void)
+static int scratch_prepare(struct vfork_state *v)
 {
     size_t sizes[]={proot_bridge_scratch_size(),proot_exec_scratch_size()};
     for(int i=0;i<2;i++) {
         long mem=raw_syscall(__NR_mmap,0,sizes[i],3,0x22,-1,0);
-        if((unsigned long)mem>=(unsigned long)-4095) { scratch_discard();return mem; }
-        scratch[i]=(struct scratch_slot){(void *)mem,sizes[i],0};
+        if((unsigned long)mem>=(unsigned long)-4095) { scratch_discard(v);return mem; }
+        v->scratch[i]=(struct scratch_slot){(void *)mem,sizes[i],0};
     }
     return 0;
+}
+/* A free slot, waiting while all are taken (a vfork child leaves the VM
+ * soon: exec or exit). */
+static struct vfork_state *vfork_claim(void)
+{
+    for(;;) {
+        for(int i=0;i<REENTRY_VFORKS;i++) {
+            int idle=0;
+            if(__atomic_compare_exchange_n(&vforks[i].busy,&idle,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+                vforks[i].rt.owner_tid=0;
+                __atomic_add_fetch(&vforks_busy,1,__ATOMIC_ACQ_REL);
+                return &vforks[i];
+            }
+        }
+        struct { long sec, nsec; } pause={0,1000000};
+        raw_syscall(__NR_nanosleep,(long)&pause,0,0,0,0,0);
+    }
+}
+static void vfork_release(struct vfork_state *v)
+{
+    scratch_discard(v);
+    v->rt.owner_tid=0;
+    __atomic_store_n(&v->busy,0,__ATOMIC_RELEASE);
+    __atomic_sub_fetch(&vforks_busy,1,__ATOMIC_ACQ_REL);
 }
 /* pthread_create on musl and glibc: one thread group sharing VM, FS and FILES. */
 #define THREAD_REQUIRED (CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD)
@@ -168,52 +229,51 @@ int clone_observer_before(struct clone_event *event)
     int vf=event->flags==(CLONE_VM|CLONE_VFORK|17ul);
     int thread=thread_clone(event->flags);
     if(!vf && !thread && ((event->flags & 255)!=17 || (event->flags & ~(allowed|255ul))))return -ENOSYS;
-    /* One suspended parent and one child at a time: the vfork child itself
-     * cannot clone. Other threads of the parent keep running and may still
-     * clone; one that vforks meanwhile waits for the child to leave the VM
-     * (exec or exit: soon), holding nothing yet (Go's os/exec vforks from
-     * any number of goroutines at once). */
-    if(vfork_active && current()==&vfork_child)return -ENOSYS;
-    if(vf) {
-        int idle=0;
-        while(!__atomic_compare_exchange_n(&vfork_active,&idle,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
-            struct { long sec, nsec; } pause={0,1000000};
-            raw_syscall(__NR_nanosleep,(long)&pause,0,0,0,0,0);
-            idle=0;
-        }
-    }
+    /* A vfork child itself cannot clone. Other threads of the parent keep
+     * running and may still clone or vfork (each vfork child its own slot,
+     * claimed before anything else is held). */
+    if(current_vfork())return -ENOSYS;
+    struct vfork_state *v=vf?vfork_claim():0;
     struct reentry_slot *slot=reentry_try_enter();
     if(!slot||(uintptr_t)slot>=(uintptr_t)-4095) {
-        if(vf)__atomic_store_n(&vfork_active,0,__ATOMIC_RELEASE);
+        if(v)vfork_release(v);
         return !slot?-EDEADLK:(long)slot;
     }
     struct fd_runtime *s=&primary;
     int rc=start(s);
-    if(rc<0) { if(vf)__atomic_store_n(&vfork_active,0,__ATOMIC_RELEASE);reentry_leave(slot);return rc; }
+    if(rc<0) { if(v)vfork_release(v);reentry_leave(slot);return rc; }
     /* Threads share the runtime: nothing to copy. A fork copies the whole VM,
      * so hold the metadata lock across it for a consistent child snapshot;
      * the parent releases it in finish and the child resets its copy. */
     if(!thread)lock(s);
     if(vf) {
-        rc=scratch_prepare();
-        if(rc) { unlock(s);__atomic_store_n(&vfork_active,0,__ATOMIC_RELEASE);reentry_leave(slot);return rc; }
-        vfork_child=*s;
+        rc=scratch_prepare(v);
+        if(rc) { unlock(s);vfork_release(v);reentry_leave(slot);return rc; }
+        if(v->records_capacity!=s->capacity) {
+            if(v->records)
+                raw_syscall(__NR_munmap,(long)v->records,(long)(v->records_capacity*sizeof(*v->records)),0,0,0,0);
+            v->records=map_records(s->capacity);
+            v->records_capacity=v->records?s->capacity:0;
+        }
+        if(!v->records) { unlock(s);vfork_release(v);reentry_leave(slot);return -ENOMEM; }
+        v->rt=*s;
         /* Fix all pointers into the copied arena; copy the records in use. */
-        vfork_child.records=vfork_records;
-        vfork_child.snapshot=vfork_snapshot;
-        memcpy(vfork_records,s->records,s->tables[0].table.used*sizeof(*vfork_records));
-        vfork_child.registry.tasks=vfork_child.tasks;
-        vfork_child.registry.tables=vfork_child.tables;
-        vfork_child.tables[0].table.slots=vfork_child.records;
-        fd_close_queue_init(&vfork_child.queue,vfork_child.pending,8);
-        vfork_child.owner_tid=0;
-        vfork_child.lock=0;
-        vfork_child.reserved=0;
+        v->rt.records=v->records;
+        memcpy(v->records,s->records,s->tables[0].table.used*sizeof(*v->records));
+        v->rt.registry.tasks=v->rt.tasks;
+        v->rt.registry.tables=v->rt.tables;
+        v->rt.tables[0].table.slots=v->rt.records;
+        fd_close_queue_init(&v->rt.queue,v->rt.pending,8);
+        v->rt.owner_tid=0;
+        v->rt.lock=0;
+        v->rt.reserved=0;
+        v->lease=slot;
         unlock(s);
     }
-    /* Only the returning parent dereferences this lease. A private-fork
-     * descendant may hold a private slot; child finish/cleanup never touch it. */
-    event->cookie=slot;
+    /* Only the returning parent dereferences this lease (a vfork's: through
+     * its slot). A private-fork descendant may hold a private slot; child
+     * finish/cleanup never touch it. */
+    event->cookie=v?(void *)v:(void *)slot;
     return 0;
 }
 void clone_observer_finish(const struct clone_event *event,long result)
@@ -229,16 +289,18 @@ void clone_observer_finish(const struct clone_event *event,long result)
         if(vf) {
             /* Kernel vfork return proves the child left this VM (exec/exit),
              * or clone failed. Its FD changes never touched primary. */
-            scratch_discard();
-            reentry_vfork_end();
-            /* (The next vfork marks itself active before it copies the
-             * runtime: no thread may match this child's TID meanwhile.) */
-            vfork_child.owner_tid=0;
-            __atomic_store_n(&vfork_active,0,__ATOMIC_RELEASE);
-        } else unlock(&primary);
-        reentry_leave(event->cookie);return;
+            struct vfork_state *v=event->cookie;
+            struct reentry_slot *lease=v->lease;
+            reentry_vfork_end(result);
+            vfork_release(v);
+            reentry_leave(lease);
+        } else {
+            unlock(&primary);
+            reentry_leave(event->cookie);
+        }
+        return;
     }
-    struct fd_runtime *s=vf?&vfork_child:&primary;
+    struct fd_runtime *s=vf?&((struct vfork_state *)event->cookie)->rt:&primary;
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
     if(vf)reentry_vfork_begin(tid);
     else {
@@ -262,23 +324,25 @@ void clone_observer_finish(const struct clone_event *event,long result)
  * munmap/unregistration death windows for the migrated path/exec scratch. */
 long fd_runtime_scratch_alloc(size_t size)
 {
-    if(current()!=&vfork_child)return raw_syscall(__NR_mmap,0,size,3,0x22,-1,0);
+    struct vfork_state *v=current_vfork();
+    if(!v)return raw_syscall(__NR_mmap,0,size,3,0x22,-1,0);
     int best=-1;
-    for(int i=0;i<2;i++)if(!scratch[i].used && size<=scratch[i].size &&
-        (best<0 || scratch[i].size<scratch[best].size))best=i;
+    for(int i=0;i<2;i++)if(!v->scratch[i].used && size<=v->scratch[i].size &&
+        (best<0 || v->scratch[i].size<v->scratch[best].size))best=i;
     if(best>=0) {
-        scratch[best].used=1;
-        memset(scratch[best].address,0,size);
-        return (long)scratch[best].address;
+        v->scratch[best].used=1;
+        memset(v->scratch[best].address,0,size);
+        return (long)v->scratch[best].address;
     }
     return -ENOMEM;
 }
-bool fd_runtime_shared_scratch(void) { return current()!=&vfork_child; }
+bool fd_runtime_shared_scratch(void) { return !current_vfork(); }
 void fd_runtime_scratch_free(void *address,size_t size)
 {
-    if(current()==&vfork_child) {
-        for(int i=0;i<2;i++)if(scratch[i].address==address) {
-            scratch[i].used=0;return;
+    struct vfork_state *v=current_vfork();
+    if(v) {
+        for(int i=0;i<2;i++)if(v->scratch[i].address==address) {
+            v->scratch[i].used=0;return;
         }
         return;
     }
@@ -350,6 +414,23 @@ static int admit_passed_fds(struct fd_runtime *s)
     }
     return 0;
 }
+/* The snapshot of an exec, read into memory mapped for it. */
+static int restore_snapshot(struct fd_table *table,int transport)
+{
+    /* (fstat of the memfd is EACCES on HarmonyOS; its end is its size.) */
+    long size=raw_syscall(__NR_lseek,transport,0,2 /* SEEK_END */,0,0,0);
+    if(size<0)return (int)size;
+    if((unsigned long)size>FD_SNAPSHOT_HEADER_BYTES+(unsigned long)table->capacity*FD_SNAPSHOT_ENTRY_BYTES)
+        return -ENOSPC;
+    long rc;
+    /* Room for a header at least (fd_handoff_restore checks that first). */
+    size_t length=(size_t)size+1+FD_SNAPSHOT_HEADER_BYTES;
+    long mem=raw_syscall(__NR_mmap,0,(long)length,3,0x22,-1,0);
+    if((unsigned long)mem>=(unsigned long)-4095)return (int)mem;
+    rc=fd_handoff_restore(table,transport,(void *)mem,length);
+    raw_syscall(__NR_munmap,mem,(long)length,0,0,0,0);
+    return (int)rc;
+}
 static int start(struct fd_runtime *s)
 {
     long tid=raw_syscall(__NR_gettid,0,0,0,0,0,0);
@@ -363,14 +444,27 @@ static int start(struct fd_runtime *s)
     if(state==3)return s->init_error;
     int empty=0;
     if(!__atomic_compare_exchange_n(&s->initialized,&empty,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return -EAGAIN;
-    fd_registry_init(&s->registry,s->tasks,1,s->tables,1,s->records,CAPACITY);
+    if(!s->records) {
+        s->capacity=runtime_capacity();
+        s->records=map_records(s->capacity);
+        if(!s->records) {
+            s->init_error=-ENOMEM;
+            __atomic_store_n(&s->initialized,3,__ATOMIC_RELEASE);
+            return -ENOMEM;
+        }
+    }
+    fd_registry_init(&s->registry,s->tasks,1,s->tables,1,s->records,s->capacity);
+    fd_table_direct(&s->tables[0].table);
+    /* --fd-capacity: fewer records (capacity-boundary tests). */
+    if(g_payload_config.fd_capacity>0 && (size_t)g_payload_config.fd_capacity<s->capacity)
+        fd_table_limit(&s->tables[0].table,(size_t)g_payload_config.fd_capacity);
     fd_close_queue_init(&s->queue,s->pending,8);
     fd_registry_create(&s->registry,&s->owner);
     fd_registry_publish(&s->registry,s->owner,tid);
     if(g_payload_config.fd_state>=0) {
         struct fd_table *table=fd_registry_table(&s->registry,s->owner);
         int transport=g_payload_config.fd_state;
-        int rc=fd_handoff_restore(table,transport,s->snapshot,STATE_BYTES);
+        int rc=restore_snapshot(table,transport);
         if(!rc)for(size_t i=0;i<table->used;i++) {
             struct fd_record *record=&table->slots[i];
             if(record->fd<0)continue;
@@ -415,7 +509,15 @@ long fd_runtime_export(void)
     struct fd_runtime *s=current();
     /* FDs other threads create after this snapshot restore as unknown. */
     lock(s);
-    long rc=fd_handoff_create(fd_registry_table(&s->registry,s->owner),s->snapshot,STATE_BYTES);
+    struct fd_table *table=fd_registry_table(&s->registry,s->owner);
+    size_t size=0;
+    long rc=fd_snapshot_size(table,&size);
+    long mem=rc?rc:raw_syscall(__NR_mmap,0,(long)size,3,0x22,-1,0);
+    if((unsigned long)mem>=(unsigned long)-4095)rc=mem;
+    else {
+        rc=fd_handoff_create(table,(void *)mem,size);
+        raw_syscall(__NR_munmap,mem,(long)size,0,0,0,0);
+    }
     unlock(s);
     return rc;
 }
@@ -424,7 +526,7 @@ long fd_runtime_export(void)
 static int room(struct fd_runtime *s,struct fd_table *t,int target,int assign,size_t need)
 {
     if(target>=0 && fd_table_get(t,target))need=0;
-    if(t->serial>UINT64_MAX-CAPACITY && (assign || need))return -EOVERFLOW;
+    if(t->serial>UINT64_MAX-t->capacity && (assign || need))return -EOVERFLOW;
     size_t free_slots=0;
     free_slots=fd_table_free(t);
     if(free_slots<s->reserved+need)return -ENOSPC;
@@ -662,7 +764,7 @@ static long guarded_mapping(struct fd_runtime *s, struct fd_table *t, long n, lo
     /* vfork shares VM but uses a private FD arena. Do not publish divergent
      * mapping records until shared-VM lifecycle accounting exists. Threads
      * share primary's records under the metadata lock. */
-    if(s==&vfork_child)return -EOPNOTSUPP;
+    if(s!=&primary)return -EOPNOTSUPP;
     if(n==__NR_pkey_mprotect)return -ENOSYS;
     if(n==__NR_mremap) {
         long result=dispatch_syscall(n,a);

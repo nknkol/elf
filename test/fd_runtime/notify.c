@@ -51,22 +51,22 @@ void _start(void)
     long pid=call(__NR_getpid,0,0,0,0),tid=call(__NR_gettid,0,0,0,0);
     CHECK(call(__NR_tgkill,pid,tid,SIGUSR1,0)==0);
     CHECK(call(__NR_read,fd,(long)&info,sizeof(info),0)==sizeof(info) && info.ssi_signo==SIGUSR1);
-    long generation=query(1,fd),description=query(2,fd);static long fillers[FD_RUNTIME_CAPACITY-1];
-    for(int i=0;i<FD_RUNTIME_CAPACITY-1;i++) { fillers[i]=call(__NR_dup,fd,0,0,0);CHECK(fillers[i]>=0); }
-    CHECK(query(0,0)==FD_RUNTIME_CAPACITY);
+    long generation=query(1,fd),description=query(2,fd);static long fillers[FD_TEST_CAPACITY-1];
+    for(int i=0;i<FD_TEST_CAPACITY-1;i++) { fillers[i]=call(__NR_dup,fd,0,0,0);CHECK(fillers[i]>=0); }
+    CHECK(query(0,0)==FD_TEST_CAPACITY);
     CHECK(call(__NR_inotify_init1,0,0,0,0)==-ENOSPC);
     CHECK(call(__NR_signalfd4,-1,(long)&mask,8,0)==-ENOSPC);
     CHECK(call(__NR_signalfd4,fd,(long)&mask,4,0)==-EINVAL);
     CHECK(call(__NR_signalfd4,fd,(long)&mask,8,0x80000000)==-EINVAL);
-    CHECK(query(0,0)==FD_RUNTIME_CAPACITY && query(1,fd)==generation && query(3,fd)==1);
+    CHECK(query(0,0)==FD_TEST_CAPACITY && query(1,fd)==generation && query(3,fd)==1);
     mask=1ul<<(SIGUSR2-1);
     CHECK(call(__NR_signalfd4,fd,(long)&mask,8,0)==fd);
-    CHECK(query(0,0)==FD_RUNTIME_CAPACITY && query(1,fd)==generation && query(2,fd)==description && query(3,fd)==1);
+    CHECK(query(0,0)==FD_TEST_CAPACITY && query(1,fd)==generation && query(2,fd)==description && query(3,fd)==1);
     CHECK(call(__NR_fcntl,fd,F_GETFD,0,0)==FD_CLOEXEC && (call(__NR_fcntl,fd,F_GETFL,0,0)&O_NONBLOCK));
     CHECK(call(__NR_tgkill,pid,tid,SIGUSR2,0)==0);
     CHECK(call(__NR_close,fd,0,0,0)==0);
     CHECK(call(__NR_read,fillers[0],(long)&info,sizeof(info),0)==sizeof(info) && info.ssi_signo==SIGUSR2);
-    for(int i=0;i<FD_RUNTIME_CAPACITY-1;i++)CHECK(call(__NR_close,fillers[i],0,0,0)==0);
+    for(int i=0;i<FD_TEST_CAPACITY-1;i++)CHECK(call(__NR_close,fillers[i],0,0,0)==0);
     fd=call(__NR_signalfd4,-1,(long)&mask,8,0);CHECK(fd>=0 && query(3,fd)==0);
     CHECK(call(__NR_signalfd4,fd,(long)&mask,8,SFD_CLOEXEC|SFD_NONBLOCK)==fd);
     CHECK(query(3,fd)==0 && call(__NR_fcntl,fd,F_GETFD,0,0)==0);

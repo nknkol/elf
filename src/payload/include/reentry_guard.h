@@ -5,11 +5,12 @@ struct reentry_slot;
 /* Slot on success; NULL for same-thread recursion; negative errno pointer
  * on failure/capacity exhaustion. Callers must distinguish all three. */
 struct reentry_slot *reentry_try_enter(void);
-/* Single nonnested vfork child only. Begin before it can enter guest code;
- * end only after kernel vfork return proves it left this VM (or clone failed).
- * These manage a dedicated slot and never reclaim shared-pool owners by TID. */
+/* vfork children, each nonnested, up to REENTRY_VFORKS at once. Begin (in
+ * the child) before it can enter guest code; end (in the parent, with the
+ * child's TID) only after kernel vfork return proves it left this VM. */
+#define REENTRY_VFORKS 16
 void reentry_vfork_begin(long tid);
-void reentry_vfork_end(void);
+void reentry_vfork_end(long tid);
 /* Call only in a confirmed private-VM fork child before entering guest code.
  * Resets its copied slot without touching the parent's active ownership. */
 void reentry_private_fork(long tid);
