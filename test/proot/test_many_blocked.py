@@ -12,8 +12,8 @@ payload stack ran the dispatcher on its own (goroutine-sized) stack.
 
 Expected, both builds, plain and with --isolate: every open succeeds, and
 no thread's stack is used deeper than with a single thread (no call fell
-back to it). N is 300; the guarded build records at most 128 FDs per
-process (FD_POLICY_PLAN.md: ENOSPC beyond), so 100 there."""
+back to it). N is 300 (the guarded build's FD runtime held 128 FDs per
+process; now FD_RUNTIME_CAPACITY)."""
 import subprocess
 import sys
 import tempfile
@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='many-blocked-', dir=lib.mode_capable())
     subprocess.run(['clang', '-O1', '-static', '-pthread', str(Path(__file__).with_name('many_blocked_probe.c')),
                     '-o', str(root / 'probe')], check=True)
     for suffix, loader in lib.loaders():
-        count = 100 if suffix else 300
+        count = 300
         for isolate in ([], ['--isolate']):
             what = (loader.name, *isolate)
 

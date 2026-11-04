@@ -8,7 +8,13 @@
  *
  * x28: Go keeps g in x28 and its signal handler reads it from there. A
  * thread blocks in openat on a FIFO (a call the payload translates, so it
- * blocks inside the payload) with x28 set; a signal's handler records x28. */
+ * blocks inside the payload) with x28 set; a signal's handler records x28.
+ *
+ * vfork: os/exec clones with CLONE_VM|CLONE_VFORK and no new stack from a
+ * goroutine, so parent and child run the clone path on the goroutine's
+ * stack (a few hundred bytes below SP before the next goroutine's). On a
+ * pattern-filled thread stack, how deep that goes is compared with an
+ * ordinary intercepted call (openat) made the same way. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -18,7 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sched.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -72,8 +80,99 @@ static void *blocked_open(void *path)
     return 0;
 }
 
+#define PATTERN_STACK (64 * 1024)
+
+static long raw_open_root(void)
+{
+    register long x0 __asm__("x0") = AT_FDCWD;
+    register long x1 __asm__("x1") = (long)"/";
+    register long x2 __asm__("x2") = O_RDONLY | O_DIRECTORY;
+    register long x3 __asm__("x3") = 0;
+    register long x8 __asm__("x8") = SYS_openat;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory");
+    return x0;
+}
+
+/* clone(CLONE_VM|CLONE_VFORK|SIGCHLD, no stack); the child execs path. */
+static long raw_vfork_exec(const char *path, char *const *argv)
+{
+    register long x0 __asm__("x0") = 0x4111;
+    register long x1 __asm__("x1") = 0;
+    register long x2 __asm__("x2") = 0, x3 __asm__("x3") = 0, x4 __asm__("x4") = 0;
+    register long x8 __asm__("x8") = SYS_clone;
+    register long x19 __asm__("x19") = (long)path;
+    register long x20 __asm__("x20") = (long)argv;
+    __asm__ volatile("svc #0\n cbnz x0, 1f\n"
+                     "mov x0, x19\n mov x1, x20\n mov x2, #0\n mov x8, #221\n svc #0\n"
+                     "mov x0, #99\n mov x8, #93\n svc #0\n"
+                     "1:\n"
+                     : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8), "r"(x19), "r"(x20)
+                     : "memory");
+    return x0;
+}
+
+/* How far below the SP of its caller fn wrote: the region below that SP is
+ * refilled with the pattern first, by a loop that itself uses no stack
+ * (the thread's start, in libc, goes deeper than any call made here). */
+static unsigned char *pattern_base;
+static long measured;
+#define MEASURE(call)                                                                  \
+    do {                                                                               \
+        unsigned long sp;                                                              \
+        __asm__ volatile("mov %0, sp" : "=r"(sp));                                     \
+        for (volatile unsigned char *q = pattern_base; q < (unsigned char *)sp - 16; q++) \
+            *q = 0xa5;                                                                 \
+        call;                                                                          \
+        unsigned char *q = pattern_base;                                               \
+        while (q < (unsigned char *)sp && *q == 0xa5)                                  \
+            q++;                                                                       \
+        measured = (long)(sp - (unsigned long)q);                                      \
+    } while (0)
+
+static void *open_thread(void *unused)
+{
+    (void)unused;
+    long fd = 0;
+    MEASURE(fd = raw_open_root());
+    if (fd >= 0)
+        close((int)fd);
+    return (void *)(long)(fd >= 0);
+}
+
+static void *vfork_thread(void *unused)
+{
+    (void)unused;
+    static char *const args[] = {"probe", "exit", 0};
+    long pid = 0;
+    MEASURE(pid = raw_vfork_exec("/probe", args));
+    int status = 0;
+    return (void *)(long)(pid > 0 && waitpid((pid_t)pid, &status, 0) == pid &&
+                          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+/* Bytes below the call site's SP the call used; -1 on failure. */
+static long depth_of(void *(*fn)(void *))
+{
+    pattern_base = mmap(0, PATTERN_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstack(&attr, pattern_base, PATTERN_STACK);
+    pthread_t t;
+    void *ok = 0;
+    if (pthread_create(&t, &attr, fn, 0) || pthread_join(t, &ok) || !ok)
+        return -1;
+    munmap(pattern_base, PATTERN_STACK);
+    return measured;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "exit"))
+        return 0;
+    if (argc == 2 && !strcmp(argv[1], "vfork")) {
+        printf("open %ld vfork %ld\n", depth_of(open_thread), depth_of(vfork_thread));
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "clone")) {
         char *stack = malloc(65536);
         unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;

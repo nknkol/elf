@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef ELF_GUARDED_H
 #define ELF_GUARDED_H
+/* FDs one guarded process holds at most (ENOSPC beyond, in-flight
+ * creations included). */
+#define FD_RUNTIME_CAPACITY 4096
 /* Private fork/bounded vfork FD experiment with optional path/FD mutation guards
  * and read/visibility guard; NOT a complete filesystem isolation mode. */
 #include <stddef.h>

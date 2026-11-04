@@ -73,14 +73,14 @@ void _start(void)
     close_received(&m[0],0);
     CHECK(call(__NR_fcntl,pair[1],F_SETFL,O_NONBLOCK,0)==0);
     /* Reserve the whole vector before consuming either message. */
-    long filler[122];for(int i=0;i<122;i++) { filler[i]=call(__NR_dup,source,0,0,0);CHECK(filler[i]>=0); }
+    static long filler[FD_RUNTIME_CAPACITY-6];for(int i=0;i<FD_RUNTIME_CAPACITY-6;i++) { filler[i]=call(__NR_dup,source,0,0,0);CHECK(filler[i]>=0); }
     reset(m,controls,io);send_rights(pair[0],source);send_rights(pair[0],source);
-    CHECK(batch(pair[1],m,2,MSG_DONTWAIT,0)==-ENOSPC && query(0,0)==125);
+    CHECK(batch(pair[1],m,2,MSG_DONTWAIT,0)==-ENOSPC && query(0,0)==FD_RUNTIME_CAPACITY-3);
     CHECK(m[0].msg_len==777 && m[1].msg_len==777);
-    CHECK(call(__NR_close,filler[121],0,0,0)==0);
-    CHECK(batch(pair[1],m,2,MSG_DONTWAIT,0)==2 && query(0,0)==128);
+    CHECK(call(__NR_close,filler[FD_RUNTIME_CAPACITY-7],0,0,0)==0);
+    CHECK(batch(pair[1],m,2,MSG_DONTWAIT,0)==2 && query(0,0)==FD_RUNTIME_CAPACITY);
     close_received(&m[0],0);close_received(&m[1],0);
-    for(int i=0;i<121;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+    for(int i=0;i<FD_RUNTIME_CAPACITY-7;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
     /* Failure publishing the second message keeps the first and closes suffix. */
     long page=call(__NR_mmap,0,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS);CHECK(page>0);
     *(struct timespec *)page=(struct timespec){0};

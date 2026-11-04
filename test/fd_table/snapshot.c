@@ -77,7 +77,7 @@ static void format_checks(void)
     }
     struct fd_record one[1];struct fd_table small;
     assert(fd_table_init(&small,one,1)==0);
-    assert(fd_snapshot_import(&small,data,bytes)==-ENOSPC && small.serial==0 && one[0].fd==-1);
+    assert(fd_snapshot_import(&small,data,bytes)==-ENOSPC && small.serial==0 && small.used==0);
     fd_table_range(&t,0,UINT_MAX,0);
     assert(fd_snapshot_export(&t,data,512-1,&written)==0 && written==32);
     assert(fd_table_init(&out,outslots,8)==0);

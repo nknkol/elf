@@ -66,16 +66,16 @@ void _start(void)
         }
     }
     send_rights(pair[0],source);
-    long filler[125];for(int i=0;i<125;i++) { filler[i]=call(__NR_dup,source,0,0,0);CHECK(filler[i]>=0); }
+    static long filler[FD_RUNTIME_CAPACITY-3];for(int i=0;i<FD_RUNTIME_CAPACITY-3;i++) { filler[i]=call(__NR_dup,source,0,0,0);CHECK(filler[i]>=0); }
     m.msg_controllen=sizeof(buffer);
-    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==-ENOSPC && query(0,0)==128);
-    CHECK(call(__NR_close,filler[124],0,0,0)==0);
-    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==-ENOSPC && query(0,0)==127);
-    CHECK(call(__NR_close,filler[123],0,0,0)==0);
-    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==1 && query(0,0)==128);
+    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==-ENOSPC && query(0,0)==FD_RUNTIME_CAPACITY);
+    CHECK(call(__NR_close,filler[FD_RUNTIME_CAPACITY-4],0,0,0)==0);
+    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==-ENOSPC && query(0,0)==FD_RUNTIME_CAPACITY-1);
+    CHECK(call(__NR_close,filler[FD_RUNTIME_CAPACITY-5],0,0,0)==0);
+    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==1 && query(0,0)==FD_RUNTIME_CAPACITY);
     int *fds=(void *)CMSG_DATA((struct cmsghdr *)buffer.data);
     CHECK(call(__NR_close,fds[0],0,0,0)==0 && call(__NR_close,fds[1],0,0,0)==0);
-    for(int i=0;i<123;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+    for(int i=0;i<FD_RUNTIME_CAPACITY-5;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
     /* Read-only output control buffer: receipt must roll back installed FDs. */
     long page=call(__NR_mmap,0,4096,PROT_READ,MAP_PRIVATE|MAP_ANONYMOUS);CHECK(page>0);
     long next=call(__NR_dup,source,0,0,0);CHECK(next>=0 && call(__NR_close,next,0,0,0)==0);
@@ -93,11 +93,11 @@ void _start(void)
     after=call(__NR_dup,source,0,0,0);CHECK(after==next);
     CHECK(call(__NR_close,after,0,0,0)==0 && call(__NR_munmap,page,4096,0,0)==0);
     /* No-control data receive needs no record slots even when the table is full. */
-    for(int i=0;i<125;i++) { filler[i]=call(__NR_dup,source,0,0,0);CHECK(filler[i]>=0); }
+    for(int i=0;i<FD_RUNTIME_CAPACITY-3;i++) { filler[i]=call(__NR_dup,source,0,0,0);CHECK(filler[i]>=0); }
     data='N';CHECK(call(__NR_write,pair[0],(long)&data,1,0)==1);
     m.msg_control=0;m.msg_controllen=0;
-    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==1 && data=='N' && query(0,0)==128);
-    for(int i=0;i<125;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
+    CHECK(call(__NR_recvmsg,pair[1],(long)&m,0,0)==1 && data=='N' && query(0,0)==FD_RUNTIME_CAPACITY);
+    for(int i=0;i<FD_RUNTIME_CAPACITY-3;i++)CHECK(call(__NR_close,filler[i],0,0,0)==0);
     CHECK(call(__NR_close,source,0,0,0)==0);
     CHECK(call(__NR_close,pair[0],0,0,0)==0 && call(__NR_close,pair[1],0,0,0)==0 && query(0,0)==0);
     static const char pass[]="PASS: runtime FD SCM_RIGHTS receive, peek, truncation, capacity and EFAULT rollback\n";

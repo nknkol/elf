@@ -20,7 +20,7 @@ int fd_snapshot_size(const struct fd_table *t, size_t *bytes)
 {
     if (!bytes) return -EINVAL;
     size_t size = FD_SNAPSHOT_HEADER_BYTES;
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->used; i++) {
         if (t->slots[i].fd < 0 || t->slots[i].cloexec) continue;
         if (size > SIZE_MAX - FD_SNAPSHOT_ENTRY_BYTES) return -EOVERFLOW;
         size += FD_SNAPSHOT_ENTRY_BYTES;
@@ -43,7 +43,7 @@ int fd_snapshot_export(const struct fd_table *t, void *buffer, size_t capacity,
     put_word(p + 16, t->serial);
     put_word(p + 24, (size - FD_SNAPSHOT_HEADER_BYTES) / FD_SNAPSHOT_ENTRY_BYTES);
     p += FD_SNAPSHOT_HEADER_BYTES;
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->used; i++) {
         const struct fd_record *r = &t->slots[i];
         if (r->fd < 0 || r->cloexec) continue;
         put_word(p, (unsigned)r->fd);
@@ -62,7 +62,7 @@ int fd_snapshot_import(struct fd_table *t, const void *buffer, size_t bytes)
 {
     if (!buffer || bytes < FD_SNAPSHOT_HEADER_BYTES) return -EINVAL;
     if (t->serial) return -EBUSY;
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->used; i++)
         if (t->slots[i].fd >= 0) return -EBUSY;
     const unsigned char *p = buffer;
     if (get_word(p) != SNAPSHOT_MAGIC || get_word(p + 8) != SNAPSHOT_VERSION)
@@ -105,6 +105,7 @@ int fd_snapshot_import(struct fd_table *t, const void *buffer, size_t bytes)
             .origin = {get_word(r + 32), (enum fd_access)get_word(r + 40)}
         };
     }
+    t->used = (size_t)count;
     t->serial = serial;
     return 0;
 }

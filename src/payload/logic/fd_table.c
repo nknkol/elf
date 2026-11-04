@@ -5,15 +5,23 @@
 int fd_table_init(struct fd_table *t, struct fd_record *slots, size_t capacity)
 {
     if (!t || !slots || !capacity) return -EINVAL;
-    *t = (struct fd_table){slots, capacity, 0};
-    for (size_t i = 0; i < capacity; i++) slots[i] = (struct fd_record){.fd = -1};
+    *t = (struct fd_table){slots, capacity, 0, 0};
     return 0;
 }
+
+size_t fd_table_live(const struct fd_table *t)
+{
+    size_t live = 0;
+    for (size_t i = 0; i < t->used; i++) live += t->slots[i].fd >= 0;
+    return live;
+}
+
+size_t fd_table_free(const struct fd_table *t) { return t->capacity - fd_table_live(t); }
 
 const struct fd_record *fd_table_get(const struct fd_table *t, int fd)
 {
     if (fd < 0) return NULL;
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->used; i++)
         if (t->slots[i].fd == fd) return &t->slots[i];
     return NULL;
 }
@@ -21,9 +29,13 @@ const struct fd_record *fd_table_get(const struct fd_table *t, int fd)
 static struct fd_record *destination(struct fd_table *t, int fd)
 {
     struct fd_record *empty = NULL;
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->used; i++) {
         if (t->slots[i].fd == fd) return &t->slots[i];
         if (t->slots[i].fd < 0 && !empty) empty = &t->slots[i];
+    }
+    if (!empty && t->used < t->capacity) {
+        empty = &t->slots[t->used++];
+        *empty = (struct fd_record){.fd = -1};
     }
     return empty;
 }
@@ -58,7 +70,7 @@ int fd_table_open_pipe_writer(struct fd_table *t, int fd, int cloexec)
 int fd_table_grant_stream(struct fd_table *t, int fd)
 {
     if (fd < 0) return -EINVAL;
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->used; i++)
         if (t->slots[i].fd == fd) { t->slots[i].stream_reader = 1; return 0; }
     return -ENOENT;
 }
@@ -66,7 +78,7 @@ int fd_table_grant_stream(struct fd_table *t, int fd)
 int fd_table_grant_passed(struct fd_table *t, int fd)
 {
     if (fd < 0) return -EINVAL;
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->used; i++)
         if (t->slots[i].fd == fd) { t->slots[i].passed = 1; return 0; }
     return -ENOENT;
 }
@@ -74,7 +86,7 @@ int fd_table_grant_passed(struct fd_table *t, int fd)
 int fd_table_grant_local_writer(struct fd_table *t, int fd)
 {
     if (fd < 0) return -EINVAL;
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->used; i++)
         if (t->slots[i].fd == fd) { t->slots[i].local_writer = 1; return 0; }
     return -ENOENT;
 }
@@ -112,14 +124,14 @@ int fd_table_set_cloexec(struct fd_table *t, int fd, int cloexec)
 void fd_table_close(struct fd_table *t, int fd)
 {
     if (fd < 0) return;
-    for (size_t i = 0; i < t->capacity; i++)
+    for (size_t i = 0; i < t->used; i++)
         if (t->slots[i].fd == fd) t->slots[i] = (struct fd_record){.fd = -1};
 }
 
 int fd_table_close_generation(struct fd_table *t, int fd, uint64_t generation)
 {
     if (!t || fd < 0) return -EINVAL;
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->used; i++) {
         struct fd_record *slot = &t->slots[i];
         if (slot->fd != fd) continue;
         if (!generation || slot->generation != generation) return -ESTALE;
@@ -132,7 +144,7 @@ int fd_table_close_generation(struct fd_table *t, int fd, uint64_t generation)
 int fd_table_range(struct fd_table *t, unsigned first, unsigned last, int cloexec)
 {
     if (first > last || (cloexec != 0 && cloexec != 1)) return -EINVAL;
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->used; i++) {
         struct fd_record *slot = &t->slots[i];
         if (slot->fd < 0 || (unsigned)slot->fd < first || (unsigned)slot->fd > last) continue;
         if (cloexec) slot->cloexec = 1;
@@ -143,7 +155,7 @@ int fd_table_range(struct fd_table *t, unsigned first, unsigned last, int cloexe
 
 void fd_table_exec(struct fd_table *t)
 {
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->used; i++) {
         if (t->slots[i].fd >= 0 && t->slots[i].cloexec)
             t->slots[i] = (struct fd_record){.fd = -1};
         else t->slots[i].pipe_writer = t->slots[i].stream_reader = t->slots[i].local_writer =
@@ -154,16 +166,14 @@ void fd_table_exec(struct fd_table *t)
 int fd_table_copy(struct fd_table *dst, const struct fd_table *src)
 {
     if (dst == src) return -EINVAL;
-    for (size_t i = 0; i < dst->capacity; i++)
-        if (dst->slots[i].fd >= 0) return -EBUSY;
-    size_t count = 0;
-    for (size_t i = 0; i < src->capacity; i++) count += src->slots[i].fd >= 0;
-    if (count > dst->capacity) return -ENOSPC;
+    if (fd_table_live(dst)) return -EBUSY;
+    if (fd_table_live(src) > dst->capacity) return -ENOSPC;
     /* Never reuse generations from a previously used destination table. */
     if (dst->serial) return -EBUSY;
-    count = 0;
-    for (size_t i = 0; i < src->capacity; i++)
+    size_t count = 0;
+    for (size_t i = 0; i < src->used; i++)
         if (src->slots[i].fd >= 0) dst->slots[count++] = src->slots[i];
+    dst->used = count;
     dst->serial = src->serial;
     return 0;
 }

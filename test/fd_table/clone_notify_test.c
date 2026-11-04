@@ -52,6 +52,10 @@ long raw_syscall(long n,long a,long b,long c,long d,long e,long f)
     if(r!=-1 && n==SYS_munmap)__atomic_add_fetch(&stats->unmaps,1,__ATOMIC_RELAXED);
     return r==-1?-errno:r;
 }
+/* clone_entry.S runs the callbacks on a payload stack; none here: they
+ * stay on the current one (payload_stack.c maps its own, counted above). */
+void *payload_stack_claim(void) { return 0; }
+void payload_stack_release(void *top) { (void)top; }
 static void clobber(void)
 {
     __asm__ volatile("msr fpcr, xzr\nmsr fpsr, xzr\nmovi v0.16b, #0\nmovi v31.16b, #0"

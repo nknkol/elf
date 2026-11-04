@@ -42,7 +42,7 @@ static int reserve(struct fd_table *table,size_t bound,const struct fd_receive_s
 {
     sync->lock(sync->context);
     size_t available=0;
-    for(size_t i=0;i<table->capacity;i++)available+=table->slots[i].fd<0;
+    available=fd_table_free(table);
     available=available>*sync->reserved?available-*sync->reserved:0;
     int rc=bound>RECEIVE_MAX || bound>available?-ENOSPC:
         bound>UINT64_MAX-table->serial?-EOVERFLOW:0;

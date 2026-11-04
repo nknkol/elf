@@ -53,6 +53,7 @@ check: build
 	$(PYTHON) test/proot/test_caps.py
 	$(PYTHON) test/proot/test_go_abi.py
 	$(PYTHON) test/proot/test_many_blocked.py
+	$(PYTHON) test/proot/test_go.py
 	$(PYTHON) test/proot/test_auxv.py
 	$(PYTHON) test/proot/test_jit.py
 	$(PYTHON) test/syscalls/check_dispatch.py
@@ -85,6 +86,7 @@ check-isolation: build
 	$(PYTHON) test/isolation/lazy_nested.py
 	$(PYTHON) test/isolation/pass_fd.py
 	$(PYTHON) test/isolation/lazy_parity.py
+	$(PYTHON) test/isolation/broker_stdio.py
 check-guarded: build
 	$(PYTHON) test/fs_policy/transport.py
 	$(PYTHON) test/fs_policy/path_mutations.py

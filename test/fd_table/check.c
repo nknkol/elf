@@ -51,7 +51,7 @@ static void model_checks(void)
     assert(fd_table_set_cloexec(&t, 7, 1) == -ENOSPC);
     assert(!memcmp(before, slots, sizeof(slots)) && t.serial == serial);
     assert(fd_table_copy(&small, &t) == -ENOSPC);
-    assert(small.serial == 0 && small_slots[0].fd == -1);
+    assert(small.serial == 0 && small.used == 0 && !fd_table_get(&small, 3));
     assert(fd_table_copy(&copy, &t) == 0);
     fd_table_close(&copy, 3);
     assert(fd_table_get(&t, 3) && !fd_table_get(&copy, 3));

@@ -10,7 +10,11 @@ Expected, both builds, plain and with --isolate:
   there (the stubs keep STUB_RED_ZONE bytes below SP);
 - x28: a signal arriving while a thread is blocked in a call the payload
   translates (openat of a FIFO) finds the guest's x28 in its handler (Go's
-  handler takes its g from x28; the payload never uses the register)."""
+  handler takes its g from x28; the payload never uses the register);
+- vfork: a clone with CLONE_VM|CLONE_VFORK and no new stack (Go's os/exec,
+  from a goroutine), parent and child on one stack, uses at most 128 bytes
+  more of it than an ordinary intercepted call (the clone path's C calls
+  run on a payload stack, as every other call's)."""
 import subprocess
 import sys
 import tempfile
@@ -38,5 +42,9 @@ with tempfile.TemporaryDirectory(prefix='go-abi-', dir=lib.mode_capable()) as tm
             got = run('x28', '/fifo')
             assert got == 'x28 kept', (what, got)
             (root / 'fifo').unlink()
+            got = run('vfork').split()
+            assert got[0] == 'open' and got[2] == 'vfork' and int(got[1]) > 0 and \
+                0 < int(got[3]) <= int(got[1]) + 128, (what, got)
             print('PASS: Go runtime ABI (data below a clone child\'s stack kept across its first call;'
-                  ' x28 kept for a signal handler while blocked in the payload):', *what)
+                  ' x28 kept for a signal handler while blocked in the payload; vfork on the caller\'s stack'
+                  f' {got[3]} bytes, an openat {got[1]}):', *what)

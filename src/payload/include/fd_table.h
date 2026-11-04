@@ -24,12 +24,19 @@ struct fd_record {
     int local_writer;          /* Local socket/eventfd/memfd output grant; same lifetime. */
     int passed;                /* --pass-fd object (fd_runtime admits it each start); same lifetime. */
 };
+/* Slots at and beyond `used` were never assigned and are not read: the
+ * storage of a large capacity is touched only as far as FDs were held at
+ * once, and every lookup scans that far, not the capacity. */
 struct fd_table {
     struct fd_record *slots;
     size_t capacity;
     uint64_t serial;
+    size_t used;
 };
 int fd_table_init(struct fd_table *, struct fd_record *, size_t);
+/* Records in use, and the room left (capacity minus those). */
+size_t fd_table_live(const struct fd_table *);
+size_t fd_table_free(const struct fd_table *);
 const struct fd_record *fd_table_get(const struct fd_table *, int fd);
 /* Successful open/adoption. Distinct opens have distinct descriptions even
  * when host inode and mount match. All errors leave the table unchanged. */

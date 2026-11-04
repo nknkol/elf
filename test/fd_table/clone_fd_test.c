@@ -110,6 +110,9 @@ static void run(unsigned long flags,int share,int child_first,void *stack)
     assert(child_table()==NULL);
     assert(parent_table()!=NULL); /* shared table survives child retirement */
 }
+/* clone_entry.S runs the callbacks on a payload stack; none here. */
+void *payload_stack_claim(void) { return 0; }
+void payload_stack_release(void *top) { (void)top; }
 int main(void)
 {
     s=mmap(NULL,sizeof(*s),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
@@ -132,7 +135,7 @@ int main(void)
     assert(fd_table_open(parent_table(),100,(struct fd_origin){1,FD_ACCESS_RW},0)==0);
     assert(fd_table_open(parent_table(),101,(struct fd_origin){2,FD_ACCESS_RO},1)==0);
     assert(fd_clone_prepare(&bad,parent_table(),&tiny,FD_CLONE_COPY)==-ENOSPC);
-    assert(bad.table==NULL && tiny.serial==0 && small[0].fd==-1);
+    assert(bad.table==NULL && tiny.serial==0 && tiny.used==0);
     s->cleaned=0;s->reject=1;
     assert(notify_clone(SIGCHLD,(char*)stack+65536)==-EACCES && s->cleaned==1);
     s->cleaned=0;s->reject=0;
